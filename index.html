@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Realistic City Simulation</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e13; }
+      #app { position: fixed; inset: 0; }
+      #hud {
+        position: fixed; top: 8px; left: 8px; z-index: 10;
+        font: 12px/1.4 ui-monospace, monospace; color: #b7c7dd;
+        background: rgba(10,14,20,.6); padding: 8px 10px; border-radius: 6px;
+        white-space: pre; pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud">booting…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
