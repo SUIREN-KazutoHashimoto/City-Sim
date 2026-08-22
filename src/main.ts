@@ -96,8 +96,8 @@ function frame(now: number): void {
       `agents ${st.agents}  buildings ${st.buildings}\n` +
       `road nodes ${st.nodes}  POIs ${st.pois}\n` +
       `urban threshold ${world.city.urbanThreshold.toFixed(3)}\n` +
-      `speed ${controller.moveSpeed.toFixed(0)} m/s  ${controller.isLocked ? '● locked' : '○ click to look'}\n` +
-      `[WASD=move  mouse=look  Shift=sprint  Space/C=up/down  wheel=speed]`;
+      `speed ${controller.moveSpeed.toFixed(0)} m/s  ${controller.isDragging ? '● looking' : '○ hold LMB to look'}\n` +
+      `[WASD=move  Q/E=up/down  LShift=sprint  LMB+drag=look  wheel=speed]`;
   }
   requestAnimationFrame(frame);
 }
