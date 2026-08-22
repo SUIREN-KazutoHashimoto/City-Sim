@@ -8,8 +8,8 @@ import * as THREE from 'three';
  *
  *  操作:
  *    左クリック+移動  視点回転(ドラッグ式。ポインターロックは使わない)
- *    W / A / S / D    前後左右
- *    Q / E            上昇 / 下降
+ *    W / A / S / D    カメラローカル基準の前後左右(pitch込みで視線方向へ飛ぶ)
+ *    Q / E            上昇 / 下降(ワールド垂直・高度調整用に固定)
  *    Left Shift       加速(ダッシュ)
  *
  * 挙動は毎フレーム update(dt) を呼ぶだけ。シミュレーション本体とは独立。
@@ -85,25 +85,27 @@ export class FirstPersonController {
 
   /** 毎フレーム呼ぶ。dt は実時間秒。 */
   update(dt: number): void {
-    // 視線から水平移動基底を作る(pitchは無視して地面と平行に進む)
-    this.forward.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)).multiplyScalar(-1);
-    this.right.set(this.forward.z, 0, -this.forward.x); // forwardを-90度回転
+    // カメラのローカル基底を現在の姿勢(quaternion)から直接取り出す。
+    //   ローカル前方 = -Z, ローカル右 = +X。pitch も反映されるため、
+    //   視線を上/下に向けたまま W を押すと、その視線方向へ飛ぶ(カメラローカル基準)。
+    this.forward.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    this.right.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
 
     let mx = 0, mz = 0, my = 0;
     if (this.keys.has('KeyW')) mz += 1;
     if (this.keys.has('KeyS')) mz -= 1;
     if (this.keys.has('KeyD')) mx += 1;
     if (this.keys.has('KeyA')) mx -= 1;
-    if (this.keys.has('KeyQ')) my += 1; // 上昇
+    if (this.keys.has('KeyQ')) my += 1; // 上昇(ワールド垂直・高度調整用に固定)
     if (this.keys.has('KeyE')) my -= 1; // 下降
 
     const sprint = this.keys.has('ShiftLeft');
     const speed = this.moveSpeed * (sprint ? this.sprintMultiplier : 1) * dt;
 
     const pos = this.camera.position;
-    pos.addScaledVector(this.forward, mz * speed);
-    pos.addScaledVector(this.right, mx * speed);
-    pos.y += my * speed;
+    pos.addScaledVector(this.forward, mz * speed); // 視線前方(pitch込み)
+    pos.addScaledVector(this.right, mx * speed);   // 視線右方
+    pos.y += my * speed;                            // Q/E はワールド垂直
     // 地面へめり込まない最低目線高さ
     if (pos.y < 1.7) pos.y = 1.7;
   }
