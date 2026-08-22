@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { World } from './world/World';
 import { InstancedRenderer } from './rendering/InstancedRenderer';
+import { FirstPersonController } from './rendering/FirstPersonController';
 
 /**
  * エントリポイント: three.js のセットアップ + 固定ステップのシミュレーションループ。
@@ -33,8 +34,7 @@ scene.background = new THREE.Color(0x9fb4cc);
 scene.fog = new THREE.Fog(0x9fb4cc, 800, 3000);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 8000);
-camera.position.set(SIZE / 2, 350, SIZE / 2 + 400);
-camera.lookAt(SIZE / 2, 0, SIZE / 2);
+camera.position.set(SIZE / 2, 1.7, SIZE / 2);
 
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(600, 1200, 400);
@@ -51,20 +51,13 @@ const gfx = new InstancedRenderer(scene);
 gfx.buildStatic(world.city.buildings, world.city.net);
 gfx.buildAgents(world.store.capacity);
 
-// --- 簡易オービットカメラ操作(マウスドラッグ + ホイール) ---
-let dragging = false, px = 0, py = 0;
-let yaw = 0, pitch = 0.9, radius = 700;
-const target = new THREE.Vector3(SIZE / 2, 0, SIZE / 2);
-renderer.domElement.addEventListener('pointerdown', (e) => { dragging = true; px = e.clientX; py = e.clientY; });
-window.addEventListener('pointerup', () => (dragging = false));
-window.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
-  yaw -= (e.clientX - px) * 0.005;
-  pitch = THREE.MathUtils.clamp(pitch - (e.clientY - py) * 0.005, 0.2, 1.45);
-  px = e.clientX; py = e.clientY;
-});
+// --- 一人称カメラ操作(Pointer Lock + WASD) ---
+const controller = new FirstPersonController(camera, renderer.domElement);
+controller.setPosition(SIZE / 2, 1.7, SIZE / 2); // 街の中心・目線高さから開始
+// マウスホイールで移動速度を調整(街の探索と細部観察を両立)
 renderer.domElement.addEventListener('wheel', (e) => {
-  radius = THREE.MathUtils.clamp(radius * (1 + Math.sign(e.deltaY) * 0.1), 60, 3000);
+  const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400);
 });
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -91,13 +84,8 @@ function frame(now: number): void {
   // 描画同期
   gfx.syncAgents(world.store);
 
-  // カメラ更新
-  camera.position.set(
-    target.x + radius * Math.sin(yaw) * Math.sin(pitch),
-    target.y + radius * Math.cos(pitch),
-    target.z + radius * Math.cos(yaw) * Math.sin(pitch),
-  );
-  camera.lookAt(target);
+  // カメラ更新(一人称)
+  controller.update(dt);
 
   renderer.render(scene, camera);
 
@@ -108,7 +96,8 @@ function frame(now: number): void {
       `agents ${st.agents}  buildings ${st.buildings}\n` +
       `road nodes ${st.nodes}  POIs ${st.pois}\n` +
       `urban threshold ${world.city.urbanThreshold.toFixed(3)}\n` +
-      `[drag=rotate  wheel=zoom]`;
+      `speed ${controller.moveSpeed.toFixed(0)} m/s  ${controller.isLocked ? '● locked' : '○ click to look'}\n` +
+      `[WASD=move  mouse=look  Shift=sprint  Space/C=up/down  wheel=speed]`;
   }
   requestAnimationFrame(frame);
 }
