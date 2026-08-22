@@ -4,6 +4,7 @@ import { EnhancedRenderer } from './rendering/EnhancedRenderer';
 import { FirstPersonController } from './rendering/FirstPersonController';
 import { Inspector } from './rendering/Inspector';
 import { Dashboard } from './rendering/Dashboard';
+import { PerformanceMonitor, type RenderProfileSample } from './rendering/PerformanceMonitor';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
 
 async function bootstrap(): Promise<void> {
@@ -74,6 +75,7 @@ async function bootstrap(): Promise<void> {
 
   const inspector = new Inspector(world, gfx, camera, renderer.domElement);
   const dashboard = new Dashboard(world, world.clock);
+  const performanceMonitor = new PerformanceMonitor(world, renderer);
   let paused = false;
   window.addEventListener('keydown', (e) => { if (e.code === 'Tab') { e.preventDefault(); paused = !paused; } if (e.code === 'Space') e.preventDefault(); });
 
@@ -105,11 +107,13 @@ async function bootstrap(): Promise<void> {
     simBusy = true; const start = performance.now();
     try {
       await world.stepBatchAsync(world.clock.stepDt, steps);
+      simMs = performance.now() - start;
       dashboard.sample();
     } catch (err) {
+      simMs = performance.now() - start;
       console.error('[City-Sim] simulation batch failed', err);
     } finally {
-      simMs = performance.now() - start; simBusy = false;
+      simBusy = false;
       if (!paused && pendingReal > 0.001) setTimeout(() => { void runSimulationBatch(); }, 0);
     }
   }
@@ -119,21 +123,26 @@ async function bootstrap(): Promise<void> {
     const dt = (now - prev) / 1000; prev = now; fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
     if (!paused) { pendingReal = Math.min(0.5, pendingReal + Math.min(dt, 0.1)); void runSimulationBatch(); }
 
-    gfx.updateLod(camera.position);
-    gfx.syncAgents(world.store, world.clock.totalSeconds, camera.position);
-    gfx.syncVehicles(world.vehicles, world.clock.hourF, now / 1000, camera.position);
-    gfx.syncSignals(world.signals);
-    updateEnvironment();
-    gfx.updateNightLighting(world.clock.hourF, camera.position, world.vehicles);
-
     controller.setFollowTarget(inspector.getFollowPosition()); controller.update(dt); inspector.update(); dashboard.draw();
-    renderer.render(scene, camera);
+
+    const renderStarted = performance.now();
+    let mark = renderStarted;
+    gfx.updateLod(camera.position); const lodMs = performance.now() - mark;
+    mark = performance.now(); gfx.syncAgents(world.store, world.clock.totalSeconds, camera.position); const agentsMs = performance.now() - mark;
+    mark = performance.now(); gfx.syncVehicles(world.vehicles, world.clock.hourF, now / 1000, camera.position); const vehiclesMs = performance.now() - mark;
+    mark = performance.now(); gfx.syncSignals(world.signals); const signalsMs = performance.now() - mark;
+    mark = performance.now(); updateEnvironment(); gfx.updateNightLighting(world.clock.hourF, camera.position, world.vehicles); const lightingMs = performance.now() - mark;
+    performanceMonitor.beginGpu(); mark = performance.now(); renderer.render(scene, camera); const webglMs = performance.now() - mark; performanceMonitor.endGpu();
+    const renderProfile: RenderProfileSample = { totalMs: performance.now() - renderStarted, lodMs, agentsMs, vehiclesMs, signalsMs, lightingMs, webglMs };
+    const lod = gfx.getLodStats();
+    performanceMonitor.update(now, dt * 1000, fps, renderProfile, lod, pendingReal, simBusy);
+
     const c = world.clock; const hh = String(c.hour).padStart(2, '0'), mm = String(c.minute).padStart(2, '0'), ss = String(c.second).padStart(2, '0');
     clockEl.innerHTML = `<span class="icon">${clockIcon(c.hour)}</span><span>${hh}:${mm}<span style="font-size:13px;opacity:.7">:${ss}</span></span><span class="day">DAY ${c.day}</span>${paused ? '<span class="day">⏸ PAUSED</span>' : ''}`;
     if (now - lastStats > 250) {
-      lastStats = now; const dv = world.stats(), lod = gfx.getLodStats();
+      lastStats = now; const dv = world.stats();
       const threadText = world.simulationWorkerCount > 0 ? `${world.simulationWorkerCount} workers/SAB` : 'single-thread fallback';
-      hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${controller.isFollowing ? `追跡中 dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  release LMB=inspect  MMB=人/車を追跡]`;
+      hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${controller.isFollowing ? `追跡中 dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  release LMB=inspect  MMB=人/車を追跡]`;
     }
     requestAnimationFrame(frame);
   }
