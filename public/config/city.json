@@ -1,0 +1,9 @@
+{
+  "seed": "random",
+  "areaKm2": 100,
+  "urbanRatioTarget": 0.4,
+  "blockSize": 90,
+  "population": 50000,
+  "agentCapacity": 60000,
+  "vehicleCapacity": 30000
+}
