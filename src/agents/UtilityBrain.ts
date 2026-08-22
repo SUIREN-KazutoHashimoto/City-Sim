@@ -43,9 +43,9 @@ const ACTIONS: ActionDef[] = [
     name: 'work', category: POICategory.Work,
     score: (s, i, clock) => {
       if (s.workPOI[i] < 0) return 0;
-      // 平日9-18時に働きたい。ニーズが逼迫していれば仕事より生存を優先させたい
-      const inHours = clock.hour >= 9 && clock.hour < 18 ? 0.8 : 0.05;
-      const survivalPressure = Math.max(urgency(s.energy[i]), urgency(s.hunger[i]));
+      // 通勤含め 8-18 時に働きたい。ニーズが逼迫していれば生存を優先。
+      const inHours = clock.hour >= 8 && clock.hour < 18 ? 0.9 : 0.05;
+      const survivalPressure = 0.6 * Math.max(urgency(s.energy[i]), urgency(s.hunger[i]));
       return Math.max(0, inHours - survivalPressure);
     },
   },
@@ -56,6 +56,17 @@ const ACTIONS: ActionDef[] = [
   {
     name: 'recreation', category: POICategory.Leisure,
     score: (s, i) => urgency(s.fun[i]) * 0.7,
+  },
+  {
+    // 既定ルーティン: 特に切迫したニーズが無いときの「居場所」。
+    // 夜は帰宅、それ以外は在宅待機(職に就いていない/勤務時間外の受け皿)。
+    // これにより住居は常時それなりに埋まり、在館人数が自然に反映される。
+    name: 'routine-home', category: POICategory.Home,
+    score: (s, i, clock) => {
+      if (s.homePOI[i] < 0) return 0;
+      const evening = clock.hour >= 19 || clock.hour < 7;
+      return evening ? 0.35 : 0.12; // 夜は強め、日中は弱い受け皿
+    },
   },
 ];
 
@@ -79,7 +90,7 @@ export class UtilityBrain {
     // work/home は固定POIを優先、それ以外は近傍探索。
     let target = -1;
     if (best.name === 'work') target = store.workPOI[i];
-    else if (best.name === 'sleep') target = store.homePOI[i];
+    else if (best.name === 'sleep' || best.name === 'routine-home') target = store.homePOI[i];
     else target = this.poi.findBest(best.category, store.posX[i], store.posZ[i], store.wealth[i]);
 
     if (target < 0) { store.state[i] = AgentState.Idle; return; }

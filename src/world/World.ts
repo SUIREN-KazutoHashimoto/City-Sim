@@ -139,26 +139,65 @@ export class World {
     s.heading[i] = Math.atan2(s.velZ[i], s.velX[i]);
   }
 
-  /** 目的地での活動。関連ニーズを回復し、満たされたら退店して Idle へ。 */
+  /**
+   * 目的地での活動。関連ニーズを回復しつつ、原則その場に「滞在」する。
+   * すぐ退店せず、時刻や別の切迫ニーズに引かれて初めて離れる(=在館人数が安定して残る)。
+   */
   private activity(i: number, dt: number): void {
     const s = this.store;
     const poi = this.city.poi.get(s.goalPOI[i]);
     if (!poi) { s.state[i] = AgentState.Idle; return; }
+    const hour = this.clock.hour;
     const rate = 0.05 * dt; // 活動によるニーズ回復速度
+
+    // ニーズ回復(用途ごと)
     switch (poi.category) {
-      case POICategory.Home:   s.energy[i] = Math.min(1, s.energy[i] + rate * 1.5); break;
-      case POICategory.Food:   s.hunger[i] = Math.min(1, s.hunger[i] + rate * 3); break;
-      case POICategory.Work:   s.wealth[i] = Math.min(1, s.wealth[i] + rate * 0.2); s.energy[i] = Math.max(0, s.energy[i] - rate * 0.2); break;
-      case POICategory.Leisure:s.fun[i] = Math.min(1, s.fun[i] + rate * 2); s.social[i] = Math.min(1, s.social[i] + rate); break;
-      default: s.fun[i] = Math.min(1, s.fun[i] + rate);
+      case POICategory.Home:
+        s.energy[i] = Math.min(1, s.energy[i] + rate * 1.5);
+        s.hygiene[i] = Math.min(1, s.hygiene[i] + rate);
+        break;
+      case POICategory.Food:
+        s.hunger[i] = Math.min(1, s.hunger[i] + rate * 3);
+        break;
+      case POICategory.Work:
+        s.wealth[i] = Math.min(1, s.wealth[i] + rate * 0.2);
+        s.energy[i] = Math.max(0, s.energy[i] - rate * 0.2);
+        s.hunger[i] = Math.max(0, s.hunger[i] - rate * 0.1);
+        break;
+      case POICategory.Leisure:
+        s.fun[i] = Math.min(1, s.fun[i] + rate * 2);
+        s.social[i] = Math.min(1, s.social[i] + rate);
+        break;
+      default:
+        s.fun[i] = Math.min(1, s.fun[i] + rate);
     }
-    // 主目的のニーズが十分回復したら解散
-    const done =
-      (poi.category === POICategory.Home && s.energy[i] > 0.95) ||
-      (poi.category === POICategory.Food && s.hunger[i] > 0.9) ||
-      (poi.category === POICategory.Work && (this.clock.hour >= 18 || s.energy[i] < 0.2)) ||
-      (poi.category === POICategory.Leisure && s.fun[i] > 0.9);
-    if (done) {
+
+    // 退店判定: 「用途に応じた終了条件」または「別の切迫ニーズ」でのみ離れる。
+    // これにより住居は夜間、職場は日中、それぞれ長時間滞在して在館人数が維持される。
+    const starving = s.hunger[i] < 0.25;
+    const exhausted = s.energy[i] < 0.2;
+    const hasWork = s.workPOI[i] >= 0;
+    let leave = false;
+    switch (poi.category) {
+      case POICategory.Home:
+        // 勤務時間(8-18)になり職があれば通勤に出る。空腹/娯楽枯渇でも外出。
+        leave = (hour >= 8 && hour < 18 && hasWork) || starving || s.fun[i] < 0.15;
+        break;
+      case POICategory.Work:
+        // 勤務時間を終えたら退勤。生存ニーズが逼迫すれば早退。
+        leave = hour >= 18 || hour < 8 || exhausted || starving;
+        break;
+      case POICategory.Food:
+        leave = s.hunger[i] > 0.9; // 食事は短時間
+        break;
+      case POICategory.Leisure:
+        leave = s.fun[i] > 0.9 || starving || exhausted;
+        break;
+      default:
+        leave = true;
+    }
+
+    if (leave) {
       poi.occupancy = Math.max(0, poi.occupancy - 1);
       s.goalPOI[i] = -1;
       s.state[i] = AgentState.Idle;

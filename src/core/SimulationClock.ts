@@ -16,20 +16,27 @@ export class SimulationClock {
   /** シミュレーションの固定タイムステップ (秒)。挙動の安定性のため固定。 */
   readonly fixedStep = 1 / 30;
 
+  /** 1フレームに実行する物理サブステップの上限。timeScale による早送りを許容しつつ
+   *  過負荷時の暴走(死のスパイラル)を防ぐための天井。 */
+  maxSubSteps = 120;
+
   /**
    * 実フレーム経過(秒)を渡すと、実行すべき固定ステップ数を返す。
    * 呼び出し側はこの回数だけ world.step(fixedStep) を回す。
    */
   advance(realDeltaSec: number): number {
-    // スパイク時に死のスパイラルへ陥らないよう上限を設ける
-    const scaled = Math.min(realDeltaSec, 0.25) * this.timeScale;
+    // 実フレームのスパイク自体は 0.1s で頭打ち(タブ復帰などの巨大 dt 対策)
+    const scaled = Math.min(realDeltaSec, 0.1) * this.timeScale;
     this._accumulator += scaled;
     let steps = 0;
-    while (this._accumulator >= this.fixedStep && steps < 8) {
+    while (this._accumulator >= this.fixedStep && steps < this.maxSubSteps) {
       this._totalSeconds += this.fixedStep;
       this._accumulator -= this.fixedStep;
       steps++;
     }
+    // サブステップ上限に達して積み残しがある場合は、その分を捨てて
+    // アキュムレータの無限増大(処理落ちの雪だるま)を防ぐ。
+    if (this._accumulator > this.fixedStep) this._accumulator = 0;
     return steps;
   }
 

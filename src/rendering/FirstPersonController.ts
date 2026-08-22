@@ -9,7 +9,7 @@ import * as THREE from 'three';
  *  操作:
  *    左クリック+移動   視点回転(ドラッグ式。ポインターロックは使わない)
  *    W / A / S / D     カメラローカル基準の前後左右(pitch込みで視線方向へ飛ぶ)
- *    Q / Space         上昇 / E / Ctrl 下降(ワールド垂直)
+ *    E / Space         上昇 / Q / Ctrl 下降(ワールド垂直)
  *    Left Shift        加速(ダッシュ)
  *
  *  追跡モード:
@@ -128,9 +128,9 @@ export class FirstPersonController {
     if (this.keys.has('KeyS')) mz -= 1;
     if (this.keys.has('KeyD')) mx += 1;
     if (this.keys.has('KeyA')) mx -= 1;
-    // 上昇: Q または Space / 下降: E または Ctrl(いずれもワールド垂直)
-    if (this.keys.has('KeyQ') || this.keys.has('Space')) my += 1;
-    if (this.keys.has('KeyE') || this.keys.has('ControlLeft') || this.keys.has('ControlRight')) my -= 1;
+    // 上昇: E または Space / 下降: Q または Ctrl(いずれもワールド垂直)
+    if (this.keys.has('KeyE') || this.keys.has('Space')) my += 1;
+    if (this.keys.has('KeyQ') || this.keys.has('ControlLeft') || this.keys.has('ControlRight')) my -= 1;
 
     const sprint = this.keys.has('ShiftLeft');
     const speed = this.moveSpeed * (sprint ? this.sprintMultiplier : 1) * dt;
