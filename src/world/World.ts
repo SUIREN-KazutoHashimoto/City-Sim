@@ -47,7 +47,7 @@ export class World {
   /** この距離(m)以上は車を使う。未満は徒歩。 */
   driveThreshold = 250;
   /** 歩道オフセット(道路中心から横にずらす量, m)。 */
-  private sidewalkOffset = 4.0;
+  private sidewalkOffset = 1.3;
 
   private decideCursor = 0;
 
@@ -250,44 +250,56 @@ export class World {
 
           if (signalized) {
             // ---- 横断歩道へ吸着 ----
-            // 描画と同じ setback を用い、次ノード方向の横断歩道帯に乗せる。
+            // 描画と同じ setback を用いる。接近・退出は歩道オフセット上を歩き、
+            // 信号待ちと横断の判定だけを縁石(near/far)で行う。
             const swEdge = sw.edgeBetween(path[cur], path[cur + 1]);
             const rw = roadWidth(swEdge ? swEdge.roadLanes : 1);
+            const off = rw / 2 + this.sidewalkOffset; // 歩道帯へのオフセット
+            const px = dzz * off, pz = -dxx * off;     // 進行方向の右手側
             const setback = crosswalkSetback(rw);
-            const nearS = setback - CROSSWALK_DEPTH * 0.5 - 0.5; // 手前の縁石(横断前)
+            const nearS = setback - CROSSWALK_DEPTH * 0.5 - 0.5; // 横断前の縁石
             const farS = setback + CROSSWALK_DEPTH * 0.5;        // 渡り切った先
-            const nearX = node.x + dxx * nearS, nearZ = node.z + dzz * nearS;
-            const farX = node.x + dxx * farS, farZ = node.z + dzz * farS;
+            // near/far は「歩道オフセット付き」の点にして、接近中は車道に出さない
+            const nearX = node.x + dxx * nearS + px, nearZ = node.z + dzz * nearS + pz;
+            const farX = node.x + dxx * farS + px, farZ = node.z + dzz * farS + pz;
 
             const axis = sw.axisOf(path[cur], path[cur + 1]);
             const green = this.signals.pedWalk(node.roadNode, axis);
             const dNear = Math.hypot(s.posX[i] - nearX, s.posZ[i] - nearZ);
 
-            if (!green) {
-              // 赤: 横断歩道の手前(縁石)で待機
+            if (!green && dNear < 4) {
+              // 赤 かつ 縁石付近: 横断歩道の手前で待機(まだ遠いなら歩道を接近)
               tx = nearX; tz = nearZ;
-              if (dNear < 2) {
-                s.waiting[i] = 1;
-                s.velX[i] = 0; s.velZ[i] = 0;
-                return;
-              }
-            } else {
-              // 青: 横断歩道を渡って対岸へ。対岸到達で次ノードへ。
-              s.waiting[i] = 0;
-              tx = farX; tz = farZ;
-              const dFar = Math.hypot(s.posX[i] - farX, s.posZ[i] - farZ);
-              if (dFar < 2) {
-                s.pathCursor[i] = cur + 1;
-                if (cur + 1 >= path.length) arriving = true;
-              }
+              s.waiting[i] = 1;
+              s.velX[i] = 0; s.velZ[i] = 0;
+              return;
+            }
+            // 青、または縁石までまだ距離がある: 歩道上を near→far へ進む
+            s.waiting[i] = 0;
+            tx = green ? farX : nearX;
+            tz = green ? farZ : nearZ;
+            const dFar = Math.hypot(s.posX[i] - farX, s.posZ[i] - farZ);
+            if (green && dFar < 3) {
+              s.pathCursor[i] = cur + 1;
+              if (cur + 1 >= path.length) arriving = true;
             }
           } else {
-            // 信号なし/歩道橋/専用道: 従来どおり歩道オフセットで進む
-            const off = node.gradeSeparated ? 0 : this.sidewalkOffset;
-            tx = node.x + dzz * off;
-            tz = node.z + (-dxx) * off;
-            const dNode = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
-            if (dNode < 5) {
+            // 信号なし/歩道橋/専用道: 歩道帯の中央に乗るオフセットで進む。
+            // 歩道は車道幅/2 の外側に描かれるため、オフセットもそれに合わせる
+            // (固定4mでは広い道路で車道上を歩いてしまうため道路幅に連動させる)。
+            let off = 0;
+            if (!node.gradeSeparated) {
+              const swEdge = sw.edgeBetween(path[cur], path[cur + 1]);
+              const rw = roadWidth(swEdge ? swEdge.roadLanes : 1);
+              off = rw / 2 + this.sidewalkOffset; // 車道の外側=歩道帯の中央付近
+            }
+            const wpx = node.x + dzz * off;
+            const wpz = node.z + (-dxx) * off;
+            tx = wpx; tz = wpz;
+            // 到達判定は「オフセット後の歩道ウェイポイント」への距離で行う
+            // (ノード中心基準にするとオフセット分だけ届かず前進できないため)。
+            const dWp = Math.hypot(s.posX[i] - wpx, s.posZ[i] - wpz);
+            if (dWp < 3) {
               s.waiting[i] = 0;
               s.pathCursor[i] = cur + 1;
               if (cur + 1 >= path.length) arriving = true;

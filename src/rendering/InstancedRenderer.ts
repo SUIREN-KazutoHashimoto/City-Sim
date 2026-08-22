@@ -17,6 +17,11 @@ export class InstancedRenderer {
   private pedSignalMesh!: THREE.InstancedMesh;  // 歩行者信号灯
   private dummy = new THREE.Object3D();
 
+  // 描画インスタンス→実体indexの逆引き(コンパクト描画のためピッキングに必要)。
+  // syncAgents/syncVehicles で毎フレーム再構築する。
+  private agentInstanceToIndex: Int32Array = new Int32Array(0);
+  private vehicleInstanceToIndex: Int32Array = new Int32Array(0);
+
   // 信号灯インスタンス → (nodeId, axis) の対応表(車道用/歩行者用で共通の並び)
   private signalRefs: { node: number; axis: 0 | 1 }[] = [];
   private colGreen = new THREE.Color(0x36e05a);
@@ -40,6 +45,7 @@ export class InstancedRenderer {
 
   get buildings(): THREE.InstancedMesh { return this.buildingMesh; }
   get agents(): THREE.InstancedMesh { return this.agentMesh; }
+  get vehicles(): THREE.InstancedMesh { return this.vehicleMesh; }
 
   buildStatic(buildings: Building[], net: RoadNetwork): void {
     this.buildBuildings(buildings);
@@ -99,7 +105,8 @@ export class InstancedRenderer {
     }
     // 歩道(下)→車道(上)の順で重ねる
     const swGeo = new THREE.BoxGeometry(1, 1, 1);
-    const swMat = new THREE.MeshStandardMaterial({ color: 0x555b63, roughness: 1 });
+    // 歩道は明るいベージュ系にして車道(暗いアスファルト)と明確に区別する
+    const swMat = new THREE.MeshStandardMaterial({ color: 0x9a9384, roughness: 1 });
     const swMesh = new THREE.InstancedMesh(swGeo, swMat, sidewalks.length);
     sidewalks.forEach((m, i) => swMesh.setMatrixAt(i, m));
     swMesh.instanceMatrix.needsUpdate = true;
@@ -339,6 +346,10 @@ export class InstancedRenderer {
 
   syncAgents(store: AgentStore): void {
     const mesh = this.agentMesh;
+    if (this.agentInstanceToIndex.length < store.capacity) {
+      this.agentInstanceToIndex = new Int32Array(store.capacity);
+    }
+    const map = this.agentInstanceToIndex;
     let n = 0;
     for (let i = 0; i < store.count; i++) {
       const st = store.state[i];
@@ -347,14 +358,26 @@ export class InstancedRenderer {
       this.dummy.rotation.set(0, -store.heading[i], 0);
       this.dummy.scale.setScalar(1);
       this.dummy.updateMatrix();
-      mesh.setMatrixAt(n++, this.dummy.matrix);
+      mesh.setMatrixAt(n, this.dummy.matrix);
+      map[n] = i; // 描画index n → 実 agent index i
+      n++;
     }
     mesh.count = n;
     mesh.instanceMatrix.needsUpdate = true;
   }
 
+  /** 歩行者の描画インスタンス instanceId から実 agent index を引く(ピッキング用)。 */
+  agentIndexOf(instanceId: number): number {
+    return instanceId >= 0 && instanceId < this.agentInstanceToIndex.length
+      ? this.agentInstanceToIndex[instanceId] : -1;
+  }
+
   syncVehicles(vs: VehicleStore): void {
     const mesh = this.vehicleMesh;
+    if (this.vehicleInstanceToIndex.length < vs.capacity) {
+      this.vehicleInstanceToIndex = new Int32Array(vs.capacity);
+    }
+    const map = this.vehicleInstanceToIndex;
     let n = 0;
     for (let v = 0; v < vs.count; v++) {
       if (vs.state[v] !== VehicleState.Driving) continue;
@@ -364,11 +387,18 @@ export class InstancedRenderer {
       this.dummy.updateMatrix();
       mesh.setMatrixAt(n, this.dummy.matrix);
       mesh.setColorAt(n, this.carColors[v % this.carColors.length]);
+      map[n] = v; // 描画index n → 実 vehicle index v
       n++;
     }
     mesh.count = n;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+
+  /** 車両の描画インスタンス instanceId から実 vehicle index を引く(ピッキング用)。 */
+  vehicleIndexOf(instanceId: number): number {
+    return instanceId >= 0 && instanceId < this.vehicleInstanceToIndex.length
+      ? this.vehicleInstanceToIndex[instanceId] : -1;
   }
 
   /** 車道信号・歩行者信号の灯色を現在の位相で更新。 */

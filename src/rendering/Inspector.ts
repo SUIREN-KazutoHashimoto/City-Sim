@@ -93,18 +93,36 @@ export class Inspector {
     this.raycaster.setFromCamera(this.pointer, this.camera);
 
     const agentMesh = this.gfx.agents;
+    const vehicleMesh = this.gfx.vehicles;
     const buildingMesh = this.gfx.buildings;
     const agentHit = agentMesh ? this.raycaster.intersectObject(agentMesh, false) : [];
+    const vehicleHit = vehicleMesh ? this.raycaster.intersectObject(vehicleMesh, false) : [];
     const buildingHit = buildingMesh ? this.raycaster.intersectObject(buildingMesh, false) : [];
 
     const aDist = agentHit.length ? agentHit[0].distance : Infinity;
+    const vDist = vehicleHit.length ? vehicleHit[0].distance : Infinity;
     const bDist = buildingHit.length ? buildingHit[0].distance : Infinity;
 
-    if (aDist < bDist && agentHit[0].instanceId != null) {
-      this.hoveredAgent = agentHit[0].instanceId;
-      this.el.textContent = this.describeAgent(agentHit[0].instanceId);
-      this.el.style.display = 'block';
-    } else if (buildingHit.length && buildingHit[0].instanceId != null) {
+    // 最も手前に当たったものを採用(歩行者 / 車両 / 建物)
+    if (aDist <= vDist && aDist <= bDist && agentHit[0]?.instanceId != null) {
+      // 描画インスタンス→実 agent index へ変換(コンパクト描画のため)
+      const idx = this.gfx.agentIndexOf(agentHit[0].instanceId);
+      if (idx >= 0) {
+        this.hoveredAgent = idx;
+        this.el.textContent = this.describeAgent(idx);
+        this.el.style.display = 'block';
+        return;
+      }
+    }
+    if (vDist <= bDist && vehicleHit[0]?.instanceId != null) {
+      const vIdx = this.gfx.vehicleIndexOf(vehicleHit[0].instanceId);
+      if (vIdx >= 0) {
+        this.el.textContent = this.describeVehicle(vIdx);
+        this.el.style.display = 'block';
+        return;
+      }
+    }
+    if (buildingHit.length && buildingHit[0].instanceId != null) {
       this.el.textContent = this.describeBuilding(buildingHit[0].instanceId);
       this.el.style.display = 'block';
     } else {
@@ -135,6 +153,34 @@ export class Inspector {
       `社交 ${this.bar(s.social[i])}\n` +
       `衛生 ${this.bar(s.hygiene[i])}\n` +
       `娯楽 ${this.bar(s.fun[i])}`
+    );
+  }
+
+  private describeVehicle(v: number): string {
+    const vs = this.world.vehicles;
+    const speed = vs.speed[v];
+    const kmh = speed * 3.6;
+    const maxKmh = vs.maxSpeed[v] * 3.6;
+    const accel = vs.accel[v];
+    const driver = vs.driver[v];
+    // 運転者の目的地(車の行き先)
+    let goalCat = '—';
+    if (driver >= 0) {
+      const g = this.world.store.goalPOI[driver];
+      if (g >= 0) goalCat = POICategory[this.world.city.poi.get(g).category];
+    }
+    // 経路の進捗
+    const path = vs.paths[v];
+    const progress = path.length > 1 ? `${vs.pathCursor[v]}/${path.length - 1}` : '—';
+    const accelStr = accel >= 0 ? `+${accel.toFixed(1)}` : accel.toFixed(1);
+    const status = speed < 0.3 ? '🛑 停止中(信号待ち/渋滞)' : '🚗 走行中';
+    return (
+      `🚗 車両 #${v}\n` +
+      `${status}\n` +
+      `速度 ${kmh.toFixed(0)} km/h  (上限 ${maxKmh.toFixed(0)})\n` +
+      `加速度 ${accelStr} m/s²   車長 ${vs.length[v].toFixed(1)} m\n` +
+      `目的地 ${goalCat}\n` +
+      `経路進捗 ${progress}   運転者 #${driver}`
     );
   }
 
