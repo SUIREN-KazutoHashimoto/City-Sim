@@ -1,6 +1,4 @@
 import { makeRng } from '../core/math';
-
-/** 決定論的 value-noise + fBm。同一シードで同じ地形。 */
 export class ValueNoise2D {
   private perm: Uint16Array; private grad: Float32Array;
   private readonly size = 256; private readonly mask = 255;
@@ -11,15 +9,10 @@ export class ValueNoise2D {
     this.perm = new Uint16Array(this.size * 2);
     const p = new Uint16Array(this.size);
     for (let i = 0; i < this.size; i++) p[i] = i;
-    for (let i = this.size - 1; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
-      [p[i], p[j]] = [p[j], p[i]];
-    }
+    for (let i = this.size - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
     for (let i = 0; i < this.size * 2; i++) this.perm[i] = p[i & this.mask];
   }
-  private valueAt(ix: number, iz: number): number {
-    return this.grad[this.perm[(this.perm[ix & this.mask] + iz) & this.mask]];
-  }
+  private valueAt(ix: number, iz: number): number { return this.grad[this.perm[(this.perm[ix & this.mask] + iz) & this.mask]]; }
   noise(x: number, z: number): number {
     const x0 = Math.floor(x), z0 = Math.floor(z);
     const fx = x - x0, fz = z - z0;
@@ -31,10 +24,7 @@ export class ValueNoise2D {
   }
   fbm(x: number, z: number, octaves = 5, lacunarity = 2, gain = 0.5): number {
     let amp = 0.5, freq = 1, sum = 0, norm = 0;
-    for (let o = 0; o < octaves; o++) {
-      sum += amp * this.noise(x * freq, z * freq);
-      norm += amp; amp *= gain; freq *= lacunarity;
-    }
+    for (let o = 0; o < octaves; o++) { sum += amp * this.noise(x * freq, z * freq); norm += amp; amp *= gain; freq *= lacunarity; }
     return (sum / norm) * 0.5 + 0.5;
   }
 }

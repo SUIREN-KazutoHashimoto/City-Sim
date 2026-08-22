@@ -1,13 +1,8 @@
-/** OOPドメイン層。ホットループはSoAで処理し、これは1行への薄いハンドル。 */
 export type EntityId = number;
-
 export interface ISimulated {
-  readonly id: EntityId;
-  readonly x: number;
-  readonly z: number;
+  readonly id: EntityId; readonly x: number; readonly z: number;
   serialize(): Record<string, unknown>;
 }
-
 export abstract class GameObject implements ISimulated {
   private static _next: EntityId = 1;
   readonly id: EntityId;

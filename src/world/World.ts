@@ -14,11 +14,6 @@ import { makeRng } from '../core/math';
 
 const EMPTY_PATH = new Int32Array(0);
 
-/**
- * World: 全システムのオーケストレータ。
- * 歩行者は歩道グラフ(車道の脇)を歩き、車は駐車場に停まって再利用される。
- * 職業別スケジュールで昼夜問わず多様な人が移動する。
- */
 export class World {
   readonly clock = new SimulationClock();
   readonly store: AgentStore;
@@ -27,14 +22,12 @@ export class World {
   readonly traffic: TrafficSystem;
   readonly signals: SignalSystem;
   readonly sidewalk: SidewalkNetwork;
-
   private readonly grid = new SpatialHashGrid(8);
   private readonly needs = new NeedSystem();
   private readonly brain: UtilityBrain;
   private readonly walkAstar: AStar;
   private walkPaths: Int32Array[];
   private rng = makeRng(999);
-
   driveThreshold = 180;
   private decideCursor = 0;
 
@@ -51,7 +44,6 @@ export class World {
     this.walkPaths = new Array(agentCapacity).fill(EMPTY_PATH);
   }
 
-  // ---- 職業スケジュール ----
   private assignOccupation(): { occ: Occupation; start: number; end: number } {
     const r = this.rng();
     if (r < 0.25) return { occ: Occupation.Office, start: 9, end: 18 };
@@ -70,10 +62,7 @@ export class World {
     if (poiReg.size === 0) return;
     for (let n = 0; n < count; n++) {
       let homeId = -1;
-      for (let t = 0; t < 8; t++) {
-        const c = Math.floor(this.rng() * poiReg.size);
-        if (poiReg.get(c).category === POICategory.Home) { homeId = c; break; }
-      }
+      for (let t = 0; t < 8; t++) { const c = Math.floor(this.rng() * poiReg.size); if (poiReg.get(c).category === POICategory.Home) { homeId = c; break; } }
       const home = homeId >= 0 ? poiReg.get(homeId) : poiReg.get(0);
       const i = this.store.spawn(home.x + (this.rng() - 0.5) * 8, home.z + (this.rng() - 0.5) * 8);
       if (i < 0) break;
@@ -81,20 +70,15 @@ export class World {
       s.homePOI[i] = homeId;
       const { occ, start, end } = this.assignOccupation();
       s.occupation[i] = occ; s.workStart[i] = start; s.workEnd[i] = end;
-      // 就労者のみ職場を割当。通勤距離に多様性を持たせる(半数は遠方勤務=車通勤の主因)。
       const working = occ !== Occupation.Unemployed && occ !== Occupation.Retiree;
       if (working) {
-        if (this.rng() < 0.5) {
-          s.workPOI[i] = poiReg.findBest(POICategory.Work, home.x, home.z, s.wealth[i]);
-        } else {
-          // 遠方勤務: 街の別地点の Work を選ぶ
-          const rx = this.rng() * this.city.sizeMeters;
-          const rz = this.rng() * this.city.sizeMeters;
+        if (this.rng() < 0.5) s.workPOI[i] = poiReg.findBest(POICategory.Work, home.x, home.z, s.wealth[i]);
+        else {
+          const rx = this.rng() * this.city.sizeMeters, rz = this.rng() * this.city.sizeMeters;
           const far = poiReg.findBest(POICategory.Work, rx, rz, s.wealth[i]);
           s.workPOI[i] = far >= 0 ? far : poiReg.findBest(POICategory.Work, home.x, home.z, s.wealth[i]);
         }
       } else s.workPOI[i] = -1;
-      // 車の所有(職業と資産で確率変動)
       let carProb = 0.35;
       if (occ === Occupation.Office || occ === Occupation.Retiree) carProb = 0.5;
       if (occ === Occupation.Student || occ === Occupation.Unemployed) carProb = 0.15;
@@ -110,11 +94,9 @@ export class World {
   }
 
   step(dtSec: number): void {
-    const s = this.store;
-    const now = this.clock.totalSeconds;
+    const s = this.store; const now = this.clock.totalSeconds;
     this.signals.update(dtSec);
     this.needs.update(s, dtSec);
-
     const budget = Math.min(s.count, 512);
     for (let k = 0; k < budget; k++) {
       const i = (this.decideCursor + k) % s.count;
@@ -124,212 +106,113 @@ export class World {
       }
     }
     this.decideCursor = (this.decideCursor + budget) % Math.max(1, s.count);
-
-    for (let i = 0; i < s.count; i++)
-      if (s.state[i] === AgentState.Routing) this.beginTrip(i);
-
+    for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Routing) this.beginTrip(i);
     this.traffic.update(dtSec);
-
     this.buildTravelerIndex();
-    for (let i = 0; i < s.count; i++) {
-      const st = s.state[i];
-      if (st === AgentState.Traveling || st === AgentState.ToVehicle) this.walkStep(i, dtSec);
-    }
-
+    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle) this.walkStep(i, dtSec); }
     this.handleArrivedVehicles();
-
-    for (let i = 0; i < s.count; i++)
-      if (s.state[i] === AgentState.Engaged) this.activity(i, now);
+    for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Engaged) this.activity(i, now);
   }
 
-  /** Routing → 運転(車まで徒歩→運転→駐車→徒歩) or 直接徒歩 に振り分け。 */
   private beginTrip(i: number): void {
     const s = this.store;
-    const dx = s.goalX[i] - s.posX[i], dz = s.goalZ[i] - s.posZ[i];
-    const far = Math.hypot(dx, dz) >= this.driveThreshold;
-
+    const far = Math.hypot(s.goalX[i] - s.posX[i], s.goalZ[i] - s.posZ[i]) >= this.driveThreshold;
     if (far && s.ownsCar[i] && s.car[i] >= 0) {
       const v = s.car[i];
-      // 目的地近くの駐車場を確保できる場合のみ運転
       const destLot = this.city.poi.findNearest(POICategory.Parking, s.goalX[i], s.goalZ[i], true);
       if (destLot >= 0 && this.vehicles.state[v] === VehicleState.Parked) {
         s.destParkPOI[i] = destLot;
-        const carX = this.vehicles.posX[v], carZ = this.vehicles.posZ[v];
-        const dCar = Math.hypot(s.posX[i] - carX, s.posZ[i] - carZ);
-        if (dCar < 25) {
-          // 既に車の近く → すぐ発進
-          this.startDriving(i);
-        } else {
-          // 車まで徒歩
-          this.assignWalkPath(i, carX, carZ);
-          s.state[i] = AgentState.ToVehicle;
-        }
+        const dCar = Math.hypot(s.posX[i] - this.vehicles.posX[v], s.posZ[i] - this.vehicles.posZ[v]);
+        if (dCar < 25) this.startDriving(i);
+        else { this.assignWalkPath(i, this.vehicles.posX[v], this.vehicles.posZ[v]); s.state[i] = AgentState.ToVehicle; }
         return;
       }
     }
-    // 徒歩で目的地へ
-    this.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
-    s.state[i] = AgentState.Traveling;
+    this.assignWalkPath(i, s.goalX[i], s.goalZ[i]); s.state[i] = AgentState.Traveling;
   }
-
-  /** 車に乗って目的地近くの駐車場へ発進。 */
   private startDriving(i: number): void {
-    const s = this.store;
-    const v = s.car[i];
-    const lot = this.city.poi.get(s.destParkPOI[i]);
-    // 出発駐車場の占有を解放
-    if (this.vehicles.parkPOI[v] >= 0) {
-      const from = this.city.poi.get(this.vehicles.parkPOI[v]);
-      from.occupancy = Math.max(0, from.occupancy - 1);
-    }
-    if (this.traffic.dispatch(v, this.vehicles.posX[v], this.vehicles.posZ[v], lot.x, lot.z)) {
-      s.state[i] = AgentState.Driving;
-    } else {
-      // 経路不能 → 徒歩フォールバック
-      this.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
-      s.state[i] = AgentState.Traveling;
-    }
+    const s = this.store; const v = s.car[i]; const lot = this.city.poi.get(s.destParkPOI[i]);
+    if (this.vehicles.parkPOI[v] >= 0) { const from = this.city.poi.get(this.vehicles.parkPOI[v]); from.occupancy = Math.max(0, from.occupancy - 1); }
+    if (this.traffic.dispatch(v, this.vehicles.posX[v], this.vehicles.posZ[v], lot.x, lot.z)) s.state[i] = AgentState.Driving;
+    else { this.assignWalkPath(i, s.goalX[i], s.goalZ[i]); s.state[i] = AgentState.Traveling; }
   }
-
   private assignWalkPath(i: number, tx: number, tz: number): void {
     const s = this.store;
-    const startNode = this.sidewalk.nearestNode(s.posX[i], s.posZ[i]);
-    const goalNode = this.sidewalk.nearestNode(tx, tz);
-    if (startNode < 0 || goalNode < 0 || startNode === goalNode) {
-      this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1;
-    } else {
+    const startNode = this.sidewalk.nearestNode(s.posX[i], s.posZ[i]), goalNode = this.sidewalk.nearestNode(tx, tz);
+    if (startNode < 0 || goalNode < 0 || startNode === goalNode) { this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1; }
+    else {
       const path = this.walkAstar.findPath(startNode, goalNode);
       if (path.length < 2) { this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1; }
       else { this.walkPaths[i] = Int32Array.from(path); s.pathHandle[i] = 1; }
     }
     s.pathCursor[i] = 0; s.waiting[i] = 0;
-    // 現在の徒歩レグの最終目標を legX/legZ 相当として goalX/goalZ とは別に保持しないため、
-    // Traveling は goalX/goalZ、ToVehicle は毎ステップ車位置を参照する(walkStepで分岐)。
   }
-
   private handleArrivedVehicles(): void {
     const vs = this.vehicles, s = this.store;
     for (let v = 0; v < vs.count; v++) {
       if (vs.state[v] !== VehicleState.Arrived) continue;
       const driver = vs.driver[v];
-      // 駐車場に駐車
       let lotId = driver >= 0 ? s.destParkPOI[driver] : -1;
       if (lotId < 0) lotId = this.city.poi.findNearest(POICategory.Parking, vs.posX[v], vs.posZ[v], false);
-      vs.state[v] = VehicleState.Parked;
-      vs.parkPOI[v] = lotId;
-      vs.speed[v] = 0;
-      if (lotId >= 0) {
-        const lot = this.city.poi.get(lotId);
-        vs.posX[v] = lot.x + (this.rng() - 0.5) * 8;
-        vs.posZ[v] = lot.z + (this.rng() - 0.5) * 8;
-        lot.occupancy++;
-      }
-      // 運転者は降車して最終目的地へ徒歩
-      if (driver >= 0) {
-        s.posX[driver] = vs.posX[v]; s.posZ[driver] = vs.posZ[v];
-        s.destParkPOI[driver] = -1;
-        this.assignWalkPath(driver, s.goalX[driver], s.goalZ[driver]);
-        s.state[driver] = AgentState.Traveling;
-      }
+      vs.state[v] = VehicleState.Parked; vs.parkPOI[v] = lotId; vs.speed[v] = 0;
+      if (lotId >= 0) { const lot = this.city.poi.get(lotId); vs.posX[v] = lot.x + (this.rng() - 0.5) * 8; vs.posZ[v] = lot.z + (this.rng() - 0.5) * 8; lot.occupancy++; }
+      if (driver >= 0) { s.posX[driver] = vs.posX[v]; s.posZ[driver] = vs.posZ[v]; s.destParkPOI[driver] = -1; this.assignWalkPath(driver, s.goalX[driver], s.goalZ[driver]); s.state[driver] = AgentState.Traveling; }
     }
   }
-
   private buildTravelerIndex(): void {
-    this.grid.clear();
-    const s = this.store;
-    for (let i = 0; i < s.count; i++) {
-      const st = s.state[i];
-      if (st === AgentState.Traveling || st === AgentState.ToVehicle)
-        this.grid.insert(i, s.posX[i], s.posZ[i]);
-    }
+    this.grid.clear(); const s = this.store;
+    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle) this.grid.insert(i, s.posX[i], s.posZ[i]); }
   }
-
-  /** 徒歩1ステップ。歩道グラフ(車道の脇)を辿り、横断歩道で歩行者信号に従う。 */
   private walkStep(i: number, dt: number): void {
-    const s = this.store;
-    const sw = this.sidewalk;
-    const path = this.walkPaths[i];
+    const s = this.store; const sw = this.sidewalk; const path = this.walkPaths[i];
     const hasPath = s.pathHandle[i] > 0 && path.length >= 2;
-
-    // このレグの最終目標
     let finalX: number, finalZ: number;
-    if (s.state[i] === AgentState.ToVehicle && s.car[i] >= 0) {
-      finalX = this.vehicles.posX[s.car[i]]; finalZ = this.vehicles.posZ[s.car[i]];
-    } else { finalX = s.goalX[i]; finalZ = s.goalZ[i]; }
-
-    let tx = finalX, tz = finalZ;
-    let arriving = !hasPath;
-
+    if (s.state[i] === AgentState.ToVehicle && s.car[i] >= 0) { finalX = this.vehicles.posX[s.car[i]]; finalZ = this.vehicles.posZ[s.car[i]]; }
+    else { finalX = s.goalX[i]; finalZ = s.goalZ[i]; }
+    let tx = finalX, tz = finalZ; let arriving = !hasPath;
     if (hasPath) {
       const cur = s.pathCursor[i];
       if (cur < path.length) {
-        const node = sw.nodes[path[cur]];
-        tx = node.x; tz = node.z; // 歩道ノードは既に車道の外にある
-        // 次エッジが横断歩道 かつ 信号あり → 歩行者信号を確認
+        const node = sw.nodes[path[cur]]; tx = node.x; tz = node.z;
         if (cur + 1 < path.length) {
           const e = sw.edgeBetween(path[cur], path[cur + 1]);
           if (e && e.crossing && this.signals.modeOf(node.roadNode) !== null) {
             if (!this.signals.pedWalk(node.roadNode, e.axis)) {
-              const dN = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
-              if (dN < 3) { s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0; return; }
+              if (Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 3) { s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0; return; }
             }
           }
         }
         s.waiting[i] = 0;
-        if (Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 2.5) {
-          s.pathCursor[i] = cur + 1;
-          if (cur + 1 >= path.length) arriving = true;
-        }
+        if (Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 2.5) { s.pathCursor[i] = cur + 1; if (cur + 1 >= path.length) arriving = true; }
       } else arriving = true;
     }
     if (arriving) { tx = finalX; tz = finalZ; }
-
-    const dx = tx - s.posX[i], dz = tz - s.posZ[i];
-    const d2 = dx * dx + dz * dz;
-
-    // 到着処理
+    const dx = tx - s.posX[i], dz = tz - s.posZ[i], d2 = dx * dx + dz * dz;
     if (arriving && d2 < 9) {
-      if (s.state[i] === AgentState.ToVehicle) {
-        // 車に到着 → 発進
-        s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0;
-        s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH;
-        this.startDriving(i);
-        return;
-      }
-      // 目的地POIに到着
-      s.state[i] = AgentState.Engaged;
-      s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0;
-      s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH;
-      const p = this.city.poi.get(s.goalPOI[i]);
-      if (p) { p.occupancy++; s.dwellUntil[i] = this.computeDwellUntil(p.category); }
+      if (s.state[i] === AgentState.ToVehicle) { s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; this.startDriving(i); return; }
+      s.state[i] = AgentState.Engaged; s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH;
+      const p = this.city.poi.get(s.goalPOI[i]); if (p) { p.occupancy++; s.dwellUntil[i] = this.computeDwellUntil(p.category); }
       return;
     }
-
     const inv = d2 > 1e-4 ? 1 / Math.sqrt(d2) : 0;
     let desX = dx * inv, desZ = dz * inv;
     let sepX = 0, sepZ = 0, nn = 0;
     this.grid.queryNeighbors(s.posX[i], s.posZ[i], 2, (j) => {
       if (j === i) return;
-      const ddx = s.posX[i] - s.posX[j], ddz = s.posZ[i] - s.posZ[j];
-      const dd = ddx * ddx + ddz * ddz;
+      const ddx = s.posX[i] - s.posX[j], ddz = s.posZ[i] - s.posZ[j], dd = ddx * ddx + ddz * ddz;
       if (dd > 0 && dd < 4) { const w = 1 / Math.sqrt(dd); sepX += ddx * w; sepZ += ddz * w; nn++; }
     });
     if (nn > 0) { desX += (sepX / nn) * 0.6; desZ += (sepZ / nn) * 0.6; }
-    const mag = Math.hypot(desX, desZ) || 1;
-    const sp = s.maxSpeed[i];
+    const mag = Math.hypot(desX, desZ) || 1; const sp = s.maxSpeed[i];
     s.velX[i] = (desX / mag) * sp; s.velZ[i] = (desZ / mag) * sp;
     s.posX[i] += s.velX[i] * dt; s.posZ[i] += s.velZ[i] * dt;
     s.heading[i] = Math.atan2(s.velZ[i], s.velX[i]);
   }
-
   private computeDwellUntil(cat: POICategory): number {
     const now = this.clock.totalSeconds, hour = this.clock.hour, H = 3600;
     switch (cat) {
       case POICategory.Home: {
-        if (hour >= 22 || hour < 6) {
-          const sec = now % 86400, wake = (6 + Math.random() * 2) * H;
-          return sec < wake ? now + (wake - sec) : now + (24 * H - sec) + wake;
-        }
+        if (hour >= 22 || hour < 6) { const sec = now % 86400, wake = (6 + Math.random() * 2) * H; return sec < wake ? now + (wake - sec) : now + (24 * H - sec) + wake; }
         return now + (1 + Math.random() * 2) * H;
       }
       case POICategory.Work: return now + (3 + Math.random() * 3) * H;
@@ -339,57 +222,26 @@ export class World {
       default: return now + 0.5 * H;
     }
   }
-
   private activity(i: number, now: number): void {
-    const s = this.store;
-    const poi = this.city.poi.get(s.goalPOI[i]);
+    const s = this.store; const poi = this.city.poi.get(s.goalPOI[i]);
     if (!poi) { s.state[i] = AgentState.Idle; return; }
-    const dt = this.clock.fixedStep;
-    const rec = (perSec: number) => perSec * dt;
+    const dt = this.clock.fixedStep; const rec = (perSec: number) => perSec * dt;
     switch (poi.category) {
-      case POICategory.Home:
-        s.energy[i] = Math.min(1, s.energy[i] + rec(1 / 1800));
-        s.hygiene[i] = Math.min(1, s.hygiene[i] + rec(1 / 1200));
-        s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 6000));
-        break;
-      case POICategory.Food:
-        s.hunger[i] = Math.min(1, s.hunger[i] + rec(1 / 600)); break;
-      case POICategory.Work:
-        s.wealth[i] = Math.min(1, s.wealth[i] + rec(1 / 20000)); break;
-      case POICategory.Leisure:
-        s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 1800));
-        s.social[i] = Math.min(1, s.social[i] + rec(1 / 2400)); break;
-      case POICategory.Retail:
-        s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 4000)); break;
-      default:
-        s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 3000));
+      case POICategory.Home: s.energy[i] = Math.min(1, s.energy[i] + rec(1 / 1800)); s.hygiene[i] = Math.min(1, s.hygiene[i] + rec(1 / 1200)); s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 6000)); break;
+      case POICategory.Food: s.hunger[i] = Math.min(1, s.hunger[i] + rec(1 / 600)); break;
+      case POICategory.Work: s.wealth[i] = Math.min(1, s.wealth[i] + rec(1 / 20000)); break;
+      case POICategory.Leisure: s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 1800)); s.social[i] = Math.min(1, s.social[i] + rec(1 / 2400)); break;
+      case POICategory.Retail: s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 4000)); break;
+      default: s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 3000));
     }
-    const critical = (poi.category !== POICategory.Food && s.hunger[i] < 0.05) ||
-                     (poi.category !== POICategory.Home && s.energy[i] < 0.05);
-    if (now >= s.dwellUntil[i] || critical) {
-      poi.occupancy = Math.max(0, poi.occupancy - 1);
-      s.goalPOI[i] = -1;
-      s.state[i] = AgentState.Idle;
-      s.nextDecideAt[i] = now;
-    }
+    const critical = (poi.category !== POICategory.Food && s.hunger[i] < 0.05) || (poi.category !== POICategory.Home && s.energy[i] < 0.05);
+    if (now >= s.dwellUntil[i] || critical) { poi.occupancy = Math.max(0, poi.occupancy - 1); s.goalPOI[i] = -1; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = now; }
   }
-
   stats() {
     let driving = 0, parked = 0;
-    for (let v = 0; v < this.vehicles.count; v++)
-      this.vehicles.state[v] === VehicleState.Driving ? driving++ : parked++;
-    return {
-      agents: this.store.count,
-      buildings: this.city.buildings.length,
-      nodes: this.city.net.nodes.length,
-      pois: this.city.poi.size,
-      vehiclesDriving: driving,
-      vehiclesTotal: this.vehicles.count,
-      parkingLots: this.city.parkingLots.length,
-      signals: this.signals.count,
-    };
+    for (let v = 0; v < this.vehicles.count; v++) this.vehicles.state[v] === VehicleState.Driving ? driving++ : parked++;
+    return { agents: this.store.count, buildings: this.city.buildings.length, nodes: this.city.net.nodes.length, pois: this.city.poi.size, vehiclesDriving: driving, vehiclesTotal: this.vehicles.count, parkingLots: this.city.parkingLots.length, signals: this.signals.count };
   }
-
   activitySnapshot() {
     const s = this.store;
     let traveling = 0, home = 0, work = 0, food = 0, leisure = 0, idle = 0, driving = 0;
@@ -398,8 +250,7 @@ export class World {
       if (st === AgentState.Driving) { driving++; continue; }
       if (st === AgentState.Traveling || st === AgentState.Routing || st === AgentState.ToVehicle) { traveling++; continue; }
       if (st === AgentState.Engaged) {
-        const g = s.goalPOI[i];
-        const cat = g >= 0 ? this.city.poi.get(g).category : -1;
+        const g = s.goalPOI[i]; const cat = g >= 0 ? this.city.poi.get(g).category : -1;
         if (cat === POICategory.Home) home++;
         else if (cat === POICategory.Work) work++;
         else if (cat === POICategory.Food) food++;

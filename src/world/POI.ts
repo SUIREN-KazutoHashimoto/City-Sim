@@ -5,23 +5,14 @@ export enum POICategory {
   Home = 0, Work = 1, Food = 2, Retail = 3, Leisure = 4,
   Health = 5, Education = 6, Parking = 7,
 }
-
 export interface POI {
-  id: number;
-  category: POICategory;
-  x: number;
-  z: number;
-  priceTier: number;
-  capacity: number;
-  occupancy: number;
-  buildingId: number;
+  id: number; category: POICategory; x: number; z: number;
+  priceTier: number; capacity: number; occupancy: number; buildingId: number;
 }
-
 export class POIRegistry {
   private list: POI[] = [];
   private grids = new Map<POICategory, SpatialHashGrid>();
   constructor(private readonly cellSize = 200) {}
-
   add(p: Omit<POI, 'id' | 'occupancy'>): number {
     const id = this.list.length;
     this.list.push({ ...p, id, occupancy: 0 });
@@ -30,14 +21,9 @@ export class POIRegistry {
     g.insert(id, p.x, p.z);
     return id;
   }
-
   get(id: number): POI { return this.list[id]; }
   get size(): number { return this.list.length; }
-  poisInBuilding(buildingId: number): POI[] {
-    return this.list.filter((p) => p.buildingId === buildingId);
-  }
-
-  /** カテゴリ内で「近くて価格帯が合う空きのある」POIを1つ選ぶ。 */
+  poisInBuilding(buildingId: number): POI[] { return this.list.filter((p) => p.buildingId === buildingId); }
   findBest(category: POICategory, x: number, z: number, wealth: number): number {
     const grid = this.grids.get(category);
     if (!grid) return -1;
@@ -50,14 +36,9 @@ export class POIRegistry {
       const cost = d2 + pm * pm * 400 * 400;
       if (cost < bestCost) { bestCost = cost; bestId = id; }
     };
-    for (const r of [300, 800, 2000]) {
-      grid.queryNeighbors(x, z, r, evaluate);
-      if (bestId >= 0) break;
-    }
+    for (const r of [300, 800, 2000]) { grid.queryNeighbors(x, z, r, evaluate); if (bestId >= 0) break; }
     return bestId;
   }
-
-  /** カテゴリ内の最寄り(空き問わず)。駐車場探索などに使う。 */
   findNearest(category: POICategory, x: number, z: number, requireFree = true): number {
     const grid = this.grids.get(category);
     if (!grid) return -1;
@@ -68,10 +49,7 @@ export class POIRegistry {
       const d2 = dist2(x, z, p.x, p.z);
       if (d2 < bestD) { bestD = d2; bestId = id; }
     };
-    for (const r of [300, 800, 2000, 5000]) {
-      grid.queryNeighbors(x, z, r, evaluate);
-      if (bestId >= 0) break;
-    }
+    for (const r of [300, 800, 2000, 5000]) { grid.queryNeighbors(x, z, r, evaluate); if (bestId >= 0) break; }
     return bestId;
   }
 }

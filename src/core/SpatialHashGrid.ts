@@ -1,11 +1,8 @@
-/** 一様グリッドによる空間ハッシュ。近接クエリ・最寄検索の土台。 */
 export class SpatialHashGrid {
   private cells = new Map<number, number[]>();
   private readonly invCell: number;
   private readonly gridDim = 1 << 16;
-
   constructor(public readonly cellSize: number) { this.invCell = 1 / cellSize; }
-
   private key(cx: number, cz: number): number {
     return ((cx + (this.gridDim >> 1)) << 16) | (cz + (this.gridDim >> 1));
   }
@@ -18,10 +15,8 @@ export class SpatialHashGrid {
     b.push(id);
   }
   queryNeighbors(x: number, z: number, radius: number, cb: (id: number) => void): void {
-    const minCx = Math.floor((x - radius) * this.invCell);
-    const maxCx = Math.floor((x + radius) * this.invCell);
-    const minCz = Math.floor((z - radius) * this.invCell);
-    const maxCz = Math.floor((z + radius) * this.invCell);
+    const minCx = Math.floor((x - radius) * this.invCell), maxCx = Math.floor((x + radius) * this.invCell);
+    const minCz = Math.floor((z - radius) * this.invCell), maxCz = Math.floor((z + radius) * this.invCell);
     for (let cx = minCx; cx <= maxCx; cx++)
       for (let cz = minCz; cz <= maxCz; cz++) {
         const b = this.cells.get(this.key(cx, cz));

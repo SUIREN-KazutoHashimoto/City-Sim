@@ -1,19 +1,10 @@
-/** シミュレーションは地表面(XZ平面)を2Dとして扱い、レンダリング時にYへ持ち上げる。 */
 export type Vec2 = { x: number; z: number };
-
-export const clamp = (v: number, lo: number, hi: number): number =>
-  v < lo ? lo : v > hi ? hi : v;
-
+export const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 export const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
-
 export const dist2 = (ax: number, az: number, bx: number, bz: number): number => {
-  const dx = ax - bx, dz = az - bz;
-  return dx * dx + dz * dz;
+  const dx = ax - bx, dz = az - bz; return dx * dx + dz * dz;
 };
-export const dist = (ax: number, az: number, bx: number, bz: number): number =>
-  Math.sqrt(dist2(ax, az, bx, bz));
-
-/** 決定論的擬似乱数 (mulberry32)。 */
+export const dist = (ax: number, az: number, bx: number, bz: number): number => Math.sqrt(dist2(ax, az, bx, bz));
 export function makeRng(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -23,5 +14,4 @@ export function makeRng(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-
 export const TAU = Math.PI * 2;

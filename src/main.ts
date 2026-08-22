@@ -6,10 +6,7 @@ import { Inspector } from './rendering/Inspector';
 import { Dashboard } from './rendering/Dashboard';
 
 const SIZE = Math.sqrt(10_000_000);
-const world = new World(
-  { seed: 12345, sizeMeters: SIZE, urbanRatioTarget: 1 / 3, blockSize: 90 },
-  20_000, 8_000,
-);
+const world = new World({ seed: 12345, sizeMeters: SIZE, urbanRatioTarget: 1 / 3, blockSize: 90 }, 20_000, 8_000);
 world.populate(4000);
 
 const app = document.getElementById('app')!;
@@ -32,8 +29,7 @@ sun.position.set(600, 1200, 400); sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.near = 100; sun.shadow.camera.far = 3000;
 const sc = sun.shadow.camera as THREE.OrthographicCamera;
 sc.left = -800; sc.right = 800; sc.top = 800; sc.bottom = -800;
-scene.add(sun);
-scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3a30, 0.6));
+scene.add(sun); scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3a30, 0.6));
 
 const gfx = new InstancedRenderer(scene);
 gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
@@ -51,28 +47,16 @@ renderer.domElement.addEventListener('wheel', (e) => {
   if (controller.isFollowing) controller.followDistance = THREE.MathUtils.clamp(controller.followDistance * f, 3, 120);
   else controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400);
 });
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
-});
+window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
 
 const inspector = new Inspector(world, gfx, camera, renderer.domElement);
 const dashboard = new Dashboard(world, world.clock);
-
 let paused = false;
-window.addEventListener('keydown', (e) => {
-  if (e.code === 'Tab') { e.preventDefault(); paused = !paused; }
-  if (e.code === 'Space') e.preventDefault();
-});
+window.addEventListener('keydown', (e) => { if (e.code === 'Tab') { e.preventDefault(); paused = !paused; } if (e.code === 'Space') e.preventDefault(); });
 
-const hud = document.getElementById('hud')!;
-const clockEl = document.getElementById('clock')!;
-let fps = 60, lastStats = 0;
-const st = world.stats();
-function clockIcon(h: number): string {
-  if (h >= 5 && h < 7) return '🌅'; if (h >= 7 && h < 17) return '☀️';
-  if (h >= 17 && h < 19) return '🌇'; if (h >= 19 && h < 22) return '🌆'; return '🌙';
-}
+const hud = document.getElementById('hud')!; const clockEl = document.getElementById('clock')!;
+let fps = 60, lastStats = 0; const st = world.stats();
+function clockIcon(h: number): string { if (h >= 5 && h < 7) return '🌅'; if (h >= 7 && h < 17) return '☀️'; if (h >= 17 && h < 19) return '🌇'; if (h >= 19 && h < 22) return '🌆'; return '🌙'; }
 
 let prev = performance.now();
 function frame(now: number): void {
@@ -81,35 +65,22 @@ function frame(now: number): void {
   if (!paused) {
     const steps = world.clock.advance(dt);
     for (let s = 0; s < steps; s++) world.step(world.clock.fixedStep);
-    gfx.syncAgents(world.store);
-    gfx.syncVehicles(world.vehicles);
-    gfx.syncSignals(world.signals);
-    dashboard.sample();
+    gfx.syncAgents(world.store); gfx.syncVehicles(world.vehicles); gfx.syncSignals(world.signals); dashboard.sample();
   }
   controller.setFollowTarget(inspector.getFollowPosition());
-  controller.update(dt);
-  inspector.update();
-  dashboard.draw();
+  controller.update(dt); inspector.update(); dashboard.draw();
   renderer.render(scene, camera);
-
   const c = world.clock;
   const hh = String(c.hour).padStart(2, '0'), mm = String(c.minute).padStart(2, '0'), ss = String(c.second).padStart(2, '0');
-  clockEl.innerHTML =
-    `<span class="icon">${clockIcon(c.hour)}</span>` +
-    `<span>${hh}:${mm}<span style="font-size:13px;opacity:.7">:${ss}</span></span>` +
-    `<span class="day">DAY ${c.day}</span>` +
-    `${paused ? '<span class="day">⏸ PAUSED</span>' : ''}`;
-
+  clockEl.innerHTML = `<span class="icon">${clockIcon(c.hour)}</span><span>${hh}:${mm}<span style="font-size:13px;opacity:.7">:${ss}</span></span><span class="day">DAY ${c.day}</span>${paused ? '<span class="day">⏸ PAUSED</span>' : ''}`;
   if (now - lastStats > 250) {
-    lastStats = now;
-    const dv = world.stats();
-    hud.textContent =
-      `FPS ${fps.toFixed(0)}   ×${dashboard.speedLabel}\n` +
+    lastStats = now; const dv = world.stats();
+    hud.textContent = `FPS ${fps.toFixed(0)}   ×${dashboard.speedLabel}\n` +
       `agents ${st.agents}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}\n` +
       `buildings ${st.buildings}  駐車場 ${st.parkingLots}  信号 ${st.signals}\n` +
       `${controller.isFollowing ? `追跡中 dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect'}\n` +
       `[WASD=move  E/Space=up  Q/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +
-      `[Tab=pause  [ ]=speed  release LMB=inspect  MMB=follow]`;
+      `[Tab=pause  [ ]=speed  release LMB=inspect  MMB=人/車を追跡]`;
   }
   requestAnimationFrame(frame);
 }
