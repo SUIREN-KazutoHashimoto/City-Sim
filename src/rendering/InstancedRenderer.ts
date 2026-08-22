@@ -3,7 +3,7 @@ import { Building } from '../generation/CityGenerator';
 import { RoadNetwork } from '../traffic/RoadNetwork';
 import { AgentStore, AgentState } from '../agents/AgentStore';
 import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
-import { SignalSystem } from '../traffic/SignalSystem';
+import { SignalSystem, SignalMode } from '../traffic/SignalSystem';
 import { POICategory } from '../world/POI';
 
 /**
@@ -124,6 +124,89 @@ export class InstancedRenderer {
     ground.position.set(0, -0.05, 0);
     ground.receiveShadow = true;
     this.scene.add(ground);
+  }
+
+  /**
+   * 横断歩道マーキングを描画する。
+   * 各信号交差点の「接続する各道路方向」に、ゼブラ(縞)の帯を1枚ずつ敷く。
+   * ゼブラの縞は車の進行方向に平行、道路幅いっぱいに並べる(現実の横断歩道と同じ)。
+   * スクランブル交差点には追加で斜め横断の縞(×字)も描く。
+   * すべて静的なので生成時に1メッシュへまとめる(1ドロー)。
+   */
+  buildCrosswalks(net: RoadNetwork, signals: SignalSystem): void {
+    const stripes: THREE.Matrix4[] = [];
+    const y = 0.13; // 車道(0.1)より僅かに上へ描いて z-fighting を避ける
+
+    const STRIPE_W = 0.55;    // 縞の幅(進行方向に直交)
+    const STRIPE_GAP = 0.55;  // 縞の間隔
+    const CROSS_DEPTH = 4.5;  // 横断歩道の奥行き(進行方向)
+
+    const addBand = (cx: number, cz: number, dirX: number, dirZ: number, roadW: number) => {
+      // dir = 車の進行方向(この帯を横切る向き)。perp = 縞が並ぶ向き(道路幅方向)。
+      const L = Math.hypot(dirX, dirZ) || 1;
+      const dx = dirX / L, dz = dirZ / L;
+      const px = -dz, pz = dx; // 直交
+      const angle = Math.atan2(dz, dx);
+      const half = roadW / 2 - 0.3;
+      const pitch = STRIPE_W + STRIPE_GAP;
+      const n = Math.max(1, Math.floor((roadW - 0.6) / pitch));
+      const start = -((n - 1) * pitch) / 2;
+      for (let k = 0; k < n; k++) {
+        const off = start + k * pitch;
+        if (Math.abs(off) > half) continue;
+        const sx = cx + px * off;
+        const sz = cz + pz * off;
+        const m = new THREE.Matrix4();
+        m.compose(
+          new THREE.Vector3(sx, y, sz),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -angle, 0)),
+          // 進行方向(x)= 横断歩道の奥行き, 幅(z)= 縞1本の幅
+          new THREE.Vector3(CROSS_DEPTH, 0.06, STRIPE_W),
+        );
+        stripes.push(m);
+      }
+    };
+
+    for (const nodeId of signals.nodeIds) {
+      const node = net.nodes[nodeId];
+      const scramble = signals.modeOf(nodeId) === SignalMode.Scramble;
+
+      // 接続する各道路方向へ横断歩道を1枚(交差点の手前=セットバック位置に)
+      for (const edgeId of node.edges) {
+        const e = net.edges[edgeId];
+        const nb = net.nodes[e.to];
+        let dxx = nb.x - node.x, dzz = nb.z - node.z;
+        const L = Math.hypot(dxx, dzz) || 1;
+        dxx /= L; dzz /= L;
+        const roadW = 3.5 * e.lanes * 2;
+        // 交差点中心から道路方向へセットバックした位置に横断歩道を置く
+        const setback = 7 + roadW * 0.25;
+        const cx = node.x + dxx * setback;
+        const cz = node.z + dzz * setback;
+        // この道路を「横切る」向き = 道路に直交する歩行者の進む向き。
+        // ゼブラの縞は車進行方向(dxx,dzz)に平行に並ぶので dir=道路方向を渡す。
+        addBand(cx, cz, dxx, dzz, roadW);
+      }
+
+      // スクランブル: 交差点中央に斜め横断のゼブラ(×字)
+      if (scramble) {
+        const diagLen = 10;
+        addBand(node.x, node.z, 0.707, 0.707, diagLen);
+        addBand(node.x, node.z, 0.707, -0.707, diagLen);
+      }
+    }
+
+    if (stripes.length === 0) return;
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    // 少し発光させて夜でも視認できる白線
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xdadfe6, roughness: 0.9, emissive: 0x2a2d33, emissiveIntensity: 0.3,
+    });
+    const mesh = new THREE.InstancedMesh(geo, mat, stripes.length);
+    stripes.forEach((m, i) => mesh.setMatrixAt(i, m));
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
   }
 
   buildAgents(capacity: number): void {
