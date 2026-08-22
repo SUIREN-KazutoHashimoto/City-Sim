@@ -1,7 +1,7 @@
 import { AgentStore } from './AgentStore';
 import { clamp } from '../core/math';
 
-/** ニーズ減衰システム。ニーズの高低が UtilityBrain の目的選定を駆動する。 */
+/** ニーズ減衰。ニーズの高低が UtilityBrain の目的選定を駆動する。 */
 export class NeedSystem {
   private readonly decay = {
     energy: 1 / (16 * 3600),

@@ -1,132 +1,120 @@
 import { dist } from '../core/math';
 import { SpatialHashGrid } from '../core/SpatialHashGrid';
-import { RoadNetwork, edgeAxis } from './RoadNetwork';
+import { RoadNetwork, roadWidth, edgeAxis } from './RoadNetwork';
 import { PathGraph } from './AStar';
 
 /**
  * ============================================================================
- *  SidewalkNetwork — 歩行者専用の独立グラフ(歩道ネットワーク)
+ *  SidewalkNetwork — 車道の *脇* に物理的に分離した歩行者グラフ
  * ============================================================================
- * 車道(RoadNetwork)とは *独立した* 歩行者用グラフ。初期状態では車道から
- * 自動生成する(各車道の脇に歩道が並走する近似)が、グラフとして独立しているため
- * 将来:
- *   ・歩道橋(道路をまたぐ歩行者専用エッジ)
- *   ・歩行者専用道(公園の遊歩道・商店街のアーケード)
- *   ・地下通路
- * を、車道グラフに影響を与えずにノード/エッジとして追加できる。
+ * 旧版は車道ノードを共有し「中心線+オフセット」で歩かせたため、広い道路では
+ * 車道上を歩いてしまった。本版は各車道エッジの *両側* に歩道ノードを生成し、
+ * 交差点まわりの歩道端点を「角の歩道(normal)」と「横断(crossing)」で結ぶ。
+ * これにより歩行者は常に車道の外(歩道帯)を歩き、横断歩道でのみ車道を横切る。
  *
- * 各歩道ノードは、対応する車道交差点(roadNode)を参照する。信号のあるroadNodeでは
- * 歩行者は *歩行者信号* を見て横断する。roadNode = -1 のノード(歩道橋・専用道の
- * 途中点など)は信号と無関係に通行できる。
- *
- * PathGraph を実装するため、車道と同じ AStar をそのまま歩行者経路探索に使える。
+ * PathGraph を実装するので車道と同じ AStar をそのまま使える。
  */
 export interface SidewalkNode {
-  id: number;
-  x: number;
-  z: number;
-  edges: number[];
-  /** 対応する車道ノードID(信号参照用)。-1 = 車道と無関係(歩道橋/専用道)。 */
+  id: number; x: number; z: number; edges: number[];
+  /** 対応する車道交差点ノード(信号参照用)。 */
   roadNode: number;
-  /** 平面交差点か(信号・横断が絡む) / 立体交差(歩道橋)か。 */
-  gradeSeparated: boolean;
 }
-
 export interface SidewalkEdge {
-  id: number;
-  from: number;
-  to: number;
-  length: number;
-  /** AStar 互換(歩行速度)。歩道の種別で将来変える余地。 */
-  speedLimit: number;
-  /** true = 車道の平面横断を伴う(信号の影響を受ける) / false = 歩道橋等で分離。 */
+  id: number; from: number; to: number; length: number; speedLimit: number;
+  /** 車道を平面横断するエッジ(信号の影響を受ける)。 */
   crossing: boolean;
-  /** 併走する車道の車線数(横断歩道位置の算出に使う)。専用道は 0。 */
+  /** 横断する軸(0=東西,1=南北)。crossing のときのみ有効。 */
+  axis: 0 | 1;
   roadLanes: number;
 }
+
+const SW_HALF = 1.5; // 歩道帯の内側マージン
 
 export class SidewalkNetwork implements PathGraph {
   nodes: SidewalkNode[] = [];
   edges: SidewalkEdge[] = [];
-  private nodeGrid = new SpatialHashGrid(120);
+  private nodeGrid = new SpatialHashGrid(60);
 
-  /** 車道ノードID → 歩道ノードID の対応(自動生成時に構築)。 */
-  private sidewalkOfRoad: Int32Array;
+  constructor(road: RoadNetwork) { this.build(road); }
 
-  constructor(road: RoadNetwork) {
-    this.sidewalkOfRoad = new Int32Array(road.nodes.length).fill(-1);
-    this.buildFromRoad(road);
+  private addNode(x: number, z: number, roadNode: number): number {
+    const id = this.nodes.length;
+    this.nodes.push({ id, x, z, edges: [], roadNode });
+    this.nodeGrid.insert(id, x, z);
+    return id;
+  }
+  private addEdge(a: number, b: number, crossing: boolean, roadLanes: number): void {
+    const na = this.nodes[a], nb = this.nodes[b];
+    const len = dist(na.x, na.z, nb.x, nb.z);
+    const axis = edgeAxis(nb.x - na.x, nb.z - na.z);
+    const push = (from: number, to: number) => {
+      const id = this.edges.length;
+      this.edges.push({ id, from, to, length: len, speedLimit: 1.4, crossing, axis, roadLanes });
+      this.nodes[from].edges.push(id);
+    };
+    push(a, b); push(b, a);
   }
 
-  /** 車道グラフから歩道グラフを自動生成(1:1近似)。 */
-  private buildFromRoad(road: RoadNetwork): void {
-    // 車道ノードごとに歩道ノードを作る
-    for (const rn of road.nodes) {
-      const id = this.addNode(rn.x, rn.z, rn.id, false);
-      this.sidewalkOfRoad[rn.id] = id;
-    }
-    // 車道エッジ(無向)ごとに歩道エッジ(双方向)を作る。平面横断フラグと車線数を付与。
+  private build(road: RoadNetwork): void {
+    // 端点情報: 各車道ノードに集まる歩道端点を記録
+    type Endpoint = { node: number; side: number; lanes: number };
+    const atRoadNode: Endpoint[][] = road.nodes.map(() => []);
+
+    // 1) 各車道エッジ(無向)の両側に歩道レーンを生成
     const done = new Set<number>();
     for (const e of road.edges) {
       const key = e.from < e.to ? e.from * 1e6 + e.to : e.to * 1e6 + e.from;
       if (done.has(key)) continue;
       done.add(key);
-      const a = this.sidewalkOfRoad[e.from];
-      const b = this.sidewalkOfRoad[e.to];
-      this.connect(a, b, true, e.lanes);
+      const a = road.nodes[e.from], b = road.nodes[e.to];
+      let dx = b.x - a.x, dz = b.z - a.z;
+      const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+      const px = dz, pz = -dx; // 右手方向
+      const off = roadWidth(e.lanes) / 2 + SW_HALF;
+      const inset = roadWidth(e.lanes) / 2 + 2; // 交差点中心から歩道端点を後退させる
+
+      for (const side of [1, -1]) {
+        const ox = px * off * side, oz = pz * off * side;
+        const nax = a.x + dx * inset + ox, naz = a.z + dz * inset + oz;
+        const nbx = b.x - dx * inset + ox, nbz = b.z - dz * inset + oz;
+        const na = this.addNode(nax, naz, e.from);
+        const nb = this.addNode(nbx, nbz, e.to);
+        this.addEdge(na, nb, false, e.lanes); // 歩道(車道外)を歩く
+        atRoadNode[e.from].push({ node: na, side, lanes: e.lanes });
+        atRoadNode[e.to].push({ node: nb, side, lanes: e.lanes });
+      }
     }
-  }
 
-  addNode(x: number, z: number, roadNode = -1, gradeSeparated = false): number {
-    const id = this.nodes.length;
-    this.nodes.push({ id, x, z, edges: [], roadNode, gradeSeparated });
-    this.nodeGrid.insert(id, x, z);
-    return id;
-  }
-
-  /** 双方向の歩道エッジを1本追加する。crossing=平面横断(信号影響)か。 */
-  connect(a: number, b: number, crossing: boolean, roadLanes = 0): void {
-    const na = this.nodes[a], nb = this.nodes[b];
-    const len = dist(na.x, na.z, nb.x, nb.z);
-    this.pushEdge(a, b, len, crossing, roadLanes);
-    this.pushEdge(b, a, len, crossing, roadLanes);
-  }
-
-  /**
-   * 歩道橋を追加する(将来のAPI例)。2つの歩道ノードを立体交差エッジで結ぶ。
-   * crossing=false のため信号と無関係に通行できる。
-   */
-  addFootbridge(a: number, b: number): void {
-    this.nodes[a].gradeSeparated = true;
-    this.nodes[b].gradeSeparated = true;
-    this.connect(a, b, false, 0);
-  }
-
-  private pushEdge(from: number, to: number, length: number, crossing: boolean, roadLanes: number): void {
-    const id = this.edges.length;
-    this.edges.push({ id, from, to, length, speedLimit: 1.4, crossing, roadLanes });
-    this.nodes[from].edges.push(id);
-  }
-
-  /** 有向歩道エッジ from→to を返す(なければ undefined)。横断歩道位置の算出に使う。 */
-  edgeBetween(from: number, to: number): SidewalkEdge | undefined {
-    for (const eid of this.nodes[from].edges) {
-      if (this.edges[eid].to === to) return this.edges[eid];
+    // 2) 各交差点で歩道端点同士を接続(角の歩道 + 横断)
+    for (let rn = 0; rn < road.nodes.length; rn++) {
+      const eps = atRoadNode[rn];
+      const cx = road.nodes[rn].x, cz = road.nodes[rn].z;
+      for (let a = 0; a < eps.length; a++) {
+        for (let b = a + 1; b < eps.length; b++) {
+          const pa = this.nodes[eps[a].node], pb = this.nodes[eps[b].node];
+          const d = dist(pa.x, pa.z, pb.x, pb.z);
+          const maxLanes = Math.max(eps[a].lanes, eps[b].lanes);
+          const connectMax = roadWidth(maxLanes) + SW_HALF * 2 + 6;
+          if (d > connectMax) continue;
+          // 接続線分の中点が交差点中心に近い=車道を横切る=横断歩道(信号対象)
+          const mx = (pa.x + pb.x) / 2, mz = (pa.z + pb.z) / 2;
+          const midToCenter = Math.hypot(mx - cx, mz - cz);
+          const crossing = midToCenter < roadWidth(maxLanes) / 2;
+          this.addEdge(eps[a].node, eps[b].node, crossing, maxLanes);
+        }
+      }
     }
-    return undefined;
   }
 
   heuristic(a: number, b: number): number {
     const na = this.nodes[a], nb = this.nodes[b];
     return dist(na.x, na.z, nb.x, nb.z);
   }
-
-  /** 歩道エッジ from→to の進行軸(0=東西, 1=南北)。歩行者信号の判定に使う。 */
-  axisOf(from: number, to: number): 0 | 1 {
-    const nf = this.nodes[from], nt = this.nodes[to];
-    return edgeAxis(nt.x - nf.x, nt.z - nf.z);
+  edgeBetween(from: number, to: number): SidewalkEdge | undefined {
+    for (const eid of this.nodes[from].edges)
+      if (this.edges[eid].to === to) return this.edges[eid];
+    return undefined;
   }
-
   nearestNode(x: number, z: number): number {
     let best = -1, bestD = Infinity;
     const check = (id: number) => {
@@ -134,7 +122,7 @@ export class SidewalkNetwork implements PathGraph {
       const d = (n.x - x) * (n.x - x) + (n.z - z) * (n.z - z);
       if (d < bestD) { bestD = d; best = id; }
     };
-    for (const r of [150, 400, 1000, 3000]) {
+    for (const r of [80, 200, 600, 2000]) {
       this.nodeGrid.queryNeighbors(x, z, r, check);
       if (best >= 0) break;
     }

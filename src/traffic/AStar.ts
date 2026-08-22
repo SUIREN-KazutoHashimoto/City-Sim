@@ -1,51 +1,34 @@
-/**
- * A* が必要とするグラフの最小インターフェース。
- * RoadNetwork(車道)と SidewalkNetwork(歩道)の双方がこれを満たすため、
- * 同じ A* を車両経路にも歩行者経路にも使える(独立ネットワーク対応)。
- */
+/** A*が必要とするグラフの最小インターフェース(車道/歩道の双方が実装)。 */
 export interface PathGraph {
   nodes: { x: number; z: number; edges: number[] }[];
   edges: { to: number; length: number; speedLimit: number }[];
   heuristic(a: number, b: number): number;
 }
 
-/**
- * バイナリヒープ付き A* 経路探索(ノード列を返す)。DOM非依存でワーカー化可能。
- * mode='drive' は所要時間コスト、'walk' は距離コスト(歩行者は最短距離を好む)。
- */
+/** バイナリヒープ付き A*。mode='drive'は所要時間, 'walk'は距離コスト。 */
 export class AStar {
-  private g: Float64Array;
-  private f: Float64Array;
-  private cameFrom: Int32Array;
-  private closed: Uint8Array;
-  private openFlag: Uint8Array;
+  private g: Float64Array; private f: Float64Array;
+  private cameFrom: Int32Array; private closed: Uint8Array; private openFlag: Uint8Array;
   private heap: number[] = [];
 
   constructor(private net: PathGraph, private mode: 'drive' | 'walk' = 'drive') {
     const n = net.nodes.length;
-    this.g = new Float64Array(n);
-    this.f = new Float64Array(n);
+    this.g = new Float64Array(n); this.f = new Float64Array(n);
     this.cameFrom = new Int32Array(n);
-    this.closed = new Uint8Array(n);
-    this.openFlag = new Uint8Array(n);
+    this.closed = new Uint8Array(n); this.openFlag = new Uint8Array(n);
   }
 
   findPath(start: number, goal: number): number[] {
     const net = this.net;
     this.g.fill(Infinity); this.f.fill(Infinity);
-    this.closed.fill(0); this.openFlag.fill(0);
-    this.cameFrom.fill(-1);
+    this.closed.fill(0); this.openFlag.fill(0); this.cameFrom.fill(-1);
     this.heap.length = 0;
-
-    this.g[start] = 0;
-    this.f[start] = net.heuristic(start, goal);
+    this.g[start] = 0; this.f[start] = net.heuristic(start, goal);
     this.push(start);
-
     while (this.heap.length) {
       const cur = this.pop();
       if (cur === goal) return this.reconstruct(goal);
       this.closed[cur] = 1;
-
       for (const edgeId of net.nodes[cur].edges) {
         const e = net.edges[edgeId];
         const nb = e.to;
@@ -63,43 +46,31 @@ export class AStar {
     }
     return [];
   }
-
   private reconstruct(goal: number): number[] {
-    const path: number[] = [];
-    let n = goal;
+    const path: number[] = []; let n = goal;
     while (n !== -1) { path.push(n); n = this.cameFrom[n]; }
-    path.reverse();
-    return path;
+    path.reverse(); return path;
   }
-
   private push(node: number): void {
-    this.openFlag[node] = 1;
-    this.heap.push(node);
+    this.openFlag[node] = 1; this.heap.push(node);
     let i = this.heap.length - 1;
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (this.f[this.heap[p]] <= this.f[this.heap[i]]) break;
-      [this.heap[p], this.heap[i]] = [this.heap[i], this.heap[p]];
-      i = p;
+      [this.heap[p], this.heap[i]] = [this.heap[i], this.heap[p]]; i = p;
     }
   }
-
   private pop(): number {
-    const top = this.heap[0];
-    const last = this.heap.pop()!;
+    const top = this.heap[0]; const last = this.heap.pop()!;
     this.openFlag[top] = 0;
     if (this.heap.length) {
-      this.heap[0] = last;
-      let i = 0;
-      const n = this.heap.length;
+      this.heap[0] = last; let i = 0; const n = this.heap.length;
       for (;;) {
-        const l = 2 * i + 1, r = 2 * i + 2;
-        let s = i;
+        const l = 2 * i + 1, r = 2 * i + 2; let s = i;
         if (l < n && this.f[this.heap[l]] < this.f[this.heap[s]]) s = l;
         if (r < n && this.f[this.heap[r]] < this.f[this.heap[s]]) s = r;
         if (s === i) break;
-        [this.heap[s], this.heap[i]] = [this.heap[i], this.heap[s]];
-        i = s;
+        [this.heap[s], this.heap[i]] = [this.heap[i], this.heap[s]]; i = s;
       }
     }
     return top;

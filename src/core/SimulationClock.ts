@@ -1,18 +1,9 @@
-/**
- * シミュレーション時刻とゲーム内カレンダーを管理する。
- * 実時間(フレーム)とは切り離し、固定ステップで積分するための時間源。
- */
+/** シミュレーション時刻とゲーム内カレンダー。固定ステップ積分の時間源。 */
 export class SimulationClock {
-  /** 実時間に対するシミュレーション倍率 (1 = 等速, 60 = 1秒で1分進む) */
   timeScale = 60;
-
   private _totalSeconds = 8 * 3600; // 朝8時スタート
   private _accumulator = 0;
-
-  /** シミュレーションの固定タイムステップ (秒)。 */
   readonly fixedStep = 1 / 30;
-
-  /** 1フレームに実行する物理サブステップの上限(処理落ちの暴走防止)。 */
   maxSubSteps = 120;
 
   advance(realDeltaSec: number): number {
@@ -32,6 +23,8 @@ export class SimulationClock {
   get hour(): number { return Math.floor((this._totalSeconds / 3600) % 24); }
   get minute(): number { return Math.floor((this._totalSeconds / 60) % 60); }
   get second(): number { return Math.floor(this._totalSeconds % 60); }
+  /** 一日の連続時刻(0..24, 小数)。スケジュール判定に使う。 */
+  get hourF(): number { return (this._totalSeconds / 3600) % 24; }
   get dayPhase(): number { return (this._totalSeconds / 86400) % 1; }
   get day(): number { return Math.floor(this._totalSeconds / 86400); }
 

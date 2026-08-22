@@ -1,6 +1,6 @@
 import { SimulationClock } from '../core/SimulationClock';
 import { SpatialHashGrid } from '../core/SpatialHashGrid';
-import { AgentStore, AgentState } from '../agents/AgentStore';
+import { AgentStore, AgentState, Occupation } from '../agents/AgentStore';
 import { NeedSystem } from '../agents/NeedSystem';
 import { UtilityBrain } from '../agents/UtilityBrain';
 import { CityGenerator, CityConfig } from '../generation/CityGenerator';
@@ -8,23 +8,16 @@ import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
 import { TrafficSystem } from '../traffic/TrafficSystem';
 import { SignalSystem } from '../traffic/SignalSystem';
 import { SidewalkNetwork } from '../traffic/SidewalkNetwork';
-import { roadWidth, crosswalkSetback, CROSSWALK_DEPTH } from '../traffic/RoadNetwork';
 import { AStar } from '../traffic/AStar';
 import { POICategory } from './POI';
+import { makeRng } from '../core/math';
 
 const EMPTY_PATH = new Int32Array(0);
 
 /**
  * World: 全システムのオーケストレータ。
- *
- * 1ステップの順序:
- *   1. SignalSystem  信号位相を進める
- *   2. NeedSystem    ニーズ減衰
- *   3. UtilityBrain  Idle に目的選定
- *   4. beginTrip     Routing を「運転(車)」か「徒歩(歩道A*)」に分岐
- *   5. TrafficSystem 車両を IDM+信号 で前進
- *   6. walkStep      徒歩を歩道経路に沿って前進(交差点で歩行者信号待ち)
- *   7. 到着車両の降車 & 活動(滞在)
+ * 歩行者は歩道グラフ(車道の脇)を歩き、車は駐車場に停まって再利用される。
+ * 職業別スケジュールで昼夜問わず多様な人が移動する。
  */
 export class World {
   readonly clock = new SimulationClock();
@@ -33,25 +26,19 @@ export class World {
   readonly city: CityGenerator;
   readonly traffic: TrafficSystem;
   readonly signals: SignalSystem;
-  /** 歩行者専用の独立ネットワーク(歩道)。将来 歩道橋/専用道 を追加可能。 */
   readonly sidewalk: SidewalkNetwork;
 
   private readonly grid = new SpatialHashGrid(8);
   private readonly needs = new NeedSystem();
   private readonly brain: UtilityBrain;
   private readonly walkAstar: AStar;
-
-  /** 歩行者の歩道経路(SidewalkNetwork のノードID列)。index = agent index。 */
   private walkPaths: Int32Array[];
+  private rng = makeRng(999);
 
-  /** この距離(m)以上は車を使う。未満は徒歩。 */
-  driveThreshold = 250;
-  /** 歩道オフセット(道路中心から横にずらす量, m)。 */
-  private sidewalkOffset = 1.3;
-
+  driveThreshold = 180;
   private decideCursor = 0;
 
-  constructor(cityCfg: CityConfig, agentCapacity: number, vehicleCapacity = 4000) {
+  constructor(cityCfg: CityConfig, agentCapacity: number, vehicleCapacity = 8000) {
     this.store = new AgentStore(agentCapacity);
     this.vehicles = new VehicleStore(vehicleCapacity);
     this.city = new CityGenerator(cityCfg);
@@ -59,10 +46,23 @@ export class World {
     this.brain = new UtilityBrain(this.city.poi);
     this.signals = new SignalSystem(this.city.net, cityCfg.seed ^ 0x51ed);
     this.traffic = new TrafficSystem(this.city.net, this.vehicles, this.signals);
-    // 歩道は車道から自動生成した独立グラフ。歩行者経路探索は歩道グラフ上で行う。
     this.sidewalk = new SidewalkNetwork(this.city.net);
     this.walkAstar = new AStar(this.sidewalk, 'walk');
     this.walkPaths = new Array(agentCapacity).fill(EMPTY_PATH);
+  }
+
+  // ---- 職業スケジュール ----
+  private assignOccupation(): { occ: Occupation; start: number; end: number } {
+    const r = this.rng();
+    if (r < 0.25) return { occ: Occupation.Office, start: 9, end: 18 };
+    if (r < 0.33) return { occ: Occupation.ShiftEarly, start: 6, end: 14 };
+    if (r < 0.41) return { occ: Occupation.ShiftLate, start: 14, end: 22 };
+    if (r < 0.46) return { occ: Occupation.NightShift, start: 22, end: 6 };
+    if (r < 0.61) return { occ: Occupation.Student, start: 8, end: 15 };
+    if (r < 0.73) return { occ: Occupation.Retail, start: 10, end: 20 };
+    if (r < 0.80) return { occ: Occupation.Freelance, start: 10, end: 16 };
+    if (r < 0.88) return { occ: Occupation.Unemployed, start: 0, end: 0 };
+    return { occ: Occupation.Retiree, start: 0, end: 0 };
   }
 
   populate(count: number): void {
@@ -70,265 +70,236 @@ export class World {
     if (poiReg.size === 0) return;
     for (let n = 0; n < count; n++) {
       let homeId = -1;
-      for (let tries = 0; tries < 8; tries++) {
-        const cand = Math.floor(Math.random() * poiReg.size);
-        if (poiReg.get(cand).category === POICategory.Home) { homeId = cand; break; }
+      for (let t = 0; t < 8; t++) {
+        const c = Math.floor(this.rng() * poiReg.size);
+        if (poiReg.get(c).category === POICategory.Home) { homeId = c; break; }
       }
       const home = homeId >= 0 ? poiReg.get(homeId) : poiReg.get(0);
-      const i = this.store.spawn(home.x + (Math.random() - 0.5) * 8, home.z + (Math.random() - 0.5) * 8);
+      const i = this.store.spawn(home.x + (this.rng() - 0.5) * 8, home.z + (this.rng() - 0.5) * 8);
       if (i < 0) break;
-      this.store.homePOI[i] = homeId;
-      this.store.workPOI[i] = poiReg.findBest(POICategory.Work, home.x, home.z, this.store.wealth[i]);
+      const s = this.store;
+      s.homePOI[i] = homeId;
+      const { occ, start, end } = this.assignOccupation();
+      s.occupation[i] = occ; s.workStart[i] = start; s.workEnd[i] = end;
+      // 就労者のみ職場を割当。通勤距離に多様性を持たせる(半数は遠方勤務=車通勤の主因)。
+      const working = occ !== Occupation.Unemployed && occ !== Occupation.Retiree;
+      if (working) {
+        if (this.rng() < 0.5) {
+          s.workPOI[i] = poiReg.findBest(POICategory.Work, home.x, home.z, s.wealth[i]);
+        } else {
+          // 遠方勤務: 街の別地点の Work を選ぶ
+          const rx = this.rng() * this.city.sizeMeters;
+          const rz = this.rng() * this.city.sizeMeters;
+          const far = poiReg.findBest(POICategory.Work, rx, rz, s.wealth[i]);
+          s.workPOI[i] = far >= 0 ? far : poiReg.findBest(POICategory.Work, home.x, home.z, s.wealth[i]);
+        }
+      } else s.workPOI[i] = -1;
+      // 車の所有(職業と資産で確率変動)
+      let carProb = 0.35;
+      if (occ === Occupation.Office || occ === Occupation.Retiree) carProb = 0.5;
+      if (occ === Occupation.Student || occ === Occupation.Unemployed) carProb = 0.15;
+      if (this.rng() < carProb) {
+        const lot = poiReg.findNearest(POICategory.Parking, home.x, home.z, true);
+        if (lot >= 0) {
+          const p = poiReg.get(lot);
+          const v = this.vehicles.create(i, lot, p.x + (this.rng() - 0.5) * 6, p.z + (this.rng() - 0.5) * 6);
+          if (v >= 0) { s.ownsCar[i] = 1; s.car[i] = v; p.occupancy++; }
+        }
+      }
     }
   }
 
   step(dtSec: number): void {
     const s = this.store;
     const now = this.clock.totalSeconds;
-
-    // 1. 信号位相
     this.signals.update(dtSec);
-
-    // 2. ニーズ減衰
     this.needs.update(s, dtSec);
 
-    // 3. 意思決定(時間分割 + 間引き)
     const budget = Math.min(s.count, 512);
     for (let k = 0; k < budget; k++) {
       const i = (this.decideCursor + k) % s.count;
       if (s.state[i] === AgentState.Idle && now >= s.nextDecideAt[i]) {
         this.brain.decide(s, i, this.clock);
-        if (s.state[i] === AgentState.Idle) s.nextDecideAt[i] = now + 900 + Math.random() * 1800;
+        if (s.state[i] === AgentState.Idle) s.nextDecideAt[i] = now + 600 + this.rng() * 1200;
       }
     }
     this.decideCursor = (this.decideCursor + budget) % Math.max(1, s.count);
 
-    // 4. Routing → 運転/徒歩に分岐
-    for (let i = 0; i < s.count; i++) {
+    for (let i = 0; i < s.count; i++)
       if (s.state[i] === AgentState.Routing) this.beginTrip(i);
-    }
 
-    // 5. 車両交通(IDM + 信号)
     this.traffic.update(dtSec);
 
-    // 6. 徒歩(歩道経路追従 + 歩行者信号)
     this.buildTravelerIndex();
     for (let i = 0; i < s.count; i++) {
-      if (s.state[i] === AgentState.Traveling) this.walkStep(i, dtSec);
+      const st = s.state[i];
+      if (st === AgentState.Traveling || st === AgentState.ToVehicle) this.walkStep(i, dtSec);
     }
 
-    // 7. 到着車両の降車
     this.handleArrivedVehicles();
 
-    // 8. 活動
-    for (let i = 0; i < s.count; i++) {
+    for (let i = 0; i < s.count; i++)
       if (s.state[i] === AgentState.Engaged) this.activity(i, now);
-    }
   }
 
-  /** Routing → 距離判定して運転 or 徒歩(歩道A*で経路を組む)。 */
+  /** Routing → 運転(車まで徒歩→運転→駐車→徒歩) or 直接徒歩 に振り分け。 */
   private beginTrip(i: number): void {
     const s = this.store;
-    const dx = s.goalX[i] - s.posX[i];
-    const dz = s.goalZ[i] - s.posZ[i];
+    const dx = s.goalX[i] - s.posX[i], dz = s.goalZ[i] - s.posZ[i];
     const far = Math.hypot(dx, dz) >= this.driveThreshold;
 
-    if (far) {
-      const v = this.vehicles.spawn(i);
-      if (v >= 0 && this.traffic.dispatch(v, s.posX[i], s.posZ[i], s.goalX[i], s.goalZ[i])) {
-        s.vehicle[i] = v;
-        s.state[i] = AgentState.Driving;
+    if (far && s.ownsCar[i] && s.car[i] >= 0) {
+      const v = s.car[i];
+      // 目的地近くの駐車場を確保できる場合のみ運転
+      const destLot = this.city.poi.findNearest(POICategory.Parking, s.goalX[i], s.goalZ[i], true);
+      if (destLot >= 0 && this.vehicles.state[v] === VehicleState.Parked) {
+        s.destParkPOI[i] = destLot;
+        const carX = this.vehicles.posX[v], carZ = this.vehicles.posZ[v];
+        const dCar = Math.hypot(s.posX[i] - carX, s.posZ[i] - carZ);
+        if (dCar < 25) {
+          // 既に車の近く → すぐ発進
+          this.startDriving(i);
+        } else {
+          // 車まで徒歩
+          this.assignWalkPath(i, carX, carZ);
+          s.state[i] = AgentState.ToVehicle;
+        }
         return;
       }
     }
-    // 徒歩: 歩道ネットワーク上の経路を計算(短距離は直行)
-    this.assignWalkPath(i);
+    // 徒歩で目的地へ
+    this.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
     s.state[i] = AgentState.Traveling;
   }
 
-  /** 出発地→目的地の歩道ノード経路(SidewalkNetwork上)を計算し walkPaths に格納。 */
-  private assignWalkPath(i: number): void {
+  /** 車に乗って目的地近くの駐車場へ発進。 */
+  private startDriving(i: number): void {
+    const s = this.store;
+    const v = s.car[i];
+    const lot = this.city.poi.get(s.destParkPOI[i]);
+    // 出発駐車場の占有を解放
+    if (this.vehicles.parkPOI[v] >= 0) {
+      const from = this.city.poi.get(this.vehicles.parkPOI[v]);
+      from.occupancy = Math.max(0, from.occupancy - 1);
+    }
+    if (this.traffic.dispatch(v, this.vehicles.posX[v], this.vehicles.posZ[v], lot.x, lot.z)) {
+      s.state[i] = AgentState.Driving;
+    } else {
+      // 経路不能 → 徒歩フォールバック
+      this.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
+      s.state[i] = AgentState.Traveling;
+    }
+  }
+
+  private assignWalkPath(i: number, tx: number, tz: number): void {
     const s = this.store;
     const startNode = this.sidewalk.nearestNode(s.posX[i], s.posZ[i]);
-    const goalNode = this.sidewalk.nearestNode(s.goalX[i], s.goalZ[i]);
+    const goalNode = this.sidewalk.nearestNode(tx, tz);
     if (startNode < 0 || goalNode < 0 || startNode === goalNode) {
-      this.walkPaths[i] = EMPTY_PATH;
-      s.pathHandle[i] = -1;
-      s.pathCursor[i] = 0;
-      s.waiting[i] = 0;
-      return;
-    }
-    const path = this.walkAstar.findPath(startNode, goalNode);
-    if (path.length < 2) {
-      this.walkPaths[i] = EMPTY_PATH;
-      s.pathHandle[i] = -1;
+      this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1;
     } else {
-      this.walkPaths[i] = Int32Array.from(path);
-      s.pathHandle[i] = 1;
+      const path = this.walkAstar.findPath(startNode, goalNode);
+      if (path.length < 2) { this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1; }
+      else { this.walkPaths[i] = Int32Array.from(path); s.pathHandle[i] = 1; }
     }
-    s.pathCursor[i] = 0;
-    s.waiting[i] = 0;
+    s.pathCursor[i] = 0; s.waiting[i] = 0;
+    // 現在の徒歩レグの最終目標を legX/legZ 相当として goalX/goalZ とは別に保持しないため、
+    // Traveling は goalX/goalZ、ToVehicle は毎ステップ車位置を参照する(walkStepで分岐)。
   }
 
   private handleArrivedVehicles(): void {
-    const vs = this.vehicles;
-    const s = this.store;
+    const vs = this.vehicles, s = this.store;
     for (let v = 0; v < vs.count; v++) {
       if (vs.state[v] !== VehicleState.Arrived) continue;
       const driver = vs.driver[v];
+      // 駐車場に駐車
+      let lotId = driver >= 0 ? s.destParkPOI[driver] : -1;
+      if (lotId < 0) lotId = this.city.poi.findNearest(POICategory.Parking, vs.posX[v], vs.posZ[v], false);
+      vs.state[v] = VehicleState.Parked;
+      vs.parkPOI[v] = lotId;
+      vs.speed[v] = 0;
+      if (lotId >= 0) {
+        const lot = this.city.poi.get(lotId);
+        vs.posX[v] = lot.x + (this.rng() - 0.5) * 8;
+        vs.posZ[v] = lot.z + (this.rng() - 0.5) * 8;
+        lot.occupancy++;
+      }
+      // 運転者は降車して最終目的地へ徒歩
       if (driver >= 0) {
-        s.posX[driver] = vs.posX[v];
-        s.posZ[driver] = vs.posZ[v];
-        s.vehicle[driver] = -1;
-        // 降車後は目的POIまで徒歩(最終アプローチは直行)
-        this.walkPaths[driver] = EMPTY_PATH;
-        s.pathHandle[driver] = -1;
-        s.pathCursor[driver] = 0;
-        s.waiting[driver] = 0;
+        s.posX[driver] = vs.posX[v]; s.posZ[driver] = vs.posZ[v];
+        s.destParkPOI[driver] = -1;
+        this.assignWalkPath(driver, s.goalX[driver], s.goalZ[driver]);
         s.state[driver] = AgentState.Traveling;
       }
-      this.recycleVehicle(v);
-      v--; // スワップで来た車両を再評価
     }
-  }
-
-  private recycleVehicle(v: number): void {
-    const vs = this.vehicles;
-    const last = vs.count - 1;
-    if (v !== last) {
-      vs.posX[v] = vs.posX[last]; vs.posZ[v] = vs.posZ[last]; vs.heading[v] = vs.heading[last];
-      vs.speed[v] = vs.speed[last]; vs.maxSpeed[v] = vs.maxSpeed[last]; vs.accel[v] = vs.accel[last];
-      vs.length[v] = vs.length[last]; vs.aMax[v] = vs.aMax[last]; vs.bComf[v] = vs.bComf[last];
-      vs.t0[v] = vs.t0[last]; vs.s0[v] = vs.s0[last];
-      vs.fromNode[v] = vs.fromNode[last]; vs.toNode[v] = vs.toNode[last]; vs.edge[v] = vs.edge[last];
-      vs.segT[v] = vs.segT[last]; vs.segLen[v] = vs.segLen[last];
-      vs.state[v] = vs.state[last]; vs.driver[v] = vs.driver[last];
-      vs.paths[v] = vs.paths[last]; vs.pathCursor[v] = vs.pathCursor[last];
-      if (vs.driver[v] >= 0) this.store.vehicle[vs.driver[v]] = v;
-    }
-    vs.count--;
   }
 
   private buildTravelerIndex(): void {
     this.grid.clear();
     const s = this.store;
     for (let i = 0; i < s.count; i++) {
-      if (s.state[i] === AgentState.Traveling) this.grid.insert(i, s.posX[i], s.posZ[i]);
+      const st = s.state[i];
+      if (st === AgentState.Traveling || st === AgentState.ToVehicle)
+        this.grid.insert(i, s.posX[i], s.posZ[i]);
     }
   }
 
-  /**
-   * 徒歩の1ステップ。歩道経路(walkPaths[i])に沿って進み、交差点では
-   * 歩行者信号(=平行車道が青か)を見て赤なら手前で待機する。
-   * 経路が無い場合は目的地へ直行(降車後の最終アプローチ・短距離)。
-   */
+  /** 徒歩1ステップ。歩道グラフ(車道の脇)を辿り、横断歩道で歩行者信号に従う。 */
   private walkStep(i: number, dt: number): void {
     const s = this.store;
     const sw = this.sidewalk;
     const path = this.walkPaths[i];
     const hasPath = s.pathHandle[i] > 0 && path.length >= 2;
 
-    // 目標点(tx,tz)を決める
-    let tx = s.goalX[i], tz = s.goalZ[i];
-    let arriving = !hasPath; // 経路なし→最終目的地へ
+    // このレグの最終目標
+    let finalX: number, finalZ: number;
+    if (s.state[i] === AgentState.ToVehicle && s.car[i] >= 0) {
+      finalX = this.vehicles.posX[s.car[i]]; finalZ = this.vehicles.posZ[s.car[i]];
+    } else { finalX = s.goalX[i]; finalZ = s.goalZ[i]; }
+
+    let tx = finalX, tz = finalZ;
+    let arriving = !hasPath;
 
     if (hasPath) {
       const cur = s.pathCursor[i];
       if (cur < path.length) {
         const node = sw.nodes[path[cur]];
-
+        tx = node.x; tz = node.z; // 歩道ノードは既に車道の外にある
+        // 次エッジが横断歩道 かつ 信号あり → 歩行者信号を確認
         if (cur + 1 < path.length) {
-          const nx = sw.nodes[path[cur + 1]];
-          let dxx = nx.x - node.x, dzz = nx.z - node.z;
-          const L = Math.hypot(dxx, dzz) || 1;
-          dxx /= L; dzz /= L;
-
-          // この交差点に信号があるか(=横断歩道に吸着させる対象か)
-          const signalized =
-            node.roadNode >= 0 && !node.gradeSeparated &&
-            this.signals.modeOf(node.roadNode) !== null;
-
-          if (signalized) {
-            // ---- 横断歩道へ吸着 ----
-            // 描画と同じ setback を用いる。接近・退出は歩道オフセット上を歩き、
-            // 信号待ちと横断の判定だけを縁石(near/far)で行う。
-            const swEdge = sw.edgeBetween(path[cur], path[cur + 1]);
-            const rw = roadWidth(swEdge ? swEdge.roadLanes : 1);
-            const off = rw / 2 + this.sidewalkOffset; // 歩道帯へのオフセット
-            const px = dzz * off, pz = -dxx * off;     // 進行方向の右手側
-            const setback = crosswalkSetback(rw);
-            const nearS = setback - CROSSWALK_DEPTH * 0.5 - 0.5; // 横断前の縁石
-            const farS = setback + CROSSWALK_DEPTH * 0.5;        // 渡り切った先
-            // near/far は「歩道オフセット付き」の点にして、接近中は車道に出さない
-            const nearX = node.x + dxx * nearS + px, nearZ = node.z + dzz * nearS + pz;
-            const farX = node.x + dxx * farS + px, farZ = node.z + dzz * farS + pz;
-
-            const axis = sw.axisOf(path[cur], path[cur + 1]);
-            const green = this.signals.pedWalk(node.roadNode, axis);
-            const dNear = Math.hypot(s.posX[i] - nearX, s.posZ[i] - nearZ);
-
-            if (!green && dNear < 4) {
-              // 赤 かつ 縁石付近: 横断歩道の手前で待機(まだ遠いなら歩道を接近)
-              tx = nearX; tz = nearZ;
-              s.waiting[i] = 1;
-              s.velX[i] = 0; s.velZ[i] = 0;
-              return;
-            }
-            // 青、または縁石までまだ距離がある: 歩道上を near→far へ進む
-            s.waiting[i] = 0;
-            tx = green ? farX : nearX;
-            tz = green ? farZ : nearZ;
-            const dFar = Math.hypot(s.posX[i] - farX, s.posZ[i] - farZ);
-            if (green && dFar < 3) {
-              s.pathCursor[i] = cur + 1;
-              if (cur + 1 >= path.length) arriving = true;
-            }
-          } else {
-            // 信号なし/歩道橋/専用道: 歩道帯の中央に乗るオフセットで進む。
-            // 歩道は車道幅/2 の外側に描かれるため、オフセットもそれに合わせる
-            // (固定4mでは広い道路で車道上を歩いてしまうため道路幅に連動させる)。
-            let off = 0;
-            if (!node.gradeSeparated) {
-              const swEdge = sw.edgeBetween(path[cur], path[cur + 1]);
-              const rw = roadWidth(swEdge ? swEdge.roadLanes : 1);
-              off = rw / 2 + this.sidewalkOffset; // 車道の外側=歩道帯の中央付近
-            }
-            const wpx = node.x + dzz * off;
-            const wpz = node.z + (-dxx) * off;
-            tx = wpx; tz = wpz;
-            // 到達判定は「オフセット後の歩道ウェイポイント」への距離で行う
-            // (ノード中心基準にするとオフセット分だけ届かず前進できないため)。
-            const dWp = Math.hypot(s.posX[i] - wpx, s.posZ[i] - wpz);
-            if (dWp < 3) {
-              s.waiting[i] = 0;
-              s.pathCursor[i] = cur + 1;
-              if (cur + 1 >= path.length) arriving = true;
+          const e = sw.edgeBetween(path[cur], path[cur + 1]);
+          if (e && e.crossing && this.signals.modeOf(node.roadNode) !== null) {
+            if (!this.signals.pedWalk(node.roadNode, e.axis)) {
+              const dN = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
+              if (dN < 3) { s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0; return; }
             }
           }
-        } else {
-          // 最終ノード: ノード中心へ寄ってから目的地(POI)へ
-          tx = node.x; tz = node.z;
-          const dNode = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
-          if (dNode < 5) { s.pathCursor[i] = cur + 1; arriving = true; }
         }
-      } else {
-        arriving = true;
-      }
+        s.waiting[i] = 0;
+        if (Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 2.5) {
+          s.pathCursor[i] = cur + 1;
+          if (cur + 1 >= path.length) arriving = true;
+        }
+      } else arriving = true;
     }
+    if (arriving) { tx = finalX; tz = finalZ; }
 
-    if (arriving) { tx = s.goalX[i]; tz = s.goalZ[i]; }
-
-    const dx = tx - s.posX[i];
-    const dz = tz - s.posZ[i];
+    const dx = tx - s.posX[i], dz = tz - s.posZ[i];
     const d2 = dx * dx + dz * dz;
 
-    // 最終目的地(POI)に到着
-    if (arriving && d2 < 4) {
+    // 到着処理
+    if (arriving && d2 < 9) {
+      if (s.state[i] === AgentState.ToVehicle) {
+        // 車に到着 → 発進
+        s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0;
+        s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH;
+        this.startDriving(i);
+        return;
+      }
+      // 目的地POIに到着
       s.state[i] = AgentState.Engaged;
-      s.velX[i] = 0; s.velZ[i] = 0;
-      s.waiting[i] = 0;
-      s.pathHandle[i] = -1;
-      this.walkPaths[i] = EMPTY_PATH;
+      s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0;
+      s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH;
       const p = this.city.poi.get(s.goalPOI[i]);
       if (p) { p.occupancy++; s.dwellUntil[i] = this.computeDwellUntil(p.category); }
       return;
@@ -336,56 +307,36 @@ export class World {
 
     const inv = d2 > 1e-4 ? 1 / Math.sqrt(d2) : 0;
     let desX = dx * inv, desZ = dz * inv;
-
-    // 近接分離(歩行者同士)
     let sepX = 0, sepZ = 0, nn = 0;
     this.grid.queryNeighbors(s.posX[i], s.posZ[i], 2, (j) => {
       if (j === i) return;
-      const ddx = s.posX[i] - s.posX[j];
-      const ddz = s.posZ[i] - s.posZ[j];
+      const ddx = s.posX[i] - s.posX[j], ddz = s.posZ[i] - s.posZ[j];
       const dd = ddx * ddx + ddz * ddz;
-      if (dd > 0 && dd < 4) {
-        const w = 1 / Math.sqrt(dd);
-        sepX += ddx * w; sepZ += ddz * w; nn++;
-      }
+      if (dd > 0 && dd < 4) { const w = 1 / Math.sqrt(dd); sepX += ddx * w; sepZ += ddz * w; nn++; }
     });
     if (nn > 0) { desX += (sepX / nn) * 0.6; desZ += (sepZ / nn) * 0.6; }
-
     const mag = Math.hypot(desX, desZ) || 1;
     const sp = s.maxSpeed[i];
-    s.velX[i] = (desX / mag) * sp;
-    s.velZ[i] = (desZ / mag) * sp;
-    s.posX[i] += s.velX[i] * dt;
-    s.posZ[i] += s.velZ[i] * dt;
+    s.velX[i] = (desX / mag) * sp; s.velZ[i] = (desZ / mag) * sp;
+    s.posX[i] += s.velX[i] * dt; s.posZ[i] += s.velZ[i] * dt;
     s.heading[i] = Math.atan2(s.velZ[i], s.velX[i]);
-    s.waiting[i] = 0;
   }
 
   private computeDwellUntil(cat: POICategory): number {
-    const now = this.clock.totalSeconds;
-    const hour = this.clock.hour;
-    const H = 3600;
+    const now = this.clock.totalSeconds, hour = this.clock.hour, H = 3600;
     switch (cat) {
       case POICategory.Home: {
-        if (hour >= 22 || hour < 7) {
-          const secToday = now % 86400;
-          const wake = 7 * H;
-          return secToday < wake ? now + (wake - secToday) : now + (24 * H - secToday) + wake;
+        if (hour >= 22 || hour < 6) {
+          const sec = now % 86400, wake = (6 + Math.random() * 2) * H;
+          return sec < wake ? now + (wake - sec) : now + (24 * H - sec) + wake;
         }
-        return now + (1.5 + Math.random() * 1.5) * H;
+        return now + (1 + Math.random() * 2) * H;
       }
-      case POICategory.Work: {
-        const secToday = now % 86400;
-        const endToday = 18 * H;
-        const until = secToday < endToday ? now + (endToday - secToday) : now + 1 * H;
-        return Math.max(until, now + 1 * H);
-      }
-      case POICategory.Food:
-        return now + (0.5 + Math.random() * 0.5) * H;
-      case POICategory.Leisure:
-        return now + (1 + Math.random()) * H;
-      default:
-        return now + 0.5 * H;
+      case POICategory.Work: return now + (3 + Math.random() * 3) * H;
+      case POICategory.Food: return now + (0.4 + Math.random() * 0.5) * H;
+      case POICategory.Leisure: return now + (1 + Math.random() * 1.5) * H;
+      case POICategory.Retail: return now + (0.4 + Math.random() * 0.6) * H;
+      default: return now + 0.5 * H;
     }
   }
 
@@ -395,7 +346,6 @@ export class World {
     if (!poi) { s.state[i] = AgentState.Idle; return; }
     const dt = this.clock.fixedStep;
     const rec = (perSec: number) => perSec * dt;
-
     switch (poi.category) {
       case POICategory.Home:
         s.energy[i] = Math.min(1, s.energy[i] + rec(1 / 1800));
@@ -403,23 +353,19 @@ export class World {
         s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 6000));
         break;
       case POICategory.Food:
-        s.hunger[i] = Math.min(1, s.hunger[i] + rec(1 / 600));
-        break;
+        s.hunger[i] = Math.min(1, s.hunger[i] + rec(1 / 600)); break;
       case POICategory.Work:
-        s.wealth[i] = Math.min(1, s.wealth[i] + rec(1 / 20000));
-        break;
+        s.wealth[i] = Math.min(1, s.wealth[i] + rec(1 / 20000)); break;
       case POICategory.Leisure:
         s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 1800));
-        s.social[i] = Math.min(1, s.social[i] + rec(1 / 2400));
-        break;
+        s.social[i] = Math.min(1, s.social[i] + rec(1 / 2400)); break;
+      case POICategory.Retail:
+        s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 4000)); break;
       default:
         s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 3000));
     }
-
-    const critical =
-      (poi.category !== POICategory.Food && s.hunger[i] < 0.05) ||
-      (poi.category !== POICategory.Home && s.energy[i] < 0.05);
-
+    const critical = (poi.category !== POICategory.Food && s.hunger[i] < 0.05) ||
+                     (poi.category !== POICategory.Home && s.energy[i] < 0.05);
     if (now >= s.dwellUntil[i] || critical) {
       poi.occupancy = Math.max(0, poi.occupancy - 1);
       s.goalPOI[i] = -1;
@@ -428,38 +374,37 @@ export class World {
     }
   }
 
-  stats(): { agents: number; buildings: number; nodes: number; pois: number; vehicles: number; signals: number; sidewalkNodes: number } {
+  stats() {
+    let driving = 0, parked = 0;
+    for (let v = 0; v < this.vehicles.count; v++)
+      this.vehicles.state[v] === VehicleState.Driving ? driving++ : parked++;
     return {
       agents: this.store.count,
       buildings: this.city.buildings.length,
       nodes: this.city.net.nodes.length,
       pois: this.city.poi.size,
-      vehicles: this.vehicles.count,
+      vehiclesDriving: driving,
+      vehiclesTotal: this.vehicles.count,
+      parkingLots: this.city.parkingLots.length,
       signals: this.signals.count,
-      sidewalkNodes: this.sidewalk.nodes.length,
     };
   }
 
-  activitySnapshot(): {
-    traveling: number; home: number; work: number;
-    food: number; leisure: number; idle: number; driving: number;
-  } {
+  activitySnapshot() {
     const s = this.store;
     let traveling = 0, home = 0, work = 0, food = 0, leisure = 0, idle = 0, driving = 0;
     for (let i = 0; i < s.count; i++) {
       const st = s.state[i];
       if (st === AgentState.Driving) { driving++; continue; }
-      if (st === AgentState.Traveling || st === AgentState.Routing) { traveling++; continue; }
+      if (st === AgentState.Traveling || st === AgentState.Routing || st === AgentState.ToVehicle) { traveling++; continue; }
       if (st === AgentState.Engaged) {
         const g = s.goalPOI[i];
         const cat = g >= 0 ? this.city.poi.get(g).category : -1;
-        switch (cat) {
-          case POICategory.Home: home++; break;
-          case POICategory.Work: work++; break;
-          case POICategory.Food: food++; break;
-          case POICategory.Leisure: leisure++; break;
-          default: idle++;
-        }
+        if (cat === POICategory.Home) home++;
+        else if (cat === POICategory.Work) work++;
+        else if (cat === POICategory.Food) food++;
+        else if (cat === POICategory.Leisure || cat === POICategory.Retail) leisure++;
+        else idle++;
         continue;
       }
       idle++;

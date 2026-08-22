@@ -1,7 +1,4 @@
-/**
- * OOP ドメイン層(ファサード)。
- * ホットループは SoA(TypedArray)で処理し、GameObject はその1行への薄いハンドルに徹する。
- */
+/** OOPドメイン層。ホットループはSoAで処理し、これは1行への薄いハンドル。 */
 export type EntityId = number;
 
 export interface ISimulated {
@@ -11,25 +8,15 @@ export interface ISimulated {
   serialize(): Record<string, unknown>;
 }
 
-export interface ILocatable {
-  position(): { x: number; z: number };
-}
-
-export abstract class GameObject implements ISimulated, ILocatable {
+export abstract class GameObject implements ISimulated {
   private static _next: EntityId = 1;
   readonly id: EntityId;
   abstract readonly kind: string;
   enabled = true;
-
-  constructor(id?: EntityId) {
-    this.id = id ?? GameObject._next++;
-  }
-
+  constructor(id?: EntityId) { this.id = id ?? GameObject._next++; }
   abstract get x(): number;
   abstract get z(): number;
-
   position(): { x: number; z: number } { return { x: this.x, z: this.z }; }
-
   serialize(): Record<string, unknown> {
     return { id: this.id, kind: this.kind, x: this.x, z: this.z, enabled: this.enabled };
   }

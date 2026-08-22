@@ -8,8 +8,6 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitOverride": true,
-    "noUncheckedIndexedAccess": false,
-    "exactOptionalPropertyTypes": false,
     "useDefineForClassFields": true,
     "skipLibCheck": true,
     "isolatedModules": true,
