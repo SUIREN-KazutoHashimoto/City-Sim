@@ -5,12 +5,7 @@ import { AgentState } from '../agents/AgentStore';
 import { POICategory } from '../world/POI';
 
 /**
- * ============================================================================
- *  Inspector: ホバーで対象を調べるツールチップ + エージェント追跡
- * ============================================================================
- * 左ボタン非押下(=ステータス表示モード)のとき、マウス直下の歩行者/建物を
- * レイキャストで特定し説明とステータスを表示する。左ボタン押下中は視点回転優先。
- * エージェント上でホイールクリックすると追跡(常時ステータス+カメラ追従)。
+ * Inspector: 左ボタン非押下でホバー調査、エージェント上でホイールクリック追跡。
  */
 export class Inspector {
   private raycaster = new THREE.Raycaster();
@@ -80,7 +75,6 @@ export class Inspector {
     this.followPos.set(s.posX[this.followedAgent], 0, s.posZ[this.followedAgent]);
     return this.followPos;
   }
-  stopFollow(): void { this.followedAgent = -1; }
 
   private hide(): void { this.el.style.display = 'none'; }
 
@@ -129,10 +123,11 @@ export class Inspector {
     const goal = s.goalPOI[i];
     const goalCat = goal >= 0 ? POICategory[this.world.city.poi.get(goal).category] : '—';
     const speed = Math.hypot(s.velX[i], s.velZ[i]);
+    const wait = s.waiting[i] ? '  🚦信号待ち' : '';
     return (
       `👤 市民 #${i}\n` +
       `年齢 ${s.age[i]}   所持金 ${(s.wealth[i] * 100).toFixed(0)}%\n` +
-      `状態 ${state}   速度 ${speed.toFixed(1)} m/s\n` +
+      `状態 ${state}${wait}   速度 ${speed.toFixed(1)} m/s\n` +
       `目的地 ${goalCat}\n` +
       `─────────────\n` +
       `体力 ${this.bar(s.energy[i])}\n` +

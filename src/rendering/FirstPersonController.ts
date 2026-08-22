@@ -1,20 +1,9 @@
 import * as THREE from 'three';
 
 /**
- * ============================================================================
- *  一人称カメラコントローラ (左ドラッグ視点 + WASDQE)
- * ============================================================================
- * FPS流の視点移動。左クリック押下中のマウス移動で視線(yaw/pitch)、キーで移動する。
- *
- *  操作:
- *    左クリック+移動   視点回転(ドラッグ式。ポインターロックは使わない)
- *    W / A / S / D     カメラローカル基準の前後左右(pitch込みで視線方向へ飛ぶ)
- *    E / Space         上昇 / Q / Ctrl 下降(ワールド垂直)
- *    Left Shift        加速(ダッシュ)
- *
- *  追跡モード:
- *    setFollowTarget() で対象を渡すと、対象を周回する三人称カメラになる。
- *    左ドラッグで周回、ホイールで距離(followDistance)を調整する想定。
+ * 一人称カメラ(左ドラッグ視点 + WASDQE)。追跡モード対応。
+ *   左クリック+移動  視点回転 / 離す→インスペクト
+ *   WASD カメラローカル移動 / E,Space=上昇 Q,Ctrl=下降 / LShift=ダッシュ
  */
 export class FirstPersonController {
   private yaw: number;
@@ -48,9 +37,7 @@ export class FirstPersonController {
     this.domElement.addEventListener('mousedown', (e) => {
       if (e.button === 0) { this.dragging = true; e.preventDefault(); }
     });
-    window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) this.dragging = false;
-    });
+    window.addEventListener('mouseup', (e) => { if (e.button === 0) this.dragging = false; });
     document.addEventListener('mousemove', (e) => {
       if (!this.dragging) return;
       this.yaw -= e.movementX * this.lookSensitivity;
@@ -70,17 +57,13 @@ export class FirstPersonController {
     this.camera.quaternion.setFromEuler(e);
   }
 
-  setPosition(x: number, y: number, z: number): void {
-    this.camera.position.set(x, y, z);
-  }
-
+  setPosition(x: number, y: number, z: number): void { this.camera.position.set(x, y, z); }
   get isDragging(): boolean { return this.dragging; }
 
   setFollowTarget(t: THREE.Vector3 | null): void { this.followTarget = t; }
   get isFollowing(): boolean { return this.followTarget !== null; }
 
   update(dt: number): void {
-    // 追跡モード: 対象を yaw/pitch/followDistance で周回するオービットカメラ。
     if (this.followTarget) {
       const t = this.followTarget;
       const d = this.followDistance;
@@ -94,7 +77,6 @@ export class FirstPersonController {
       return;
     }
 
-    // 自由移動モード(カメラローカル基準)
     this.forward.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
     this.right.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
 
@@ -103,7 +85,6 @@ export class FirstPersonController {
     if (this.keys.has('KeyS')) mz -= 1;
     if (this.keys.has('KeyD')) mx += 1;
     if (this.keys.has('KeyA')) mx -= 1;
-    // 上昇: E または Space / 下降: Q または Ctrl(ワールド垂直)
     if (this.keys.has('KeyE') || this.keys.has('Space')) my += 1;
     if (this.keys.has('KeyQ') || this.keys.has('ControlLeft') || this.keys.has('ControlRight')) my -= 1;
 

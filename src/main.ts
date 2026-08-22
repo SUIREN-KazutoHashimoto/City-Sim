@@ -5,21 +5,11 @@ import { FirstPersonController } from './rendering/FirstPersonController';
 import { Inspector } from './rendering/Inspector';
 import { Dashboard } from './rendering/Dashboard';
 
-/**
- * エントリポイント: three.js のセットアップ + 固定ステップのシミュレーションループ。
- *
- * ループ構造(可変フレーム→固定シミュレーション):
- *   requestAnimationFrame ごとに、経過実時間から clock.advance() で
- *   実行すべき固定ステップ数を得て world.step() を回す。描画は毎フレーム1回。
- *   → フレームレートが揺れても挙動(物理/AI)は決定論的で安定する。
- */
-
 // --- 初期フェーズ設定: 10km² / 市街地 約1/3 ---
-const SIZE = Math.sqrt(10_000_000); // ≈ 3162 m 四方 = 10km²
+const SIZE = Math.sqrt(10_000_000);
 const world = new World(
   { seed: 12345, sizeMeters: SIZE, urbanRatioTarget: 1 / 3, blockSize: 90 },
-  20_000,  // エージェント収容上限
-  6_000,   // 車両収容上限
+  20_000, 6_000,
 );
 world.populate(4000);
 
@@ -37,7 +27,6 @@ scene.background = new THREE.Color(0x9fb4cc);
 scene.fog = new THREE.Fog(0x9fb4cc, 800, 3000);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 8000);
-// 初期スポーンは上空(街を俯瞰しながら降下していける)
 const SPAWN_ALT = 450;
 camera.position.set(SIZE / 2, SPAWN_ALT, SIZE / 2);
 
@@ -56,8 +45,9 @@ const gfx = new InstancedRenderer(scene);
 gfx.buildStatic(world.city.buildings, world.city.net);
 gfx.buildAgents(world.store.capacity);
 gfx.buildVehicles(world.vehicles.capacity);
+gfx.buildSignals(world.city.net, world.signals);
 
-// --- 一人称カメラ操作(左ドラッグ視点 + WASDQE) ---
+// --- カメラ操作 ---
 const controller = new FirstPersonController(camera, renderer.domElement, 0, -0.9);
 controller.setPosition(SIZE / 2, SPAWN_ALT, SIZE / 2);
 controller.followDistance = 12;
@@ -75,24 +65,20 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// --- インスペクタ & ダッシュボード ---
 const inspector = new Inspector(world, gfx, camera, renderer.domElement);
 const dashboard = new Dashboard(world, world.clock);
 
-// --- Tab で一時停止 / 再開 ---
 let paused = false;
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Tab') { e.preventDefault(); paused = !paused; }
   if (e.code === 'Space') e.preventDefault();
 });
 
-// --- HUD / 時計 ---
 const hud = document.getElementById('hud')!;
 const clockEl = document.getElementById('clock')!;
 let fps = 60, lastStats = 0;
 const st = world.stats();
 
-// ゲーム内時刻に応じた簡単な情景アイコン
 function clockIcon(hour: number): string {
   if (hour >= 5 && hour < 7) return '🌅';
   if (hour >= 7 && hour < 17) return '☀️';
@@ -101,7 +87,6 @@ function clockIcon(hour: number): string {
   return '🌙';
 }
 
-// --- メインループ ---
 let prev = performance.now();
 function frame(now: number): void {
   const dt = (now - prev) / 1000;
@@ -113,6 +98,7 @@ function frame(now: number): void {
     for (let s = 0; s < steps; s++) world.step(world.clock.fixedStep);
     gfx.syncAgents(world.store);
     gfx.syncVehicles(world.vehicles);
+    gfx.syncSignals(world.signals);
     dashboard.sample();
   }
 
@@ -123,7 +109,6 @@ function frame(now: number): void {
 
   renderer.render(scene, camera);
 
-  // 現在時刻(大きく常時表示、秒まで)
   const c = world.clock;
   const hh = String(c.hour).padStart(2, '0');
   const mm = String(c.minute).padStart(2, '0');
@@ -138,7 +123,7 @@ function frame(now: number): void {
     lastStats = now;
     hud.textContent =
       `FPS ${fps.toFixed(0)}   ×${dashboard.speedLabel}\n` +
-      `agents ${st.agents}  vehicles ${world.vehicles.count}\n` +
+      `agents ${st.agents}  vehicles ${world.vehicles.count}  signals ${st.signals}\n` +
       `buildings ${st.buildings}  POIs ${st.pois}  nodes ${st.nodes}\n` +
       `${controller.isFollowing ? `following #, dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect mode'}\n` +
       `[WASD=move  E/Space=up  Q/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +

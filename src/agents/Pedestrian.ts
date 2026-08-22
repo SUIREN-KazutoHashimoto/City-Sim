@@ -1,15 +1,7 @@
 import { GameObject } from '../world/GameObject';
 import { AgentStore, AgentState } from './AgentStore';
 
-/**
- * OOPファサードの具体例。
- * Pedestrian は AgentStore の1行(index)への型付きハンドル。
- * データは配列側にあるため、このオブジェクトは大量生成しない(選択中/検査対象のみ包む)。
- *
- * これにより「OOPで属性とメソッドを一貫して触れるAPI」と
- * 「SoAによる高速な一括更新」を同時に満たす。
- * Vehicle など他の派生も同じ Store もしくは専用 Store のハンドルとして実装する。
- */
+/** OOPファサード: AgentStore の1行への型付きハンドル(大量生成しない)。 */
 export class Pedestrian extends GameObject {
   readonly kind = 'pedestrian';
 
@@ -25,8 +17,6 @@ export class Pedestrian extends GameObject {
     return Math.hypot(this.store.velX[i], this.store.velZ[i]);
   }
   get state(): AgentState { return this.store.state[this.index]; }
-  get energy(): number { return this.store.energy[this.index]; }
-  get hunger(): number { return this.store.hunger[this.index]; }
 
   override serialize(): Record<string, unknown> {
     const i = this.index;

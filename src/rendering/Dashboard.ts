@@ -1,14 +1,7 @@
 import { World } from '../world/World';
 import { SimulationClock } from '../core/SimulationClock';
 
-/**
- * ============================================================================
- *  Dashboard: 時間帯グラフ + シミュレーション速度コントロール
- * ============================================================================
- * 画面右上に、1日(0-24時)の活動分布を積み上げエリアチャートで描く <canvas> と、
- * 時間経過スケール(timeScale)を切り替えるボタン群を表示する。
- */
-
+/** 時間帯グラフ + 速度コントロール(右上パネル)。 */
 type Snapshot = ReturnType<World['activitySnapshot']>;
 
 const CATS: { key: keyof Snapshot; label: string; color: string }[] = [
@@ -21,7 +14,6 @@ const CATS: { key: keyof Snapshot; label: string; color: string }[] = [
   { key: 'idle',      label: '待機',   color: '#4a4f5a' },
 ];
 
-/** 選択できる時間スケール(実秒あたりの倍率と表示ラベル)。 */
 export const SPEED_PRESETS: { scale: number; label: string }[] = [
   { scale: 0.5, label: '0.5×' },
   { scale: 1,   label: '1×' },

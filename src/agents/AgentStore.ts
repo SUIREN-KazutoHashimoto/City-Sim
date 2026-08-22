@@ -1,71 +1,45 @@
 /**
- * ============================================================================
- *  データ指向 実行層 (Structure of Arrays)
- * ============================================================================
- * 全エージェント(歩行者/ドライバー)の状態を「列」ごとの TypedArray で保持する。
- * これにより:
- *   - システムは配列を線形走査でき、CPUキャッシュに乗りやすい(挙動更新が速い)
- *   - SharedArrayBuffer に載せれば Web Worker と状態を共有できる(将来のマルチスレッド化)
- *   - InstancedMesh のバッファへ座標を一括コピーできる(描画が速い)
- *
- * GameObject 派生(Pedestrian等)は、この配列の index を指すハンドルに過ぎない。
+ * データ指向 実行層 (Structure of Arrays)。
+ * 全エージェントの状態を列ごとの TypedArray で保持する。
  */
-
-/** 意味的な行動状態。UtilityBrain が遷移させる。 */
 export enum AgentState {
   Idle = 0,
-  Deciding = 1,   // 次の目的を選定中
-  Routing = 2,    // 目的地への経路探索待ち
-  Traveling = 3,  // 移動中(経路追従)
-  Engaged = 4,    // 目的地で活動中(仕事/食事/睡眠 等)
-  Driving = 5,    // 車両で移動中(VehicleStore と紐付く)
+  Deciding = 1,
+  Routing = 2,
+  Traveling = 3,   // 徒歩移動中(歩道経路追従)
+  Engaged = 4,     // 目的地で活動中
+  Driving = 5,     // 車両で移動中
 }
 
 export class AgentStore {
   readonly capacity: number;
   count = 0;
 
-  // --- 物理/運動 (XZ平面) ---
-  posX: Float32Array;
-  posZ: Float32Array;
-  velX: Float32Array;
-  velZ: Float32Array;
-  heading: Float32Array;     // 進行方向(ラジアン)
-  maxSpeed: Float32Array;    // m/s (歩行:約1.4, 走行車両:別途)
+  posX: Float32Array; posZ: Float32Array;
+  velX: Float32Array; velZ: Float32Array;
+  heading: Float32Array;
+  maxSpeed: Float32Array;
 
-  // --- ニーズ(0..1, 1=完全に満たされている) ---
-  energy: Float32Array;      // 睡眠欲の逆
-  hunger: Float32Array;      // 満腹度
-  social: Float32Array;      // 社会的充足
-  hygiene: Float32Array;     // 衛生
-  fun: Float32Array;         // 娯楽
+  energy: Float32Array; hunger: Float32Array; social: Float32Array;
+  hygiene: Float32Array; fun: Float32Array;
 
-  // --- 属性(意思決定のパラメータ) ---
-  wealth: Float32Array;      // 所持金/経済力 0..1
+  wealth: Float32Array;
   age: Uint8Array;
-  occupation: Uint8Array;    // 職業種別(POIカテゴリ嗜好に対応)
+  occupation: Uint8Array;
 
-  // --- 行動/経路 ---
-  state: Uint8Array;         // AgentState
-  homePOI: Int32Array;       // 住居のPOI id (-1 = なし)
-  workPOI: Int32Array;       // 職場のPOI id
-  goalPOI: Int32Array;       // 現在の目的地POI id
-  goalX: Float32Array;
-  goalZ: Float32Array;
+  state: Uint8Array;
+  homePOI: Int32Array; workPOI: Int32Array; goalPOI: Int32Array;
+  goalX: Float32Array; goalZ: Float32Array;
 
-  // 経路はノードID列。ここでは各エージェントの現在ノード進行度のみ保持し、
-  // 経路本体は PathBuffer(別管理/ワーカー)へ持たせる想定のフックを置く。
-  pathHandle: Int32Array;    // -1 = 経路なし
-  pathCursor: Uint16Array;   // 経路上の現在インデックス
+  /** 歩道経路を持つか(1)/持たないか(-1)。持つ場合は World.walkPaths[i] を辿る。 */
+  pathHandle: Int32Array;
+  /** 歩道経路上の現在ノードインデックス。 */
+  pathCursor: Uint16Array;
+  /** 信号待ちで停止中か(1=待機)。歩行者信号の可視化・挙動に使う。 */
+  waiting: Uint8Array;
 
-  // --- 滞在/意思決定のスケジューリング(振動防止 & 負荷平準化) ---
-  /** 活動(Engaged)を継続する期限。シミュ累積秒。これ以前は原則その場に留まる。 */
   dwellUntil: Float32Array;
-  /** 次に意思決定を許可するシミュ累積秒。Idle中の再評価を間引き、思考の連打を防ぐ。 */
   nextDecideAt: Float32Array;
-
-  // --- 車両との紐付け ---
-  /** 乗車中の車両 index(-1 = 徒歩)。Driving 状態のとき有効。 */
   vehicle: Int32Array;
 
   constructor(capacity: number) {
@@ -84,18 +58,18 @@ export class AgentStore {
     this.goalX = f(); this.goalZ = f();
     this.pathHandle = new Int32Array(capacity).fill(-1);
     this.pathCursor = new Uint16Array(capacity);
+    this.waiting = new Uint8Array(capacity);
     this.dwellUntil = f();
     this.nextDecideAt = f();
     this.vehicle = new Int32Array(capacity).fill(-1);
   }
 
-  /** 新規エージェントを1体確保し index を返す。満杯なら -1。 */
   spawn(x: number, z: number): number {
     if (this.count >= this.capacity) return -1;
     const i = this.count++;
     this.posX[i] = x; this.posZ[i] = z;
     this.velX[i] = 0; this.velZ[i] = 0;
-    this.maxSpeed[i] = 1.2 + Math.random() * 0.6; // 個体差のある歩行速度
+    this.maxSpeed[i] = 1.2 + Math.random() * 0.6;
     this.energy[i] = 0.6 + Math.random() * 0.4;
     this.hunger[i] = 0.6 + Math.random() * 0.4;
     this.social[i] = 0.5 + Math.random() * 0.5;

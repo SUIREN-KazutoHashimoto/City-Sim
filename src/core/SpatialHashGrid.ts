@@ -1,24 +1,16 @@
 /**
- * 一様グリッドによる空間ハッシュ。
- * 「半径R内の他エージェント」「カメラ近傍のオブジェクト」を O(1) 近傍で引くための土台。
- * 数十万エージェントの近接判定・回避・LOD判定の要になる。
- *
- * 実装方針:
- *  - セルは Int32Array のバケットではなく Map<cellKey, number[]> で十分(挿入が単純)。
- *    大規模化する場合はカウントソート方式の詰め直し(パッキング)へ差し替える。
+ * 一様グリッドによる空間ハッシュ。近接クエリ・最寄ノード検索の土台。
  */
 export class SpatialHashGrid {
   private cells = new Map<number, number[]>();
   private readonly invCell: number;
-  // ワールド座標を非負のセル座標へ寄せるためのオフセット(km単位のワールドを想定)
-  private readonly gridDim = 1 << 16; // 65536 セル幅まで対応
+  private readonly gridDim = 1 << 16;
 
   constructor(public readonly cellSize: number) {
     this.invCell = 1 / cellSize;
   }
 
   private key(cx: number, cz: number): number {
-    // 16bit x 16bit を1つの数値キーへ
     return ((cx + (this.gridDim >> 1)) << 16) | (cz + (this.gridDim >> 1));
   }
 
@@ -33,10 +25,6 @@ export class SpatialHashGrid {
     bucket.push(id);
   }
 
-  /**
-   * (x,z) を中心に半径 radius 内の候補IDへ callback を適用する。
-   * グリッドは矩形近傍を返すため、厳密な距離判定は呼び出し側で行う。
-   */
   queryNeighbors(x: number, z: number, radius: number, cb: (id: number) => void): void {
     const minCx = Math.floor((x - radius) * this.invCell);
     const maxCx = Math.floor((x + radius) * this.invCell);

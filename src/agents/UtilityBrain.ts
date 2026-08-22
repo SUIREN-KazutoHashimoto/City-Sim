@@ -2,29 +2,16 @@ import { AgentStore, AgentState } from './AgentStore';
 import { SimulationClock } from '../core/SimulationClock';
 import { POIRegistry, POICategory } from '../world/POI';
 
-/**
- * ============================================================================
- *  Utility AI (効用ベースの意思決定)
- * ============================================================================
- * 「ステータス(ニーズ)→ 最も切実な目的 → 目的地(POI)検索 → 移動」の意味的ループ。
- *
- * 各行動は「どれだけそのエージェントに必要か」をスコア化(効用)し、最大の行動を選ぶ。
- * ルールを追加したいときは ACTIONS に1エントリ足すだけで拡張できる(開放/閉鎖原則)。
- */
-
-/** 1つの行動候補の定義。純粋関数の集合として宣言的に持つ。 */
+/** Utility AI: ニーズ → 効用最大の目的 → 目的地POI検索 → 移動。 */
 interface ActionDef {
   readonly name: string;
-  /** その行動を満たせる目的地カテゴリ */
   readonly category: POICategory;
-  /** 効用スコア: 0=不要, 1=最優先。ニーズと時刻から算出。 */
   score(store: AgentStore, i: number, clock: SimulationClock): number;
 }
 
-/** 効用カーブ: ニーズが低いほど欲求が跳ね上がる(非線形)。 */
 const urgency = (need: number): number => {
   const inv = 1 - need;
-  return inv * inv; // 二乗で「切迫」を強調
+  return inv * inv;
 };
 
 const ACTIONS: ActionDef[] = [
@@ -43,7 +30,6 @@ const ACTIONS: ActionDef[] = [
     name: 'work', category: POICategory.Work,
     score: (s, i, clock) => {
       if (s.workPOI[i] < 0) return 0;
-      // 通勤含め 8-18 時に働きたい。ニーズが逼迫していれば生存を優先。
       const inHours = clock.hour >= 8 && clock.hour < 18 ? 0.9 : 0.05;
       const survivalPressure = 0.6 * Math.max(urgency(s.energy[i]), urgency(s.hunger[i]));
       return Math.max(0, inHours - survivalPressure);
@@ -58,14 +44,11 @@ const ACTIONS: ActionDef[] = [
     score: (s, i) => urgency(s.fun[i]) * 0.7,
   },
   {
-    // 既定ルーティン: 特に切迫したニーズが無いときの「居場所」。
-    // 夜は帰宅、それ以外は在宅待機(職に就いていない/勤務時間外の受け皿)。
-    // これにより住居は常時それなりに埋まり、在館人数が自然に反映される。
     name: 'routine-home', category: POICategory.Home,
     score: (s, i, clock) => {
       if (s.homePOI[i] < 0) return 0;
       const evening = clock.hour >= 19 || clock.hour < 7;
-      return evening ? 0.35 : 0.12; // 夜は強め、日中は弱い受け皿
+      return evening ? 0.35 : 0.12;
     },
   },
 ];
@@ -73,21 +56,15 @@ const ACTIONS: ActionDef[] = [
 export class UtilityBrain {
   constructor(private readonly poi: POIRegistry) {}
 
-  /**
-   * Idle 状態のエージェントに対し目的を選定し、目的地POIを検索して割り当てる。
-   * 経路探索の発行は呼び出し側(World)が state=Routing を見て行う。
-   */
   decide(store: AgentStore, i: number, clock: SimulationClock): void {
     let best: ActionDef | null = null;
-    let bestScore = 0.05; // これ未満なら何もしない閾値
+    let bestScore = 0.05;
     for (const a of ACTIONS) {
       const sc = a.score(store, i, clock);
       if (sc > bestScore) { bestScore = sc; best = a; }
     }
     if (!best) { store.state[i] = AgentState.Idle; return; }
 
-    // 目的地検索: 「その行動を満たすPOIのうち、近くて条件に合うもの」を選ぶ。
-    // work/home は固定POIを優先、それ以外は近傍探索。
     let target = -1;
     if (best.name === 'work') target = store.workPOI[i];
     else if (best.name === 'sleep' || best.name === 'routine-home') target = store.homePOI[i];
@@ -99,6 +76,6 @@ export class UtilityBrain {
     store.goalPOI[i] = target;
     store.goalX[i] = p.x;
     store.goalZ[i] = p.z;
-    store.state[i] = AgentState.Routing; // World が経路探索を発行する
+    store.state[i] = AgentState.Routing;
   }
 }

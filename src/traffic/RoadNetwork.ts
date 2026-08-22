@@ -1,27 +1,15 @@
 import { dist } from '../core/math';
 import { SpatialHashGrid } from '../core/SpatialHashGrid';
 
-/**
- * ============================================================================
- *  道路ネットワーク(グラフ)
- * ============================================================================
- * 交差点 = ノード / 道路区間 = エッジ(有向、双方向は2エッジ)。
- * 車両経路探索(A*)と歩道ネットワークの両方の基盤になる。
- * lane 数・制限速度・道路種別を持たせ、都市生成と描画の双方が参照する。
- */
-
 export enum RoadClass {
-  Highway = 0,   // 幹線/自動車専用
-  Arterial = 1,  // 主要道
-  Local = 2,     // 生活道路
-  Path = 3,      // 歩行者専用
+  Highway = 0, Arterial = 1, Local = 2, Path = 3,
 }
 
 export interface RoadNode {
   id: number;
   x: number;
   z: number;
-  edges: number[]; // このノードから出る有向エッジID
+  edges: number[];
   hasSignal: boolean;
 }
 
@@ -31,23 +19,26 @@ export interface RoadEdge {
   to: number;
   length: number;
   lanes: number;
-  speedLimit: number; // m/s
+  speedLimit: number;
   roadClass: RoadClass;
-  /** IDM/信号制御が参照する「この区間にいる車両index」のリスト(前方車検索用) */
   occupants: number[];
 }
 
 const SPEED_BY_CLASS: Record<RoadClass, number> = {
-  [RoadClass.Highway]: 27,   // ~100km/h
-  [RoadClass.Arterial]: 16,  // ~60km/h
-  [RoadClass.Local]: 11,     // ~40km/h
-  [RoadClass.Path]: 1.4,     // 歩行
+  [RoadClass.Highway]: 27,
+  [RoadClass.Arterial]: 16,
+  [RoadClass.Local]: 11,
+  [RoadClass.Path]: 1.4,
 };
+
+/** エッジの向きを2軸(0=東西/横, 1=南北/縦)に分類する。信号の位相判定に使う。 */
+export function edgeAxis(dx: number, dz: number): 0 | 1 {
+  return Math.abs(dx) >= Math.abs(dz) ? 0 : 1;
+}
 
 export class RoadNetwork {
   nodes: RoadNode[] = [];
   edges: RoadEdge[] = [];
-  /** 最寄りノード検索用の空間インデックス(車両の出発/目的ノード解決に使う)。 */
   private nodeGrid = new SpatialHashGrid(120);
 
   addNode(x: number, z: number, hasSignal = false): number {
@@ -57,7 +48,6 @@ export class RoadNetwork {
     return id;
   }
 
-  /** 双方向道路を1本(=有向2エッジ)追加する。 */
   connect(a: number, b: number, roadClass: RoadClass, lanes = 1): void {
     const na = this.nodes[a], nb = this.nodes[b];
     const len = dist(na.x, na.z, nb.x, nb.z);
@@ -73,13 +63,17 @@ export class RoadNetwork {
     this.nodes[from].edges.push(id);
   }
 
-  /** ヒューリスティック用の直線距離。 */
   heuristic(a: number, b: number): number {
     const na = this.nodes[a], nb = this.nodes[b];
     return dist(na.x, na.z, nb.x, nb.z);
   }
 
-  /** (x,z) に最も近いノードIDを返す。見つからなければ -1。 */
+  /** 有向エッジ from→to の進行軸を返す。 */
+  axisOf(from: number, to: number): 0 | 1 {
+    const nf = this.nodes[from], nt = this.nodes[to];
+    return edgeAxis(nt.x - nf.x, nt.z - nf.z);
+  }
+
   nearestNode(x: number, z: number): number {
     let best = -1, bestD = Infinity;
     const check = (id: number) => {

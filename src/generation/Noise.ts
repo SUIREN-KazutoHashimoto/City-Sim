@@ -1,12 +1,6 @@
 import { makeRng } from '../core/math';
 
-/**
- * 決定論的 value-noise + fBm。同一シードで必ず同じ地形になる(再現性)。
- * 用途:
- *   - 標高マップ(地形)
- *   - 都市化度マップ(どこを市街地区画にするか = 面積比率の制御に使う)
- * ライブラリ非依存で軽量。品質を上げたければ simplex 実装へ差し替え可能。
- */
+/** 決定論的 value-noise + fBm。同一シードで同じ地形(再現性)。 */
 export class ValueNoise2D {
   private perm: Uint16Array;
   private grad: Float32Array;
@@ -32,7 +26,6 @@ export class ValueNoise2D {
     return this.grad[h];
   }
 
-  /** 単一オクターブ。戻り値 -1..1 付近。 */
   noise(x: number, z: number): number {
     const x0 = Math.floor(x), z0 = Math.floor(z);
     const fx = x - x0, fz = z - z0;
@@ -47,7 +40,6 @@ export class ValueNoise2D {
     return nx0 + (nx1 - nx0) * v;
   }
 
-  /** フラクタルブラウン運動: 複数オクターブ合成。0..1 に正規化して返す。 */
   fbm(x: number, z: number, octaves = 5, lacunarity = 2, gain = 0.5): number {
     let amp = 0.5, freq = 1, sum = 0, norm = 0;
     for (let o = 0; o < octaves; o++) {
