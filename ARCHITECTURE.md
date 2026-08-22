@@ -1,142 +1,140 @@
-# Realistic City Simulation — アーキテクチャ設計書
+# City-Sim Architecture
 
-three.js + TypeScript による大規模リアルタイム・シティシミュレーションの基盤。
-挙動のリアルさ最優先。将来的な使い回し・拡張のために、明確な層分割と一貫した
-インターフェースを持つ。
+City-Sim is a browser-based real-time city simulation built with TypeScript, three.js and Vite.
 
----
+The simulation is organized around a data-oriented execution layer (SoA TypedArrays) coordinated by `World`, with thin OOP/domain facades where useful. Rendering reads simulation state but does not own it.
 
-## 0. 最重要の設計判断:OOP と 60fps の両立
+For the maintained Japanese design documents, see:
 
-各エージェントを「1体=1オブジェクト」で持ち毎フレーム `update()` を回すと、
-キャッシュミス・仮想関数コスト・GC で数万体すら 60fps を割る。そこで **2層構成**:
+- `doc/基本設計書.md`
+- `doc/機能設計書.md`
+- `doc/詳細設計書.md`
 
-| 層 | 役割 | 実装 |
-|----|------|------|
-| **OOP ドメイン層(ファサード)** | 拡張性・API・継承・カプセル化 | `GameObject` 階層。配列1行を指す薄いハンドル |
-| **データ指向 実行層 (SoA)** | 性能。列ごとの TypedArray | `AgentStore` / `VehicleStore`。System が線形走査 |
+## Runtime structure
 
----
-
-## 1. 層構成
-
-```
-main.ts  ── three.js セットアップ + 固定ステップループ + HUD/時計
-  │
-  ├─ World ── 全システムのオーケストレータ(配線と実行順序)
-  │    ├─ SimulationClock       固定ステップ時間源 / カレンダー / timeScale
-  │    ├─ NeedSystem            ニーズ減衰
-  │    ├─ UtilityBrain          効用ベース意思決定(目的選定→目的地検索)
-  │    ├─ AgentStore (SoA)      歩行者/市民の状態
-  │    ├─ VehicleStore (SoA)    車両の状態
-  │    ├─ TrafficSystem         IDM 車両追従(交通網)
-  │    ├─ RoadNetwork / AStar   道路グラフ・経路探索
-  │    ├─ SpatialHashGrid       近接クエリ(回避・最寄ノード)
-  │    └─ POIRegistry           目的地(用途を持つ場所)
-  │
-  ├─ CityGenerator ── 手続き型都市生成(地形→地区→道路→区画→建物/POI)
-  │
-  └─ 描画/UI
-       ├─ InstancedRenderer     建物/歩行者/車両を各1ドローで描画
-       ├─ FirstPersonController 一人称カメラ + 追跡
-       ├─ Inspector             ホバー調査 + エージェント追跡
-       └─ Dashboard             時間帯グラフ + 速度コントロール
+```text
+main.ts
+  ├─ World
+  │   ├─ SimulationClock
+  │   ├─ AgentStore / NeedSystem / UtilityBrain
+  │   ├─ CityGenerator
+  │   │   ├─ RoadNetwork
+  │   │   ├─ POIRegistry
+  │   │   ├─ ParkingLot
+  │   │   └─ Building / BuildingArchetype
+  │   ├─ SidewalkNetwork / AStar(walk)
+  │   ├─ VehicleStore / TrafficSystem / AStar(drive)
+  │   ├─ SignalSystem
+  │   ├─ BusSystem
+  │   └─ LogisticsSystem
+  ├─ EnhancedRenderer -> InstancedRenderer
+  ├─ Inspector
+  ├─ Dashboard
+  └─ FirstPersonController
 ```
 
----
+## Simulation design
 
-## 2. 意味的な歩行者AI(Utility AI)
+### Agents
 
-```
-ニーズ減衰 → 各行動の効用スコア算出 → 最大効用を選択
-→ 目的地POIを近傍検索 → 距離で「運転/徒歩」を分岐 → 移動
-→ 到達 → dwell(滞在)でニーズ回復 → Idle
-```
+Citizens are stored in `AgentStore` using SoA arrays. They have needs, occupation, work schedules, home/work POIs, wealth, age, personality and mobility state.
 
-- 到着時に **滞在終了時刻(dwellUntil)** を確定 → 即時離脱の振動を根絶。
-- `nextDecideAt` で Idle 中の再評価を間引き、思考の連打と負荷を抑制。
-- 職場は日中、住居は夜間に長時間滞在 → 在館人数が安定。昼休み・退勤ラッシュが創発。
+`NeedSystem` decays needs. `UtilityBrain` evaluates sleep/eat/work/shopping/leisure/home actions and selects a destination.
 
----
+Longer trips prefer a parked private car, then a direct bus route, then walking.
 
-## 3. 交通網(車両交通)
+### Traffic
 
-**道路グラフ + A* + IDM 追従モデル**で「まともに動く交通」を実装。
+Road and sidewalk graphs are separate.
 
-- **RoadNetwork**: 交差点=ノード / 道路=有向エッジ。種別・車線・制限速度・最寄ノード検索。
-- **AStar**: バイナリヒープ付き。コスト=所要時間。DOM非依存(将来ワーカー化可)。
-- **VehicleStore (SoA)**: 車両を列指向で保持。位置は「エッジ上の進捗 segT」で1次元表現。
-- **TrafficSystem (IDM)**:
-  - 各エッジの occupants を segT 昇順に保持し、前方車とのギャップを厳密算出。
-  - IDM 加速度式で「詰まれば減速・空けば加速」→ 渋滞・追従波が創発。
-  - 最終エッジの終点を停止目標とし、接近で明示的に **到着判定**(IDM の Zeno 的永久停止を回避)。
-  - 交差点は速度を保って通過(信号制御は次段階)。
-- **drive/walk 判定**: 目的地まで `driveThreshold`(既定250m)以上なら車両を発行、
-  未満は徒歩。到着後は運転者が降車して最終アプローチを徒歩で歩く。車両はプールへ再利用。
+- Driving A*: travel-time cost (`length / speedLimit`)
+- Walking A*: distance cost
+- Vehicle following: IDM-style acceleration
+- Signals: concurrent and scramble programs
+- Pedestrian crossings: signal and vehicle occupancy checks
 
-### 大規模化の指針
-交差点が数万規模になったら **階層型経路探索(HPA*)** と経路探索の **Web Worker** 化。
-車線変更・信号フェーズ制御・公共交通は段階的に追加。
+Buses and delivery trucks use the same road/traffic system as private vehicles.
 
----
+### POI and logistics
 
-## 4. 手続き型生成
+POIs have capacity/occupancy. Food/Retail POIs also have stock/maxStock. Delivery trucks leave external gates and replenish low-stock stores.
 
-都市化度マップ(fbm)→ 目標市街地比になる閾値を分位点で自動キャリブレーション →
-道路格子 → 街区分割 → 用途別に建物とPOIを配置。決定論的(同一シードで同じ街)。
+## City generation
 
----
+`CityGenerator` uses FBM-based urbanization and a calibrated threshold to generate roads, blocks, parking and buildings.
 
-## 5. 性能戦略(Ryzen 7 7800X3D で平均60/最低25fps 目標)
+Building use (`POICategory`) and visible building form (`BuildingArchetype`) are intentionally separate.
 
-| 手法 | 状態 |
-|------|------|
-| SoA + System 線形走査 | ✅ |
-| 固定ステップ + 可変描画 | ✅ |
-| 空間ハッシュ近接クエリ(移動中のみ登録) | ✅ |
-| GPU インスタンシング(建物/歩行者/車両) | ✅ |
-| 意思決定の時間分割 + dwell/nextDecideAt | ✅ |
-| IDM の occupants ソートで前方車 O(隣接) | ✅ |
-| シミュレーションLOD(遠方は低頻度/統計化) | ⏳ |
-| チャンク・ストリーミング(150km²) | ⏳ |
-| Web Worker + SharedArrayBuffer(経路/生成) | ⏳ |
-| 遠景インポスター | ⏳ |
+Current archetypes include detached houses, town houses, apartments, residential towers, offices, office towers, shops, retail boxes, commercial blocks, mixed-use buildings and leisure halls.
 
-> 150km² を毎フレーム完全計算するのは不可能。カメラ周辺のみ完全シミュレーション、
-> 遠方は統計近似する **シミュレーションLOD** が必須。SoA 設計はこの LOD 化に最適。
+Each `Building` also carries rendering-oriented style data:
 
----
-
-## 6. 操作
-
-| 入力 | 動作 |
-|------|------|
-| W A S D | カメラローカル移動 |
-| E / Space | 上昇 ・ Q / Ctrl 下降 |
-| Left Shift | ダッシュ |
-| 左ドラッグ | 視点回転 / 左ボタンを離す → インスペクトモード |
-| ホイール | 移動速度(追跡中は距離) |
-| Tab | 一時停止 / 再開 |
-| `[` `]` | 時間スケール変更 |
-| 中クリック(人の上) | 追跡 + 常時ステータス |
-
-上部中央に大きな**現在時刻**、左上に統計HUD、右上に**時間帯グラフ+速度**、
-左下に**追跡ステータス**を表示。
-
----
-
-## 7. 起動
-
-```bash
-npm install
-npm run dev      # http://localhost:5173
+```text
+archetype
+roofType
+palette
+styleSeed
+rotation
+urbanity
 ```
 
----
+`MixedUse` is not a POI category; it is a building archetype that registers multiple POIs in one building.
 
-## 8. 拡張の指針(OOP契約)
+## Rendering
 
-- 新しい動的オブジェクト種別 → `GameObject` を継承し `kind` と対応 Store を用意。
-- 新しい欲求/行動 → `UtilityBrain.ACTIONS` にスコア関数を追加。
-- 新しい用途 → `POICategory` に追加し `CityGenerator.pickCategory` に分布を定義。
-- 新しいシステム → `World.step()` の実行順序に配線(単一責任を維持)。
+`InstancedRenderer` remains the compatibility layer used by the Inspector for representative raycast meshes.
+
+`EnhancedRenderer` extends it and keeps the GPU-instancing strategy while making objects more recognizable without relying on texture-heavy assets.
+
+### Buildings
+
+The original one-box building mesh is kept as a transparent full-height raycast hit proxy. Visible buildings are rebuilt from instanced primitive parts:
+
+- colored shell/base
+- stepped upper volumes/towers
+- facade/glass panels
+- roof forms
+- rooftop mechanical units
+- retail awnings
+
+### Vehicles
+
+The representative vehicle mesh is supplemented with:
+
+- cabin/window volume
+- two wheel/axle parts
+- head lamp
+- tail lamp
+
+Private cars receive several visual proportions derived from vehicle id/color. Buses and trucks use dedicated dimensions.
+
+### Pedestrians
+
+The original capsule remains as the raycast representative. Torso, head and two legs are layered on top, with simple leg swing derived from simulation time and walking speed.
+
+### Street environment
+
+Static instancing adds:
+
+- curbs
+- arterial medians
+- highway guard rails
+- parking-space markings
+- street lights
+- trees
+- bus-stop shelters and benches
+
+### Day/night
+
+`main.ts` derives solar state from `SimulationClock.dayPhase` and updates sky/fog color, directional light position/intensity/color, and hemisphere intensity.
+
+## Performance principles
+
+- SoA TypedArrays for large dynamic populations
+- GPU Instancing for repeated geometry
+- static details built once
+- dynamic details synchronized during existing agent/vehicle passes
+- no per-object high-poly model requirement
+- explicit instance-count caps for decorative systems where needed
+
+Future large-scale work should add simulation LOD, rendering LOD/chunking, route caching and worker-based processing.

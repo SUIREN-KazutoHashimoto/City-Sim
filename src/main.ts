@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { World } from './world/World';
-import { InstancedRenderer } from './rendering/InstancedRenderer';
+import { EnhancedRenderer } from './rendering/EnhancedRenderer';
 import { FirstPersonController } from './rendering/FirstPersonController';
 import { Inspector } from './rendering/Inspector';
 import { Dashboard } from './rendering/Dashboard';
@@ -17,8 +17,10 @@ renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadow
 app.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x9fb4cc);
-scene.fog = new THREE.Fog(0x9fb4cc, 800, 3000);
+const daySky = new THREE.Color(0x9fb4cc), duskSky = new THREE.Color(0x6d7085), nightSky = new THREE.Color(0x091321);
+const currentSky = daySky.clone();
+scene.background = currentSky;
+scene.fog = new THREE.Fog(currentSky.clone(), 800, 3000);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 8000);
 const SPAWN_ALT = 450;
@@ -29,9 +31,10 @@ sun.position.set(600, 1200, 400); sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.near = 100; sun.shadow.camera.far = 3000;
 const sc = sun.shadow.camera as THREE.OrthographicCamera;
 sc.left = -800; sc.right = 800; sc.top = 800; sc.bottom = -800;
-scene.add(sun); scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3a30, 0.6));
+const hemi = new THREE.HemisphereLight(0xbdd7ff, 0x3a3a30, 0.6);
+scene.add(sun); scene.add(hemi);
 
-const gfx = new InstancedRenderer(scene);
+const gfx = new EnhancedRenderer(scene);
 gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
 gfx.buildAgents(world.store.capacity);
 gfx.buildVehicles(world.vehicles.capacity);
@@ -44,7 +47,11 @@ gfx.buildGates(world.city.gateNodes.map((n) => ({ x: world.city.net.nodes[n].x, 
 const controller = new FirstPersonController(camera, renderer.domElement, 0, -0.9);
 controller.setPosition(SIZE / 2, SPAWN_ALT, SIZE / 2);
 controller.followDistance = 12;
-renderer.domElement.addEventListener('wheel', (e) => { const f = e.deltaY < 0 ? 1.15 : 1 / 1.15; if (controller.isFollowing) controller.followDistance = THREE.MathUtils.clamp(controller.followDistance * f, 3, 120); else controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400); });
+renderer.domElement.addEventListener('wheel', (e) => {
+  const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  if (controller.isFollowing) controller.followDistance = THREE.MathUtils.clamp(controller.followDistance * f, 3, 120);
+  else controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400);
+});
 window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
 
 const inspector = new Inspector(world, gfx, camera, renderer.domElement);
@@ -56,10 +63,28 @@ const hud = document.getElementById('hud')!; const clockEl = document.getElement
 let fps = 60, lastStats = 0; const st = world.stats();
 function clockIcon(h: number): string { if (h >= 5 && h < 7) return '🌅'; if (h >= 7 && h < 17) return '☀️'; if (h >= 17 && h < 19) return '🌇'; if (h >= 19 && h < 22) return '🌆'; return '🌙'; }
 
+function updateEnvironment(): void {
+  const phase = world.clock.dayPhase;
+  const solar = Math.sin((phase - 0.25) * Math.PI * 2);
+  const daylight = THREE.MathUtils.clamp((solar + 0.12) / 1.12, 0, 1);
+  const twilight = THREE.MathUtils.clamp(1 - Math.abs(solar) * 3.2, 0, 1) * (1 - daylight * 0.5);
+  currentSky.copy(nightSky).lerp(duskSky, twilight).lerp(daySky, daylight);
+  scene.background = currentSky; if (scene.fog) scene.fog.color.copy(currentSky);
+  sun.intensity = 0.12 + daylight * 2.25;
+  hemi.intensity = 0.18 + daylight * 0.48 + twilight * 0.12;
+  const a = phase * Math.PI * 2;
+  sun.position.set(SIZE / 2 + Math.cos(a) * 1200, 100 + Math.max(0.08, solar) * 1350, SIZE / 2 + Math.sin(a) * 900);
+  sun.color.set(daylight > 0.25 ? 0xffffff : 0xffb46b);
+}
+
 let prev = performance.now();
 function frame(now: number): void {
   const dt = (now - prev) / 1000; prev = now; fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
-  if (!paused) { const steps = world.clock.advance(dt); for (let s = 0; s < steps; s++) world.step(world.clock.stepDt); gfx.syncAgents(world.store); gfx.syncVehicles(world.vehicles); gfx.syncSignals(world.signals); dashboard.sample(); }
+  if (!paused) {
+    const steps = world.clock.advance(dt); for (let s = 0; s < steps; s++) world.step(world.clock.stepDt);
+    gfx.syncAgents(world.store, world.clock.totalSeconds); gfx.syncVehicles(world.vehicles); gfx.syncSignals(world.signals); dashboard.sample();
+  }
+  updateEnvironment();
   controller.setFollowTarget(inspector.getFollowPosition()); controller.update(dt); inspector.update(); dashboard.draw();
   renderer.render(scene, camera);
   const c = world.clock; const hh = String(c.hour).padStart(2, '0'), mm = String(c.minute).padStart(2, '0'), ss = String(c.second).padStart(2, '0');
