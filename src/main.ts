@@ -35,7 +35,9 @@ scene.background = new THREE.Color(0x9fb4cc);
 scene.fog = new THREE.Fog(0x9fb4cc, 800, 3000);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 8000);
-camera.position.set(SIZE / 2, 1.7, SIZE / 2);
+// 初期スポーンは上空(街を俯瞰しながら降下していける)
+const SPAWN_ALT = 450;
+camera.position.set(SIZE / 2, SPAWN_ALT, SIZE / 2);
 
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(600, 1200, 400);
@@ -52,13 +54,19 @@ const gfx = new InstancedRenderer(scene);
 gfx.buildStatic(world.city.buildings, world.city.net);
 gfx.buildAgents(world.store.capacity);
 
-// --- 一人称カメラ操作(Pointer Lock + WASD) ---
-const controller = new FirstPersonController(camera, renderer.domElement);
-controller.setPosition(SIZE / 2, 1.7, SIZE / 2); // 街の中心・目線高さから開始
-// マウスホイールで移動速度を調整(街の探索と細部観察を両立)
+// --- 一人称カメラ操作(左ドラッグ視点 + WASDQE) ---
+// 上空スポーンなので、初期は少し下(pitch < 0)を向けて街を見下ろす
+const controller = new FirstPersonController(camera, renderer.domElement, 0, -0.9);
+controller.setPosition(SIZE / 2, SPAWN_ALT, SIZE / 2);
+controller.followDistance = 12;
+// ホイール: 自由移動中は移動速度、追跡中は追跡距離を調整
 renderer.domElement.addEventListener('wheel', (e) => {
   const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-  controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400);
+  if (controller.isFollowing) {
+    controller.followDistance = THREE.MathUtils.clamp(controller.followDistance * f, 3, 120);
+  } else {
+    controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400);
+  }
 });
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -69,13 +77,15 @@ window.addEventListener('resize', () => {
 // --- Ctrl押下中のホバーで対象を調査するインスペクタ ---
 const inspector = new Inspector(world, gfx, camera, renderer.domElement);
 
-// --- Space でシミュレーションの一時停止 / 再開 ---
+// --- Tab でシミュレーションの一時停止 / 再開 ---
 let paused = false;
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Space') {
-    e.preventDefault(); // ページスクロール抑制
+  if (e.code === 'Tab') {
+    e.preventDefault(); // フォーカス移動を抑制
     paused = !paused;
   }
+  // Space/Ctrl は上下移動に使うため、既定のスクロール等を抑制
+  if (e.code === 'Space') e.preventDefault();
 });
 
 // --- HUD / FPS ---
@@ -98,10 +108,13 @@ function frame(now: number): void {
     gfx.syncAgents(world.store);
   }
 
+  // 追跡対象の連携: インスペクタが追跡中ならカメラを対象に追従させる
+  controller.setFollowTarget(inspector.getFollowPosition());
+
   // カメラ更新(一人称)は停止中も有効(街を見て回れる)
   controller.update(dt);
 
-  // Ctrl押下中のホバー調査
+  // ホバー調査 & 追跡ステータス表示
   inspector.update();
 
   renderer.render(scene, camera);
@@ -113,9 +126,9 @@ function frame(now: number): void {
       `agents ${st.agents}  buildings ${st.buildings}\n` +
       `road nodes ${st.nodes}  POIs ${st.pois}\n` +
       `urban threshold ${world.city.urbanThreshold.toFixed(3)}\n` +
-      `speed ${controller.moveSpeed.toFixed(0)} m/s  ${controller.isDragging ? '● looking' : '○ hold LMB to look'}\n` +
-      `[WASD=move  Q/E=up/down  LShift=sprint  LMB+drag=look  wheel=speed]\n` +
-      `[Space=pause/resume  Ctrl+hover=inspect]`;
+      `${controller.isFollowing ? `following #, dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect mode'}\n` +
+      `[WASD=move  Q/Space=up  E/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +
+      `[Tab=pause/resume  release LMB=inspect  MMB on agent=follow]`;
   }
   requestAnimationFrame(frame);
 }
