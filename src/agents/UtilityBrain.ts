@@ -29,7 +29,7 @@ export class UtilityBrain {
     else target = this.poi.findBest(best.category, s.posX[i], s.posZ[i], s.wealth[i]);
     if (target < 0) { s.state[i] = AgentState.Idle; return; }
     const p = this.poi.get(target);
-    s.goalPOI[i] = target; s.goalX[i] = p.x; s.goalZ[i] = p.z;
+    s.goalPOI[i] = target; s.goalCategory[i] = p.category; s.goalX[i] = p.x; s.goalZ[i] = p.z;
     s.state[i] = AgentState.Routing;
   }
 }
