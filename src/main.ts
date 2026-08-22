@@ -18,7 +18,8 @@ import { Dashboard } from './rendering/Dashboard';
 const SIZE = Math.sqrt(10_000_000); // ≈ 3162 m 四方 = 10km²
 const world = new World(
   { seed: 12345, sizeMeters: SIZE, urbanRatioTarget: 1 / 3, blockSize: 90 },
-  20_000, // エージェント収容上限
+  20_000,  // エージェント収容上限
+  6_000,   // 車両収容上限
 );
 world.populate(4000);
 
@@ -54,13 +55,12 @@ scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3a30, 0.6));
 const gfx = new InstancedRenderer(scene);
 gfx.buildStatic(world.city.buildings, world.city.net);
 gfx.buildAgents(world.store.capacity);
+gfx.buildVehicles(world.vehicles.capacity);
 
 // --- 一人称カメラ操作(左ドラッグ視点 + WASDQE) ---
-// 上空スポーンなので、初期は少し下(pitch < 0)を向けて街を見下ろす
 const controller = new FirstPersonController(camera, renderer.domElement, 0, -0.9);
 controller.setPosition(SIZE / 2, SPAWN_ALT, SIZE / 2);
 controller.followDistance = 12;
-// ホイール: 自由移動中は移動速度、追跡中は追跡距離を調整
 renderer.domElement.addEventListener('wheel', (e) => {
   const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
   if (controller.isFollowing) {
@@ -75,27 +75,31 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// --- Ctrl押下中のホバーで対象を調査するインスペクタ ---
+// --- インスペクタ & ダッシュボード ---
 const inspector = new Inspector(world, gfx, camera, renderer.domElement);
-
-// --- 時間帯グラフ + 速度コントロール(右上ダッシュボード) ---
 const dashboard = new Dashboard(world, world.clock);
 
-// --- Tab でシミュレーションの一時停止 / 再開 ---
+// --- Tab で一時停止 / 再開 ---
 let paused = false;
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Tab') {
-    e.preventDefault(); // フォーカス移動を抑制
-    paused = !paused;
-  }
-  // Space/Ctrl は上下移動に使うため、既定のスクロール等を抑制
+  if (e.code === 'Tab') { e.preventDefault(); paused = !paused; }
   if (e.code === 'Space') e.preventDefault();
 });
 
-// --- HUD / FPS ---
+// --- HUD / 時計 ---
 const hud = document.getElementById('hud')!;
+const clockEl = document.getElementById('clock')!;
 let fps = 60, lastStats = 0;
 const st = world.stats();
+
+// ゲーム内時刻に応じた簡単な情景アイコン
+function clockIcon(hour: number): string {
+  if (hour >= 5 && hour < 7) return '🌅';
+  if (hour >= 7 && hour < 17) return '☀️';
+  if (hour >= 17 && hour < 19) return '🌇';
+  if (hour >= 19 && hour < 22) return '🌆';
+  return '🌙';
+}
 
 // --- メインループ ---
 let prev = performance.now();
@@ -104,39 +108,40 @@ function frame(now: number): void {
   prev = now;
   fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
 
-  // 固定ステップでシミュレーションを進める(一時停止中はスキップ)
   if (!paused) {
     const steps = world.clock.advance(dt);
     for (let s = 0; s < steps; s++) world.step(world.clock.fixedStep);
-    // 描画同期(停止中は座標が動かないので更新不要)
     gfx.syncAgents(world.store);
-    // 時間帯グラフのサンプリング(ゲーム内時刻ビン単位で記録)
+    gfx.syncVehicles(world.vehicles);
     dashboard.sample();
   }
 
-  // 追跡対象の連携: インスペクタが追跡中ならカメラを対象に追従させる
   controller.setFollowTarget(inspector.getFollowPosition());
-
-  // カメラ更新(一人称)は停止中も有効(街を見て回れる)
   controller.update(dt);
-
-  // ホバー調査 & 追跡ステータス表示
   inspector.update();
+  dashboard.draw();
 
   renderer.render(scene, camera);
 
-  // ダッシュボード(時間帯グラフ)は毎フレーム再描画(現在時刻マーカーを滑らかに)
-  dashboard.draw();
+  // 現在時刻(大きく常時表示、秒まで)
+  const c = world.clock;
+  const hh = String(c.hour).padStart(2, '0');
+  const mm = String(c.minute).padStart(2, '0');
+  const ss = String(c.second).padStart(2, '0');
+  clockEl.innerHTML =
+    `<span class="icon">${clockIcon(c.hour)}</span>` +
+    `<span>${hh}:${mm}<span style="font-size:13px;opacity:.7">:${ss}</span></span>` +
+    `<span class="day">DAY ${c.day}</span>` +
+    `${paused ? '<span class="day">⏸ PAUSED</span>' : ''}`;
 
   if (now - lastStats > 250) {
     lastStats = now;
     hud.textContent =
-      `FPS ${fps.toFixed(0)}   ${world.clock.format()}   ${paused ? '⏸ PAUSED' : '▶ running'}  ×${dashboard.speedLabel}\n` +
-      `agents ${st.agents}  buildings ${st.buildings}\n` +
-      `road nodes ${st.nodes}  POIs ${st.pois}\n` +
-      `urban threshold ${world.city.urbanThreshold.toFixed(3)}\n` +
+      `FPS ${fps.toFixed(0)}   ×${dashboard.speedLabel}\n` +
+      `agents ${st.agents}  vehicles ${world.vehicles.count}\n` +
+      `buildings ${st.buildings}  POIs ${st.pois}  nodes ${st.nodes}\n` +
       `${controller.isFollowing ? `following #, dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect mode'}\n` +
-      `[WASD=move  Q/Space=up  E/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +
+      `[WASD=move  E/Space=up  Q/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +
       `[Tab=pause  [ ]=speed  release LMB=inspect  MMB on agent=follow]`;
   }
   requestAnimationFrame(frame);

@@ -1,27 +1,24 @@
 import * as THREE from 'three';
 import { Building } from '../generation/CityGenerator';
 import { RoadNetwork } from '../traffic/RoadNetwork';
-import { AgentStore } from '../agents/AgentStore';
+import { AgentStore, AgentState } from '../agents/AgentStore';
+import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
 import { POICategory } from '../world/POI';
 
 /**
  * ============================================================================
  *  描画層: GPU インスタンシング
  * ============================================================================
- *  - 建物: 1個のBoxGeometryを InstancedMesh で全棟ぶん描画(1ドローコール)
- *  - 歩行者: 同様に InstancedMesh。座標は AgentStore の TypedArray から毎フレーム転送。
- *  - 道路: セグメントを1つのメッシュにまとめて描画。
+ *  - 建物 / 歩行者 / 車両 をそれぞれ1個の InstancedMesh で一括描画(各1ドロー)
+ *  - 座標は各 Store の TypedArray から毎フレーム転送
  *
- * 「ハリボテ回避」の方針:
- *   本ファイルはまず"正しい量とスケール感"を出す土台。質感は
- *   ・用途別マテリアル(色分け→将来テクスチャアトラス)
- *   ・階数に応じた高さ
- *   ・窓の格子ノーマル/エミッシブ(夜景)
- *   を段階的に足す。距離が遠い建物はビルボード・インポスターへ置換(LOD)。
+ * 「ハリボテ回避」の方針は段階的に:用途別マテリアル→テクスチャアトラス、
+ * 階数に応じた高さ、窓のノーマル/夜景エミッシブ、遠景はインポスター(LOD)。
  */
 export class InstancedRenderer {
   private buildingMesh!: THREE.InstancedMesh;
   private agentMesh!: THREE.InstancedMesh;
+  private vehicleMesh!: THREE.InstancedMesh;
   private dummy = new THREE.Object3D();
 
   private readonly categoryColor: Record<number, THREE.Color> = {
@@ -32,12 +29,16 @@ export class InstancedRenderer {
     [POICategory.Leisure]:new THREE.Color(0x7cba8f),
   };
 
+  // 車両の色バリエーション(見分けやすさのため数色をローテーション)
+  private readonly carColors = [
+    0xd94f4f, 0x4f7fd9, 0xe0e0e0, 0x2b2b2b, 0xd9b64f, 0x54b07a, 0x8a6fd9,
+  ].map((c) => new THREE.Color(c));
+
   constructor(private scene: THREE.Scene) {}
 
-  /** ピッキング(レイキャスト)用にメッシュを公開する。
-   *  instanceId は building 配列 index / AgentStore index にそのまま対応する。 */
   get buildings(): THREE.InstancedMesh { return this.buildingMesh; }
   get agents(): THREE.InstancedMesh { return this.agentMesh; }
+  get vehiclesMesh(): THREE.InstancedMesh { return this.vehicleMesh; }
 
   buildStatic(buildings: Building[], net: RoadNetwork): void {
     this.buildBuildings(buildings);
@@ -47,7 +48,7 @@ export class InstancedRenderer {
 
   private buildBuildings(buildings: Building[]): void {
     const geo = new THREE.BoxGeometry(1, 1, 1);
-    geo.translate(0, 0.5, 0); // 底面を原点に
+    geo.translate(0, 0.5, 0);
     const mat = new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0.05 });
     const mesh = new THREE.InstancedMesh(geo, mat, buildings.length);
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(buildings.length * 3), 3);
@@ -69,7 +70,6 @@ export class InstancedRenderer {
   }
 
   private buildRoads(net: RoadNetwork): void {
-    // 各エッジ(片方向のみ描画)を薄い箱で表現。まとめて1メッシュに。
     const drawn = new Set<string>();
     const boxes: THREE.Matrix4[] = [];
     for (const e of net.edges) {
@@ -115,23 +115,61 @@ export class InstancedRenderer {
     const mat = new THREE.MeshStandardMaterial({ color: 0xe0d5c0, roughness: 0.7 });
     const mesh = new THREE.InstancedMesh(geo, mat, capacity);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    mesh.frustumCulled = false; // 位置が毎フレーム変わるため自前管理
+    mesh.frustumCulled = false;
     mesh.castShadow = true;
     this.scene.add(mesh);
     this.agentMesh = mesh;
   }
 
-  /** AgentStore の座標を InstancedMesh に転送(描画LOD: 近傍のみ本体表示)。 */
+  /** 車両インスタンスの器を確保。 */
+  buildVehicles(capacity: number): void {
+    // シンプルな車体(箱)。将来はキャビン付きの低ポリモデルへ差し替え。
+    const geo = new THREE.BoxGeometry(4.4, 1.5, 2.0);
+    geo.translate(0, 0.75, 0);
+    const mat = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.3 });
+    const mesh = new THREE.InstancedMesh(geo, mat, capacity);
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.frustumCulled = false;
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this.vehicleMesh = mesh;
+  }
+
+  /** AgentStore の座標を歩行者インスタンスへ転送(Driving/Engaged は非表示)。 */
   syncAgents(store: AgentStore): void {
     const mesh = this.agentMesh;
+    let n = 0;
     for (let i = 0; i < store.count; i++) {
+      const st = store.state[i];
+      // 車内(Driving)や滞在中(建物内 Engaged)は歩行者として描かない
+      if (st === AgentState.Driving || st === AgentState.Engaged) continue;
       this.dummy.position.set(store.posX[i], 0, store.posZ[i]);
-      this.dummy.rotation.y = -store.heading[i];
+      this.dummy.rotation.set(0, -store.heading[i], 0);
       this.dummy.scale.setScalar(1);
       this.dummy.updateMatrix();
-      mesh.setMatrixAt(i, this.dummy.matrix);
+      mesh.setMatrixAt(n++, this.dummy.matrix);
     }
-    mesh.count = store.count;
+    mesh.count = n;
     mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  /** VehicleStore の座標を車両インスタンスへ転送。 */
+  syncVehicles(vs: VehicleStore): void {
+    const mesh = this.vehicleMesh;
+    let n = 0;
+    for (let v = 0; v < vs.count; v++) {
+      if (vs.state[v] !== VehicleState.Driving) continue;
+      this.dummy.position.set(vs.posX[v], 0, vs.posZ[v]);
+      this.dummy.rotation.set(0, -vs.heading[v], 0);
+      this.dummy.scale.setScalar(1);
+      this.dummy.updateMatrix();
+      mesh.setMatrixAt(n, this.dummy.matrix);
+      mesh.setColorAt(n, this.carColors[v % this.carColors.length]);
+      n++;
+    }
+    mesh.count = n;
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
 }

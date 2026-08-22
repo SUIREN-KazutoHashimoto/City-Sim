@@ -1,4 +1,5 @@
 import { dist } from '../core/math';
+import { SpatialHashGrid } from '../core/SpatialHashGrid';
 
 /**
  * ============================================================================
@@ -46,10 +47,13 @@ const SPEED_BY_CLASS: Record<RoadClass, number> = {
 export class RoadNetwork {
   nodes: RoadNode[] = [];
   edges: RoadEdge[] = [];
+  /** 最寄りノード検索用の空間インデックス(車両の出発/目的ノード解決に使う)。 */
+  private nodeGrid = new SpatialHashGrid(120);
 
   addNode(x: number, z: number, hasSignal = false): number {
     const id = this.nodes.length;
     this.nodes.push({ id, x, z, edges: [], hasSignal });
+    this.nodeGrid.insert(id, x, z);
     return id;
   }
 
@@ -73,5 +77,20 @@ export class RoadNetwork {
   heuristic(a: number, b: number): number {
     const na = this.nodes[a], nb = this.nodes[b];
     return dist(na.x, na.z, nb.x, nb.z);
+  }
+
+  /** (x,z) に最も近いノードIDを返す。見つからなければ -1。 */
+  nearestNode(x: number, z: number): number {
+    let best = -1, bestD = Infinity;
+    const check = (id: number) => {
+      const n = this.nodes[id];
+      const d = (n.x - x) * (n.x - x) + (n.z - z) * (n.z - z);
+      if (d < bestD) { bestD = d; best = id; }
+    };
+    for (const r of [150, 400, 1000, 3000]) {
+      this.nodeGrid.queryNeighbors(x, z, r, check);
+      if (best >= 0) break;
+    }
+    return best;
   }
 }

@@ -6,32 +6,22 @@ import { POICategory } from '../world/POI';
 
 /**
  * ============================================================================
- *  Inspector: Ctrl押下中のホバーで対象を調べるツールチップ
+ *  Inspector: ホバーで対象を調べるツールチップ + エージェント追跡
  * ============================================================================
- * Ctrl を押している間だけ、マウス直下のオブジェクト(歩行者/建物)を
- * レイキャストで特定し、その説明とステータスを画面に表示する。
- *
- * ピッキングの仕組み:
- *   InstancedMesh へのレイキャストは intersection.instanceId を返す。
- *   建物は生成順に追加しているので instanceId == buildings 配列 index、
- *   歩行者は instanceId == AgentStore の行 index に一致する。
- *
- * シミュレーション本体には一切干渉しない読み取り専用の観測ツール。
+ * 左ボタン非押下(=ステータス表示モード)のとき、マウス直下の歩行者/建物を
+ * レイキャストで特定し説明とステータスを表示する。左ボタン押下中は視点回転優先。
+ * エージェント上でホイールクリックすると追跡(常時ステータス+カメラ追従)。
  */
 export class Inspector {
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
-  private el: HTMLDivElement;   // ホバー用ツールチップ(マウス追従)
-  private pinEl: HTMLDivElement; // 追跡対象の常時ステータス(固定パネル)
+  private el: HTMLDivElement;
+  private pinEl: HTMLDivElement;
   private hasPointer = false;
-  /** 左ボタン押下中は視点回転モード → ステータス表示は抑制 */
   private leftHeld = false;
 
-  /** 現在ホバー中の歩行者index(-1=なし)。ホイールクリックの追跡開始に使う。 */
   private hoveredAgent = -1;
-  /** 追跡中の歩行者index(-1=なし)。 */
   private followedAgent = -1;
-  /** 追跡対象のワールド座標(カメラ側が参照)。 */
   readonly followPos = new THREE.Vector3();
 
   constructor(
@@ -46,7 +36,6 @@ export class Inspector {
     this.pinEl.style.bottom = '8px';
     this.pinEl.style.borderColor = '#5a7fb0';
 
-    // ホバー座標(NDC)を追跡
     this.dom.addEventListener('mousemove', (e) => {
       this.pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
       this.pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
@@ -54,13 +43,9 @@ export class Inspector {
       this.el.style.top = `${e.clientY + 16}px`;
       this.hasPointer = true;
     });
-    // 左ボタンの押下状態(視点回転中はステータス非表示)
     this.dom.addEventListener('mousedown', (e) => {
       if (e.button === 0) this.leftHeld = true;
-      if (e.button === 1) { // ホイールクリック → 追跡トグル
-        e.preventDefault();
-        this.toggleFollow();
-      }
+      if (e.button === 1) { e.preventDefault(); this.toggleFollow(); }
     });
     window.addEventListener('mouseup', (e) => { if (e.button === 0) this.leftHeld = false; });
     window.addEventListener('blur', () => { this.leftHeld = false; this.hide(); });
@@ -80,17 +65,15 @@ export class Inspector {
     return el;
   }
 
-  /** ホイールクリック: ホバー中の歩行者を追跡開始 / 同じ相手なら解除。 */
   private toggleFollow(): void {
     if (this.hoveredAgent >= 0 && this.hoveredAgent !== this.followedAgent) {
       this.followedAgent = this.hoveredAgent;
     } else {
-      this.followedAgent = -1; // 何もない所でクリック or 同じ相手 → 解除
+      this.followedAgent = -1;
     }
   }
 
   get isFollowing(): boolean { return this.followedAgent >= 0; }
-  /** 追跡対象の現在座標を followPos に更新して返す(カメラ追従用)。 */
   getFollowPosition(): THREE.Vector3 | null {
     if (this.followedAgent < 0) return null;
     const s = this.world.store;
@@ -101,9 +84,7 @@ export class Inspector {
 
   private hide(): void { this.el.style.display = 'none'; }
 
-  /** 毎フレーム呼ぶ。左ボタン非押下時にピッキングして表示を更新する。 */
   update(): void {
-    // 1) 追跡対象があれば常時ステータスを固定パネルに表示
     if (this.followedAgent >= 0) {
       if (this.followedAgent < this.world.store.count) {
         this.pinEl.textContent = '📌 追跡中\n' + this.describeAgent(this.followedAgent);
@@ -113,7 +94,6 @@ export class Inspector {
       this.pinEl.style.display = 'none';
     }
 
-    // 2) ステータス表示モード(左ボタン非押下)でのホバー調査
     this.hoveredAgent = -1;
     if (this.leftHeld || !this.hasPointer) { this.hide(); return; }
     this.raycaster.setFromCamera(this.pointer, this.camera);
@@ -127,7 +107,7 @@ export class Inspector {
     const bDist = buildingHit.length ? buildingHit[0].distance : Infinity;
 
     if (aDist < bDist && agentHit[0].instanceId != null) {
-      this.hoveredAgent = agentHit[0].instanceId; // 追跡開始候補として記録
+      this.hoveredAgent = agentHit[0].instanceId;
       this.el.textContent = this.describeAgent(agentHit[0].instanceId);
       this.el.style.display = 'block';
     } else if (buildingHit.length && buildingHit[0].instanceId != null) {
@@ -137,8 +117,6 @@ export class Inspector {
       this.hide();
     }
   }
-
-  // --- 表示テキストの構築 ---
 
   private bar(v: number): string {
     const n = Math.round(THREE.MathUtils.clamp(v, 0, 1) * 10);

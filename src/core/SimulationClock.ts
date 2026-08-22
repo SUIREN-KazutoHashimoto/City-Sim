@@ -43,6 +43,7 @@ export class SimulationClock {
   get totalSeconds(): number { return this._totalSeconds; }
   get hour(): number { return Math.floor((this._totalSeconds / 3600) % 24); }
   get minute(): number { return Math.floor((this._totalSeconds / 60) % 60); }
+  get second(): number { return Math.floor(this._totalSeconds % 60); }
   /** 0..1 の一日の位相。0=深夜0時, 0.5=正午。日照/交通量カーブに使う。 */
   get dayPhase(): number { return (this._totalSeconds / 86400) % 1; }
   get day(): number { return Math.floor(this._totalSeconds / 86400); }

@@ -18,6 +18,7 @@ export enum AgentState {
   Routing = 2,    // 目的地への経路探索待ち
   Traveling = 3,  // 移動中(経路追従)
   Engaged = 4,    // 目的地で活動中(仕事/食事/睡眠 等)
+  Driving = 5,    // 車両で移動中(VehicleStore と紐付く)
 }
 
 export class AgentStore {
@@ -63,6 +64,10 @@ export class AgentStore {
   /** 次に意思決定を許可するシミュ累積秒。Idle中の再評価を間引き、思考の連打を防ぐ。 */
   nextDecideAt: Float32Array;
 
+  // --- 車両との紐付け ---
+  /** 乗車中の車両 index(-1 = 徒歩)。Driving 状態のとき有効。 */
+  vehicle: Int32Array;
+
   constructor(capacity: number) {
     this.capacity = capacity;
     const f = () => new Float32Array(capacity);
@@ -81,6 +86,7 @@ export class AgentStore {
     this.pathCursor = new Uint16Array(capacity);
     this.dwellUntil = f();
     this.nextDecideAt = f();
+    this.vehicle = new Int32Array(capacity).fill(-1);
   }
 
   /** 新規エージェントを1体確保し index を返す。満杯なら -1。 */
