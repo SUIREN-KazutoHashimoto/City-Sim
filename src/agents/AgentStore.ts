@@ -57,6 +57,12 @@ export class AgentStore {
   pathHandle: Int32Array;    // -1 = 経路なし
   pathCursor: Uint16Array;   // 経路上の現在インデックス
 
+  // --- 滞在/意思決定のスケジューリング(振動防止 & 負荷平準化) ---
+  /** 活動(Engaged)を継続する期限。シミュ累積秒。これ以前は原則その場に留まる。 */
+  dwellUntil: Float32Array;
+  /** 次に意思決定を許可するシミュ累積秒。Idle中の再評価を間引き、思考の連打を防ぐ。 */
+  nextDecideAt: Float32Array;
+
   constructor(capacity: number) {
     this.capacity = capacity;
     const f = () => new Float32Array(capacity);
@@ -73,6 +79,8 @@ export class AgentStore {
     this.goalX = f(); this.goalZ = f();
     this.pathHandle = new Int32Array(capacity).fill(-1);
     this.pathCursor = new Uint16Array(capacity);
+    this.dwellUntil = f();
+    this.nextDecideAt = f();
   }
 
   /** 新規エージェントを1体確保し index を返す。満杯なら -1。 */
