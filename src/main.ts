@@ -82,9 +82,16 @@ function frame(now: number): void {
   const dt = (now - prev) / 1000; prev = now; fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
   if (!paused) {
     const steps = world.clock.advance(dt); for (let s = 0; s < steps; s++) world.step(world.clock.stepDt);
-    gfx.syncAgents(world.store, world.clock.totalSeconds); gfx.syncVehicles(world.vehicles); gfx.syncSignals(world.signals); dashboard.sample();
+    dashboard.sample();
   }
+
+  // 描画同期はpause中も継続し、ウィンカー点滅とカメラ近傍ライト選択を止めない。
+  gfx.syncAgents(world.store, world.clock.totalSeconds);
+  gfx.syncVehicles(world.vehicles, world.clock.hourF, now / 1000);
+  gfx.syncSignals(world.signals);
   updateEnvironment();
+  gfx.updateNightLighting(world.clock.hourF, camera.position, world.vehicles);
+
   controller.setFollowTarget(inspector.getFollowPosition()); controller.update(dt); inspector.update(); dashboard.draw();
   renderer.render(scene, camera);
   const c = world.clock; const hh = String(c.hour).padStart(2, '0'), mm = String(c.minute).padStart(2, '0'), ss = String(c.second).padStart(2, '0');
