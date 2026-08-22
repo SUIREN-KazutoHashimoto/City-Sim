@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { World } from './world/World';
 import { InstancedRenderer } from './rendering/InstancedRenderer';
 import { FirstPersonController } from './rendering/FirstPersonController';
+import { Inspector } from './rendering/Inspector';
 
 /**
  * エントリポイント: three.js のセットアップ + 固定ステップのシミュレーションループ。
@@ -65,6 +66,18 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// --- Ctrl押下中のホバーで対象を調査するインスペクタ ---
+const inspector = new Inspector(world, gfx, camera, renderer.domElement);
+
+// --- Space でシミュレーションの一時停止 / 再開 ---
+let paused = false;
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    e.preventDefault(); // ページスクロール抑制
+    paused = !paused;
+  }
+});
+
 // --- HUD / FPS ---
 const hud = document.getElementById('hud')!;
 let fps = 60, lastStats = 0;
@@ -77,27 +90,32 @@ function frame(now: number): void {
   prev = now;
   fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
 
-  // 固定ステップでシミュレーションを進める
-  const steps = world.clock.advance(dt);
-  for (let s = 0; s < steps; s++) world.step(world.clock.fixedStep);
+  // 固定ステップでシミュレーションを進める(一時停止中はスキップ)
+  if (!paused) {
+    const steps = world.clock.advance(dt);
+    for (let s = 0; s < steps; s++) world.step(world.clock.fixedStep);
+    // 描画同期(停止中は座標が動かないので更新不要)
+    gfx.syncAgents(world.store);
+  }
 
-  // 描画同期
-  gfx.syncAgents(world.store);
-
-  // カメラ更新(一人称)
+  // カメラ更新(一人称)は停止中も有効(街を見て回れる)
   controller.update(dt);
+
+  // Ctrl押下中のホバー調査
+  inspector.update();
 
   renderer.render(scene, camera);
 
   if (now - lastStats > 250) {
     lastStats = now;
     hud.textContent =
-      `FPS ${fps.toFixed(0)}   ${world.clock.format()}\n` +
+      `FPS ${fps.toFixed(0)}   ${world.clock.format()}   ${paused ? '⏸ PAUSED' : '▶ running'}\n` +
       `agents ${st.agents}  buildings ${st.buildings}\n` +
       `road nodes ${st.nodes}  POIs ${st.pois}\n` +
       `urban threshold ${world.city.urbanThreshold.toFixed(3)}\n` +
       `speed ${controller.moveSpeed.toFixed(0)} m/s  ${controller.isDragging ? '● looking' : '○ hold LMB to look'}\n` +
-      `[WASD=move  Q/E=up/down  LShift=sprint  LMB+drag=look  wheel=speed]`;
+      `[WASD=move  Q/E=up/down  LShift=sprint  LMB+drag=look  wheel=speed]\n` +
+      `[Space=pause/resume  Ctrl+hover=inspect]`;
   }
   requestAnimationFrame(frame);
 }

@@ -49,6 +49,11 @@ export class POIRegistry {
   get(id: number): POI { return this.list[id]; }
   get size(): number { return this.list.length; }
 
+  /** 指定建物内のPOI一覧(インスペクタ表示用)。 */
+  poisInBuilding(buildingId: number): POI[] {
+    return this.list.filter((p) => p.buildingId === buildingId);
+  }
+
   /**
    * カテゴリ内で「近くて価格帯が合う」POIを1つ選ぶ。
    * 探索半径を段階的に広げ、見つからなければ全域から最良を返す。

@@ -34,6 +34,11 @@ export class InstancedRenderer {
 
   constructor(private scene: THREE.Scene) {}
 
+  /** ピッキング(レイキャスト)用にメッシュを公開する。
+   *  instanceId は building 配列 index / AgentStore index にそのまま対応する。 */
+  get buildings(): THREE.InstancedMesh { return this.buildingMesh; }
+  get agents(): THREE.InstancedMesh { return this.agentMesh; }
+
   buildStatic(buildings: Building[], net: RoadNetwork): void {
     this.buildBuildings(buildings);
     this.buildRoads(net);
