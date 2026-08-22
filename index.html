@@ -7,19 +7,8 @@
     <style>
       html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e13; }
       #app { position: fixed; inset: 0; }
-      #hud {
-        position: fixed; top: 8px; left: 8px; z-index: 10;
-        font: 12px/1.4 ui-monospace, monospace; color: #b7c7dd;
-        background: rgba(10,14,20,.6); padding: 8px 10px; border-radius: 6px;
-        white-space: pre; pointer-events: none;
-      }
-      #clock {
-        position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
-        z-index: 12; font: 600 20px/1.1 ui-monospace, monospace; color: #eaf1fb;
-        background: rgba(10,14,20,.7); padding: 6px 14px; border-radius: 8px;
-        border: 1px solid #2c3a4f; letter-spacing: 1px; pointer-events: none;
-        display: flex; gap: 12px; align-items: baseline;
-      }
+      #hud { position: fixed; top: 8px; left: 8px; z-index: 10; font: 12px/1.4 ui-monospace, monospace; color: #b7c7dd; background: rgba(10,14,20,.6); padding: 8px 10px; border-radius: 6px; white-space: pre; pointer-events: none; }
+      #clock { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 12; font: 600 20px/1.1 ui-monospace, monospace; color: #eaf1fb; background: rgba(10,14,20,.7); padding: 6px 14px; border-radius: 8px; border: 1px solid #2c3a4f; letter-spacing: 1px; pointer-events: none; display: flex; gap: 12px; align-items: baseline; }
       #clock .day { font-size: 12px; opacity: .7; font-weight: 400; }
       #clock .icon { font-size: 16px; }
     </style>

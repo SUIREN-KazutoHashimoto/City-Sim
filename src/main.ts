@@ -38,15 +38,13 @@ gfx.buildVehicles(world.vehicles.capacity);
 gfx.buildSignals(world.city.net, world.signals);
 gfx.buildCrosswalks(world.city.net, world.signals);
 gfx.buildStopLines(world.city.net, world.signals);
+gfx.buildBusStops(world.bus.stops);
+gfx.buildGates(world.city.gateNodes.map((n) => ({ x: world.city.net.nodes[n].x, z: world.city.net.nodes[n].z })));
 
 const controller = new FirstPersonController(camera, renderer.domElement, 0, -0.9);
 controller.setPosition(SIZE / 2, SPAWN_ALT, SIZE / 2);
 controller.followDistance = 12;
-renderer.domElement.addEventListener('wheel', (e) => {
-  const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-  if (controller.isFollowing) controller.followDistance = THREE.MathUtils.clamp(controller.followDistance * f, 3, 120);
-  else controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400);
-});
+renderer.domElement.addEventListener('wheel', (e) => { const f = e.deltaY < 0 ? 1.15 : 1 / 1.15; if (controller.isFollowing) controller.followDistance = THREE.MathUtils.clamp(controller.followDistance * f, 3, 120); else controller.moveSpeed = THREE.MathUtils.clamp(controller.moveSpeed * f, 2, 400); });
 window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
 
 const inspector = new Inspector(world, gfx, camera, renderer.domElement);
@@ -60,27 +58,15 @@ function clockIcon(h: number): string { if (h >= 5 && h < 7) return '🌅'; if (
 
 let prev = performance.now();
 function frame(now: number): void {
-  const dt = (now - prev) / 1000; prev = now;
-  fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
-  if (!paused) {
-    const steps = world.clock.advance(dt);
-    for (let s = 0; s < steps; s++) world.step(world.clock.fixedStep);
-    gfx.syncAgents(world.store); gfx.syncVehicles(world.vehicles); gfx.syncSignals(world.signals); dashboard.sample();
-  }
-  controller.setFollowTarget(inspector.getFollowPosition());
-  controller.update(dt); inspector.update(); dashboard.draw();
+  const dt = (now - prev) / 1000; prev = now; fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
+  if (!paused) { const steps = world.clock.advance(dt); for (let s = 0; s < steps; s++) world.step(world.clock.stepDt); gfx.syncAgents(world.store); gfx.syncVehicles(world.vehicles); gfx.syncSignals(world.signals); dashboard.sample(); }
+  controller.setFollowTarget(inspector.getFollowPosition()); controller.update(dt); inspector.update(); dashboard.draw();
   renderer.render(scene, camera);
-  const c = world.clock;
-  const hh = String(c.hour).padStart(2, '0'), mm = String(c.minute).padStart(2, '0'), ss = String(c.second).padStart(2, '0');
+  const c = world.clock; const hh = String(c.hour).padStart(2, '0'), mm = String(c.minute).padStart(2, '0'), ss = String(c.second).padStart(2, '0');
   clockEl.innerHTML = `<span class="icon">${clockIcon(c.hour)}</span><span>${hh}:${mm}<span style="font-size:13px;opacity:.7">:${ss}</span></span><span class="day">DAY ${c.day}</span>${paused ? '<span class="day">⏸ PAUSED</span>' : ''}`;
   if (now - lastStats > 250) {
     lastStats = now; const dv = world.stats();
-    hud.textContent = `FPS ${fps.toFixed(0)}   ×${dashboard.speedLabel}\n` +
-      `agents ${st.agents}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}\n` +
-      `buildings ${st.buildings}  駐車場 ${st.parkingLots}  信号 ${st.signals}\n` +
-      `${controller.isFollowing ? `追跡中 dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect'}\n` +
-      `[WASD=move  E/Space=up  Q/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +
-      `[Tab=pause  [ ]=speed  release LMB=inspect  MMB=人/車を追跡]`;
+    hud.textContent = `FPS ${fps.toFixed(0)}   ×${dashboard.speedLabel}\nagents ${st.agents}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${controller.isFollowing ? `追跡中 dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  release LMB=inspect  MMB=人/車を追跡]`;
   }
   requestAnimationFrame(frame);
 }

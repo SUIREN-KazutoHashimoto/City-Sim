@@ -1,10 +1,7 @@
 import { AgentStore } from './AgentStore';
 import { clamp } from '../core/math';
 export class NeedSystem {
-  private readonly decay = {
-    energy: 1 / (16 * 3600), hunger: 1 / (6 * 3600), social: 1 / (10 * 3600),
-    hygiene: 1 / (14 * 3600), fun: 1 / (8 * 3600),
-  };
+  private readonly decay = { energy: 1 / (16 * 3600), hunger: 1 / (6 * 3600), social: 1 / (10 * 3600), hygiene: 1 / (14 * 3600), fun: 1 / (8 * 3600) };
   update(store: AgentStore, dtSec: number, begin = 0, end = store.count): void {
     const d = this.decay;
     for (let i = begin; i < end; i++) {
