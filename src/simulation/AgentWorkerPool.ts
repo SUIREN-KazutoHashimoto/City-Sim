@@ -25,7 +25,8 @@ export class AgentWorkerPool {
       activityExit: store.activityExit.buffer as SharedArrayBuffer,
     };
     for (let i = 0; i < count; i++) {
-      const worker = new Worker(new URL('../workers/agentWorker.ts', import.meta.url), { type: 'module', name: `city-agent-${i}` });
+      // ViteはWorkerOptionsを静的解析するため、動的なname指定は付けない。
+      const worker = new Worker(new URL('../workers/agentWorker.ts', import.meta.url), { type: 'module' });
       worker.onmessage = (ev: MessageEvent<{ type: string; jobId: number }>) => {
         if (ev.data.type !== 'done') return;
         const job = this.pending.get(ev.data.jobId); if (!job) return;
