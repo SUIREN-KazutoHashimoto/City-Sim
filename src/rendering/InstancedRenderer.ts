@@ -13,14 +13,17 @@ export class InstancedRenderer {
   private buildingMesh!: THREE.InstancedMesh;
   private agentMesh!: THREE.InstancedMesh;
   private vehicleMesh!: THREE.InstancedMesh;
-  private signalMesh!: THREE.InstancedMesh;
+  private vehSignalMesh!: THREE.InstancedMesh;  // 車道信号灯
+  private pedSignalMesh!: THREE.InstancedMesh;  // 歩行者信号灯
   private dummy = new THREE.Object3D();
 
-  // 信号灯インスタンス → (nodeId, axis) の対応表
+  // 信号灯インスタンス → (nodeId, axis) の対応表(車道用/歩行者用で共通の並び)
   private signalRefs: { node: number; axis: 0 | 1 }[] = [];
   private colGreen = new THREE.Color(0x36e05a);
   private colYellow = new THREE.Color(0xf2c14e);
   private colRed = new THREE.Color(0xe0402f);
+  private colWalk = new THREE.Color(0x5ad1ff);   // 歩行者・青(進める)
+  private colDont = new THREE.Color(0xe0603a);    // 歩行者・赤(止まれ)
 
   private readonly categoryColor: Record<number, THREE.Color> = {
     [POICategory.Home]:   new THREE.Color(0x8fa9c6),
@@ -148,32 +151,60 @@ export class InstancedRenderer {
     this.vehicleMesh = mesh;
   }
 
-  /** 信号灯を各交差点に2基(軸ごと)設置。色は毎フレーム更新。 */
+  /**
+   * 各信号交差点に「車道信号灯」と「歩行者信号灯」を軸ごとに設置。
+   * 車道信号は高い位置の球、歩行者信号は低い位置の小さな箱で見分けやすくする。
+   * 色は毎フレーム syncSignals で更新する。
+   */
   buildSignals(net: RoadNetwork, signals: SignalSystem): void {
     this.signalRefs = [];
     for (const node of signals.nodeIds) {
       this.signalRefs.push({ node, axis: 0 });
       this.signalRefs.push({ node, axis: 1 });
     }
-    const geo = new THREE.SphereGeometry(0.7, 8, 8);
-    // 発光風の見た目にするため unlit(Basic)。instanceColor で灯色を出す。
-    const mat = new THREE.MeshBasicMaterial();
-    const mesh = new THREE.InstancedMesh(geo, mat, Math.max(1, this.signalRefs.length));
-    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, this.signalRefs.length) * 3), 3);
-    mesh.frustumCulled = false;
-    // 位置は固定(交差点上、軸で高さを変えて2灯を判別しやすく)
+    const count = Math.max(1, this.signalRefs.length);
+
+    // --- 車道信号灯(高所の球)---
+    const vGeo = new THREE.SphereGeometry(0.7, 8, 8);
+    const vMat = new THREE.MeshBasicMaterial();
+    const vMesh = new THREE.InstancedMesh(vGeo, vMat, count);
+    vMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+    vMesh.frustumCulled = false;
+
+    // --- 歩行者信号灯(低所の小箱)---
+    const pGeo = new THREE.BoxGeometry(0.9, 0.9, 0.4);
+    const pMat = new THREE.MeshBasicMaterial();
+    const pMesh = new THREE.InstancedMesh(pGeo, pMat, count);
+    pMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+    pMesh.frustumCulled = false;
+
     for (let k = 0; k < this.signalRefs.length; k++) {
       const { node, axis } = this.signalRefs[k];
       const n = net.nodes[node];
-      this.dummy.position.set(n.x, axis === 0 ? 6.5 : 5.0, n.z);
+      // 軸方向へ少しずらして「その道路に面した信号」らしく配置
+      const ax = axis === 0 ? 5 : 0;
+      const az = axis === 1 ? 5 : 0;
+
+      // 車道信号: 交差点の先、高さ6.5
+      this.dummy.position.set(n.x + ax, 6.5, n.z + az);
       this.dummy.scale.setScalar(1);
       this.dummy.rotation.set(0, 0, 0);
       this.dummy.updateMatrix();
-      mesh.setMatrixAt(k, this.dummy.matrix);
+      vMesh.setMatrixAt(k, this.dummy.matrix);
+
+      // 歩行者信号: 交差点の角(直交方向へオフセット)、低め高さ2.6
+      const px = axis === 0 ? 0 : 5;
+      const pz = axis === 1 ? 0 : 5;
+      this.dummy.position.set(n.x + px, 2.6, n.z + pz);
+      this.dummy.updateMatrix();
+      pMesh.setMatrixAt(k, this.dummy.matrix);
     }
-    mesh.instanceMatrix.needsUpdate = true;
-    this.scene.add(mesh);
-    this.signalMesh = mesh;
+    vMesh.instanceMatrix.needsUpdate = true;
+    pMesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(vMesh);
+    this.scene.add(pMesh);
+    this.vehSignalMesh = vMesh;
+    this.pedSignalMesh = pMesh;
   }
 
   syncAgents(store: AgentStore): void {
@@ -210,16 +241,20 @@ export class InstancedRenderer {
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
 
-  /** 信号灯の色を現在の位相で更新。 */
+  /** 車道信号・歩行者信号の灯色を現在の位相で更新。 */
   syncSignals(signals: SignalSystem): void {
-    const mesh = this.signalMesh;
-    if (!mesh) return;
+    const vMesh = this.vehSignalMesh, pMesh = this.pedSignalMesh;
+    if (!vMesh || !pMesh) return;
     for (let k = 0; k < this.signalRefs.length; k++) {
       const { node, axis } = this.signalRefs[k];
-      const c = signals.color(node, axis);
-      const col = c === 'green' ? this.colGreen : c === 'yellow' ? this.colYellow : this.colRed;
-      mesh.setColorAt(k, col);
+      // 車道信号
+      const vc = signals.vehicleColor(node, axis);
+      vMesh.setColorAt(k, vc === 'green' ? this.colGreen : vc === 'yellow' ? this.colYellow : this.colRed);
+      // 歩行者信号
+      const pc = signals.pedColor(node, axis);
+      pMesh.setColorAt(k, pc === 'walk' ? this.colWalk : this.colDont);
     }
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    if (vMesh.instanceColor) vMesh.instanceColor.needsUpdate = true;
+    if (pMesh.instanceColor) pMesh.instanceColor.needsUpdate = true;
   }
 }

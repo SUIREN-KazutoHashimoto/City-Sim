@@ -124,7 +124,7 @@ function frame(now: number): void {
     hud.textContent =
       `FPS ${fps.toFixed(0)}   ×${dashboard.speedLabel}\n` +
       `agents ${st.agents}  vehicles ${world.vehicles.count}  signals ${st.signals}\n` +
-      `buildings ${st.buildings}  POIs ${st.pois}  nodes ${st.nodes}\n` +
+      `buildings ${st.buildings}  POIs ${st.pois}  road/walk nodes ${st.nodes}/${st.sidewalkNodes}\n` +
       `${controller.isFollowing ? `following #, dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect mode'}\n` +
       `[WASD=move  E/Space=up  Q/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +
       `[Tab=pause  [ ]=speed  release LMB=inspect  MMB on agent=follow]`;

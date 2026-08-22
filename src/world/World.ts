@@ -7,6 +7,7 @@ import { CityGenerator, CityConfig } from '../generation/CityGenerator';
 import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
 import { TrafficSystem } from '../traffic/TrafficSystem';
 import { SignalSystem } from '../traffic/SignalSystem';
+import { SidewalkNetwork } from '../traffic/SidewalkNetwork';
 import { AStar } from '../traffic/AStar';
 import { POICategory } from './POI';
 
@@ -31,13 +32,15 @@ export class World {
   readonly city: CityGenerator;
   readonly traffic: TrafficSystem;
   readonly signals: SignalSystem;
+  /** 歩行者専用の独立ネットワーク(歩道)。将来 歩道橋/専用道 を追加可能。 */
+  readonly sidewalk: SidewalkNetwork;
 
   private readonly grid = new SpatialHashGrid(8);
   private readonly needs = new NeedSystem();
   private readonly brain: UtilityBrain;
   private readonly walkAstar: AStar;
 
-  /** 歩行者の歩道経路(ノードID列)。index = agent index。 */
+  /** 歩行者の歩道経路(SidewalkNetwork のノードID列)。index = agent index。 */
   private walkPaths: Int32Array[];
 
   /** この距離(m)以上は車を使う。未満は徒歩。 */
@@ -55,7 +58,9 @@ export class World {
     this.brain = new UtilityBrain(this.city.poi);
     this.signals = new SignalSystem(this.city.net, cityCfg.seed ^ 0x51ed);
     this.traffic = new TrafficSystem(this.city.net, this.vehicles, this.signals);
-    this.walkAstar = new AStar(this.city.net, 'walk');
+    // 歩道は車道から自動生成した独立グラフ。歩行者経路探索は歩道グラフ上で行う。
+    this.sidewalk = new SidewalkNetwork(this.city.net);
+    this.walkAstar = new AStar(this.sidewalk, 'walk');
     this.walkPaths = new Array(agentCapacity).fill(EMPTY_PATH);
   }
 
@@ -140,11 +145,11 @@ export class World {
     s.state[i] = AgentState.Traveling;
   }
 
-  /** 出発地→目的地の歩道ノード経路を計算し walkPaths に格納。 */
+  /** 出発地→目的地の歩道ノード経路(SidewalkNetwork上)を計算し walkPaths に格納。 */
   private assignWalkPath(i: number): void {
     const s = this.store;
-    const startNode = this.city.net.nearestNode(s.posX[i], s.posZ[i]);
-    const goalNode = this.city.net.nearestNode(s.goalX[i], s.goalZ[i]);
+    const startNode = this.sidewalk.nearestNode(s.posX[i], s.posZ[i]);
+    const goalNode = this.sidewalk.nearestNode(s.goalX[i], s.goalZ[i]);
     if (startNode < 0 || goalNode < 0 || startNode === goalNode) {
       this.walkPaths[i] = EMPTY_PATH;
       s.pathHandle[i] = -1;
@@ -218,7 +223,7 @@ export class World {
    */
   private walkStep(i: number, dt: number): void {
     const s = this.store;
-    const net = this.city.net;
+    const sw = this.sidewalk;
     const path = this.walkPaths[i];
     const hasPath = s.pathHandle[i] > 0 && path.length >= 2;
 
@@ -229,26 +234,29 @@ export class World {
     if (hasPath) {
       const cur = s.pathCursor[i];
       if (cur < path.length) {
-        const node = net.nodes[path[cur]];
-        // 次ノードへの方向で歩道オフセット(道の端を歩く)
+        const node = sw.nodes[path[cur]];
+        // 次ノードへの方向で歩道オフセット(道の端=歩道を歩く)
         let ox = 0, oz = 0;
         if (cur + 1 < path.length) {
-          const nx = net.nodes[path[cur + 1]];
+          const nx = sw.nodes[path[cur + 1]];
           const dxx = nx.x - node.x, dzz = nx.z - node.z;
           const L = Math.hypot(dxx, dzz) || 1;
-          // 右手方向へオフセット
-          ox = (dzz / L) * this.sidewalkOffset;
-          oz = (-dxx / L) * this.sidewalkOffset;
+          // 右手方向へオフセット(立体交差=歩道橋ではオフセットしない)
+          const off = node.gradeSeparated ? 0 : this.sidewalkOffset;
+          ox = (dzz / L) * off;
+          oz = (-dxx / L) * off;
         }
         tx = node.x + ox; tz = node.z + oz;
 
         const dNode = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
         if (dNode < 5) {
-          // 交差点に到達: 次セグメントの軸で歩行者信号を確認
-          if (node.hasSignal && cur + 1 < path.length) {
-            const axis = net.axisOf(path[cur], path[cur + 1]);
-            if (!this.signals.isGreen(path[cur], axis)) {
-              // 赤: この交差点手前で待機(横断しない)
+          // 交差点に到達: 対応する車道交差点に信号があれば「歩行者信号」を確認。
+          // roadNode<0(歩道橋・専用道)や gradeSeparated は信号と無関係に通行。
+          if (node.roadNode >= 0 && !node.gradeSeparated && cur + 1 < path.length) {
+            const roadNode = node.roadNode;
+            const axis = sw.axisOf(path[cur], path[cur + 1]);
+            if (!this.signals.pedWalk(roadNode, axis)) {
+              // 歩行者信号が赤: この交差点手前で待機(横断しない)
               s.waiting[i] = 1;
               s.velX[i] = 0; s.velZ[i] = 0;
               return;
@@ -375,7 +383,7 @@ export class World {
     }
   }
 
-  stats(): { agents: number; buildings: number; nodes: number; pois: number; vehicles: number; signals: number } {
+  stats(): { agents: number; buildings: number; nodes: number; pois: number; vehicles: number; signals: number; sidewalkNodes: number } {
     return {
       agents: this.store.count,
       buildings: this.city.buildings.length,
@@ -383,6 +391,7 @@ export class World {
       pois: this.city.poi.size,
       vehicles: this.vehicles.count,
       signals: this.signals.count,
+      sidewalkNodes: this.sidewalk.nodes.length,
     };
   }
 

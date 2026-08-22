@@ -1,4 +1,13 @@
-import { RoadNetwork } from './RoadNetwork';
+/**
+ * A* が必要とするグラフの最小インターフェース。
+ * RoadNetwork(車道)と SidewalkNetwork(歩道)の双方がこれを満たすため、
+ * 同じ A* を車両経路にも歩行者経路にも使える(独立ネットワーク対応)。
+ */
+export interface PathGraph {
+  nodes: { x: number; z: number; edges: number[] }[];
+  edges: { to: number; length: number; speedLimit: number }[];
+  heuristic(a: number, b: number): number;
+}
 
 /**
  * バイナリヒープ付き A* 経路探索(ノード列を返す)。DOM非依存でワーカー化可能。
@@ -12,7 +21,7 @@ export class AStar {
   private openFlag: Uint8Array;
   private heap: number[] = [];
 
-  constructor(private net: RoadNetwork, private mode: 'drive' | 'walk' = 'drive') {
+  constructor(private net: PathGraph, private mode: 'drive' | 'walk' = 'drive') {
     const n = net.nodes.length;
     this.g = new Float64Array(n);
     this.f = new Float64Array(n);

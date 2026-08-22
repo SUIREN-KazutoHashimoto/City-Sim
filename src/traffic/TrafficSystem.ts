@@ -91,7 +91,7 @@ export class TrafficSystem {
         let gapStop = Infinity;
         if (!isTerminalEdge) {
           const axis = this.net.axisOf(vs.fromNode[v], vs.toNode[v]);
-          if (!this.signals.isGreen(vs.toNode[v], axis)) {
+          if (!this.signals.vehicleGreen(vs.toNode[v], axis)) {
             gapStop = remaining; // 赤: 停止線で止まる
           }
         }
