@@ -52,6 +52,8 @@ async function bootstrap(): Promise<void> {
   const gfx = new EnhancedRenderer(scene);
   gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
   gfx.buildAgents(world.store.capacity);
+  // Inspectorはinvisible meshにもraycastできるため、hit proxyはGPU描画から外す。
+  gfx.buildings.visible = false; gfx.agents.visible = false;
   gfx.buildVehicles(world.vehicles.capacity);
   gfx.buildSignals(world.city.net, world.signals);
   gfx.buildCrosswalks(world.city.net, world.signals);
