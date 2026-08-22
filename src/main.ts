@@ -3,6 +3,7 @@ import { World } from './world/World';
 import { InstancedRenderer } from './rendering/InstancedRenderer';
 import { FirstPersonController } from './rendering/FirstPersonController';
 import { Inspector } from './rendering/Inspector';
+import { Dashboard } from './rendering/Dashboard';
 
 /**
  * エントリポイント: three.js のセットアップ + 固定ステップのシミュレーションループ。
@@ -77,6 +78,9 @@ window.addEventListener('resize', () => {
 // --- Ctrl押下中のホバーで対象を調査するインスペクタ ---
 const inspector = new Inspector(world, gfx, camera, renderer.domElement);
 
+// --- 時間帯グラフ + 速度コントロール(右上ダッシュボード) ---
+const dashboard = new Dashboard(world, world.clock);
+
 // --- Tab でシミュレーションの一時停止 / 再開 ---
 let paused = false;
 window.addEventListener('keydown', (e) => {
@@ -106,6 +110,8 @@ function frame(now: number): void {
     for (let s = 0; s < steps; s++) world.step(world.clock.fixedStep);
     // 描画同期(停止中は座標が動かないので更新不要)
     gfx.syncAgents(world.store);
+    // 時間帯グラフのサンプリング(ゲーム内時刻ビン単位で記録)
+    dashboard.sample();
   }
 
   // 追跡対象の連携: インスペクタが追跡中ならカメラを対象に追従させる
@@ -119,16 +125,19 @@ function frame(now: number): void {
 
   renderer.render(scene, camera);
 
+  // ダッシュボード(時間帯グラフ)は毎フレーム再描画(現在時刻マーカーを滑らかに)
+  dashboard.draw();
+
   if (now - lastStats > 250) {
     lastStats = now;
     hud.textContent =
-      `FPS ${fps.toFixed(0)}   ${world.clock.format()}   ${paused ? '⏸ PAUSED' : '▶ running'}\n` +
+      `FPS ${fps.toFixed(0)}   ${world.clock.format()}   ${paused ? '⏸ PAUSED' : '▶ running'}  ×${dashboard.speedLabel}\n` +
       `agents ${st.agents}  buildings ${st.buildings}\n` +
       `road nodes ${st.nodes}  POIs ${st.pois}\n` +
       `urban threshold ${world.city.urbanThreshold.toFixed(3)}\n` +
       `${controller.isFollowing ? `following #, dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect mode'}\n` +
       `[WASD=move  Q/Space=up  E/Ctrl=down  LShift=sprint  LMB+drag=look]\n` +
-      `[Tab=pause/resume  release LMB=inspect  MMB on agent=follow]`;
+      `[Tab=pause  [ ]=speed  release LMB=inspect  MMB on agent=follow]`;
   }
   requestAnimationFrame(frame);
 }

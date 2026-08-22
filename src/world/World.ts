@@ -249,4 +249,34 @@ export class World {
       pois: this.city.poi.size,
     };
   }
+
+  /**
+   * 現在の活動分布スナップショット(時間帯グラフ用)。
+   * 移動中/在宅/勤務/飲食/娯楽/待機 の人数を1パスで集計する。安価。
+   */
+  activitySnapshot(): {
+    traveling: number; home: number; work: number;
+    food: number; leisure: number; idle: number;
+  } {
+    const s = this.store;
+    let traveling = 0, home = 0, work = 0, food = 0, leisure = 0, idle = 0;
+    for (let i = 0; i < s.count; i++) {
+      const st = s.state[i];
+      if (st === AgentState.Traveling || st === AgentState.Routing) { traveling++; continue; }
+      if (st === AgentState.Engaged) {
+        const g = s.goalPOI[i];
+        const cat = g >= 0 ? this.city.poi.get(g).category : -1;
+        switch (cat) {
+          case POICategory.Home: home++; break;
+          case POICategory.Work: work++; break;
+          case POICategory.Food: food++; break;
+          case POICategory.Leisure: leisure++; break;
+          default: idle++;
+        }
+        continue;
+      }
+      idle++;
+    }
+    return { traveling, home, work, food, leisure, idle };
+  }
 }
