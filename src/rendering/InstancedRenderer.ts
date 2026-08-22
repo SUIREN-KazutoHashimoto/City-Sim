@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Building } from '../generation/CityGenerator';
-import { RoadNetwork } from '../traffic/RoadNetwork';
+import { RoadNetwork, roadWidth, crosswalkSetback, CROSSWALK_DEPTH } from '../traffic/RoadNetwork';
 import { AgentStore, AgentState } from '../agents/AgentStore';
 import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
 import { SignalSystem, SignalMode } from '../traffic/SignalSystem';
@@ -139,7 +139,7 @@ export class InstancedRenderer {
 
     const STRIPE_W = 0.55;    // 縞の幅(進行方向に直交)
     const STRIPE_GAP = 0.55;  // 縞の間隔
-    const CROSS_DEPTH = 4.5;  // 横断歩道の奥行き(進行方向)
+    const CROSS_DEPTH = CROSSWALK_DEPTH; // 横断歩道の奥行き(歩行者経路と共有)
 
     const addBand = (cx: number, cz: number, dirX: number, dirZ: number, roadW: number) => {
       // dir = 車の進行方向(この帯を横切る向き)。perp = 縞が並ぶ向き(道路幅方向)。
@@ -178,9 +178,9 @@ export class InstancedRenderer {
         let dxx = nb.x - node.x, dzz = nb.z - node.z;
         const L = Math.hypot(dxx, dzz) || 1;
         dxx /= L; dzz /= L;
-        const roadW = 3.5 * e.lanes * 2;
-        // 交差点中心から道路方向へセットバックした位置に横断歩道を置く
-        const setback = 7 + roadW * 0.25;
+        const roadW = roadWidth(e.lanes);
+        // 交差点中心から道路方向へセットバックした位置に横断歩道を置く(歩行者経路と共有)
+        const setback = crosswalkSetback(roadW);
         const cx = node.x + dxx * setback;
         const cz = node.z + dzz * setback;
         // この道路を「横切る」向き = 道路に直交する歩行者の進む向き。
@@ -204,6 +204,53 @@ export class InstancedRenderer {
     });
     const mesh = new THREE.InstancedMesh(geo, mat, stripes.length);
     stripes.forEach((m, i) => mesh.setMatrixAt(i, m));
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
+  }
+
+  /**
+   * 停止線を描画する。各信号交差点の各流入路で、横断歩道の *交差点側の手前* に
+   * 道路幅いっぱいの白い横棒を1本引く(車が信号待ちで止まる位置)。
+   * TrafficSystem の停止目標(エッジ終端手前)とおおむね一致する位置に置く。
+   */
+  buildStopLines(net: RoadNetwork, signals: SignalSystem): void {
+    const bars: THREE.Matrix4[] = [];
+    const y = 0.14; // 横断歩道(0.13)より僅かに上
+
+    for (const nodeId of signals.nodeIds) {
+      const node = net.nodes[nodeId];
+      for (const edgeId of node.edges) {
+        const e = net.edges[edgeId];
+        const nb = net.nodes[e.to];
+        let dxx = nb.x - node.x, dzz = nb.z - node.z;
+        const L = Math.hypot(dxx, dzz) || 1;
+        dxx /= L; dzz /= L;
+        const roadW = roadWidth(e.lanes);
+        // 停止線 = 横断歩道帯の「さらに外側(交差点から遠い側)」= 車の手前
+        const setback = crosswalkSetback(roadW) + CROSSWALK_DEPTH * 0.5 + 0.8;
+        const cx = node.x + dxx * setback;
+        const cz = node.z + dzz * setback;
+        const angle = Math.atan2(dzz, dxx);
+        const m = new THREE.Matrix4();
+        // 現状は車両が道路中心線を走るため、停止線も中心に置き道路幅いっぱいに引く。
+        // (将来 車線分離を入れたら進入車線側へオフセットする)
+        m.compose(
+          new THREE.Vector3(cx, y, cz),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -angle, 0)),
+          // 進行方向(x)= 線の太さ0.6m, 幅(z)= 道路幅いっぱい
+          new THREE.Vector3(0.6, 0.06, roadW - 0.6),
+        );
+        bars.push(m);
+      }
+    }
+    if (bars.length === 0) return;
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xe6ebf0, roughness: 0.9, emissive: 0x2a2d33, emissiveIntensity: 0.25,
+    });
+    const mesh = new THREE.InstancedMesh(geo, mat, bars.length);
+    bars.forEach((m, i) => mesh.setMatrixAt(i, m));
     mesh.instanceMatrix.needsUpdate = true;
     mesh.receiveShadow = true;
     this.scene.add(mesh);

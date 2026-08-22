@@ -8,6 +8,7 @@ import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
 import { TrafficSystem } from '../traffic/TrafficSystem';
 import { SignalSystem } from '../traffic/SignalSystem';
 import { SidewalkNetwork } from '../traffic/SidewalkNetwork';
+import { roadWidth, crosswalkSetback, CROSSWALK_DEPTH } from '../traffic/RoadNetwork';
 import { AStar } from '../traffic/AStar';
 import { POICategory } from './POI';
 
@@ -235,36 +236,68 @@ export class World {
       const cur = s.pathCursor[i];
       if (cur < path.length) {
         const node = sw.nodes[path[cur]];
-        // 次ノードへの方向で歩道オフセット(道の端=歩道を歩く)
-        let ox = 0, oz = 0;
+
         if (cur + 1 < path.length) {
           const nx = sw.nodes[path[cur + 1]];
-          const dxx = nx.x - node.x, dzz = nx.z - node.z;
+          let dxx = nx.x - node.x, dzz = nx.z - node.z;
           const L = Math.hypot(dxx, dzz) || 1;
-          // 右手方向へオフセット(立体交差=歩道橋ではオフセットしない)
-          const off = node.gradeSeparated ? 0 : this.sidewalkOffset;
-          ox = (dzz / L) * off;
-          oz = (-dxx / L) * off;
-        }
-        tx = node.x + ox; tz = node.z + oz;
+          dxx /= L; dzz /= L;
 
-        const dNode = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
-        if (dNode < 5) {
-          // 交差点に到達: 対応する車道交差点に信号があれば「歩行者信号」を確認。
-          // roadNode<0(歩道橋・専用道)や gradeSeparated は信号と無関係に通行。
-          if (node.roadNode >= 0 && !node.gradeSeparated && cur + 1 < path.length) {
-            const roadNode = node.roadNode;
+          // この交差点に信号があるか(=横断歩道に吸着させる対象か)
+          const signalized =
+            node.roadNode >= 0 && !node.gradeSeparated &&
+            this.signals.modeOf(node.roadNode) !== null;
+
+          if (signalized) {
+            // ---- 横断歩道へ吸着 ----
+            // 描画と同じ setback を用い、次ノード方向の横断歩道帯に乗せる。
+            const swEdge = sw.edgeBetween(path[cur], path[cur + 1]);
+            const rw = roadWidth(swEdge ? swEdge.roadLanes : 1);
+            const setback = crosswalkSetback(rw);
+            const nearS = setback - CROSSWALK_DEPTH * 0.5 - 0.5; // 手前の縁石(横断前)
+            const farS = setback + CROSSWALK_DEPTH * 0.5;        // 渡り切った先
+            const nearX = node.x + dxx * nearS, nearZ = node.z + dzz * nearS;
+            const farX = node.x + dxx * farS, farZ = node.z + dzz * farS;
+
             const axis = sw.axisOf(path[cur], path[cur + 1]);
-            if (!this.signals.pedWalk(roadNode, axis)) {
-              // 歩行者信号が赤: この交差点手前で待機(横断しない)
-              s.waiting[i] = 1;
-              s.velX[i] = 0; s.velZ[i] = 0;
-              return;
+            const green = this.signals.pedWalk(node.roadNode, axis);
+            const dNear = Math.hypot(s.posX[i] - nearX, s.posZ[i] - nearZ);
+
+            if (!green) {
+              // 赤: 横断歩道の手前(縁石)で待機
+              tx = nearX; tz = nearZ;
+              if (dNear < 2) {
+                s.waiting[i] = 1;
+                s.velX[i] = 0; s.velZ[i] = 0;
+                return;
+              }
+            } else {
+              // 青: 横断歩道を渡って対岸へ。対岸到達で次ノードへ。
+              s.waiting[i] = 0;
+              tx = farX; tz = farZ;
+              const dFar = Math.hypot(s.posX[i] - farX, s.posZ[i] - farZ);
+              if (dFar < 2) {
+                s.pathCursor[i] = cur + 1;
+                if (cur + 1 >= path.length) arriving = true;
+              }
+            }
+          } else {
+            // 信号なし/歩道橋/専用道: 従来どおり歩道オフセットで進む
+            const off = node.gradeSeparated ? 0 : this.sidewalkOffset;
+            tx = node.x + dzz * off;
+            tz = node.z + (-dxx) * off;
+            const dNode = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
+            if (dNode < 5) {
+              s.waiting[i] = 0;
+              s.pathCursor[i] = cur + 1;
+              if (cur + 1 >= path.length) arriving = true;
             }
           }
-          s.waiting[i] = 0;
-          s.pathCursor[i] = cur + 1;
-          if (cur + 1 >= path.length) arriving = true;
+        } else {
+          // 最終ノード: ノード中心へ寄ってから目的地(POI)へ
+          tx = node.x; tz = node.z;
+          const dNode = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z);
+          if (dNode < 5) { s.pathCursor[i] = cur + 1; arriving = true; }
         }
       } else {
         arriving = true;

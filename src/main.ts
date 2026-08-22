@@ -47,6 +47,7 @@ gfx.buildAgents(world.store.capacity);
 gfx.buildVehicles(world.vehicles.capacity);
 gfx.buildSignals(world.city.net, world.signals);
 gfx.buildCrosswalks(world.city.net, world.signals);
+gfx.buildStopLines(world.city.net, world.signals);
 
 // --- カメラ操作 ---
 const controller = new FirstPersonController(camera, renderer.domElement, 0, -0.9);

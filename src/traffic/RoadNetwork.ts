@@ -36,6 +36,14 @@ export function edgeAxis(dx: number, dz: number): 0 | 1 {
   return Math.abs(dx) >= Math.abs(dz) ? 0 : 1;
 }
 
+// ---- 横断歩道ジオメトリ定数(描画と歩行者経路で共有し、位置を厳密一致させる)----
+/** 車線数から車道全幅(m)を求める。 */
+export function roadWidth(lanes: number): number { return 3.5 * lanes * 2; }
+/** 交差点中心から横断歩道帯の中心までの距離(m)。 */
+export function crosswalkSetback(rw: number): number { return 7 + rw * 0.25; }
+/** 横断歩道帯の奥行き(歩行者の進行方向, m)。 */
+export const CROSSWALK_DEPTH = 4.5;
+
 export class RoadNetwork {
   nodes: RoadNode[] = [];
   edges: RoadEdge[] = [];

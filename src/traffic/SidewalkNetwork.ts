@@ -41,6 +41,8 @@ export interface SidewalkEdge {
   speedLimit: number;
   /** true = 車道の平面横断を伴う(信号の影響を受ける) / false = 歩道橋等で分離。 */
   crossing: boolean;
+  /** 併走する車道の車線数(横断歩道位置の算出に使う)。専用道は 0。 */
+  roadLanes: number;
 }
 
 export class SidewalkNetwork implements PathGraph {
@@ -63,7 +65,7 @@ export class SidewalkNetwork implements PathGraph {
       const id = this.addNode(rn.x, rn.z, rn.id, false);
       this.sidewalkOfRoad[rn.id] = id;
     }
-    // 車道エッジ(無向)ごとに歩道エッジ(双方向)を作る。平面横断フラグを付与。
+    // 車道エッジ(無向)ごとに歩道エッジ(双方向)を作る。平面横断フラグと車線数を付与。
     const done = new Set<number>();
     for (const e of road.edges) {
       const key = e.from < e.to ? e.from * 1e6 + e.to : e.to * 1e6 + e.from;
@@ -71,7 +73,7 @@ export class SidewalkNetwork implements PathGraph {
       done.add(key);
       const a = this.sidewalkOfRoad[e.from];
       const b = this.sidewalkOfRoad[e.to];
-      this.connect(a, b, true);
+      this.connect(a, b, true, e.lanes);
     }
   }
 
@@ -83,11 +85,11 @@ export class SidewalkNetwork implements PathGraph {
   }
 
   /** 双方向の歩道エッジを1本追加する。crossing=平面横断(信号影響)か。 */
-  connect(a: number, b: number, crossing: boolean): void {
+  connect(a: number, b: number, crossing: boolean, roadLanes = 0): void {
     const na = this.nodes[a], nb = this.nodes[b];
     const len = dist(na.x, na.z, nb.x, nb.z);
-    this.pushEdge(a, b, len, crossing);
-    this.pushEdge(b, a, len, crossing);
+    this.pushEdge(a, b, len, crossing, roadLanes);
+    this.pushEdge(b, a, len, crossing, roadLanes);
   }
 
   /**
@@ -97,13 +99,21 @@ export class SidewalkNetwork implements PathGraph {
   addFootbridge(a: number, b: number): void {
     this.nodes[a].gradeSeparated = true;
     this.nodes[b].gradeSeparated = true;
-    this.connect(a, b, false);
+    this.connect(a, b, false, 0);
   }
 
-  private pushEdge(from: number, to: number, length: number, crossing: boolean): void {
+  private pushEdge(from: number, to: number, length: number, crossing: boolean, roadLanes: number): void {
     const id = this.edges.length;
-    this.edges.push({ id, from, to, length, speedLimit: 1.4, crossing });
+    this.edges.push({ id, from, to, length, speedLimit: 1.4, crossing, roadLanes });
     this.nodes[from].edges.push(id);
+  }
+
+  /** 有向歩道エッジ from→to を返す(なければ undefined)。横断歩道位置の算出に使う。 */
+  edgeBetween(from: number, to: number): SidewalkEdge | undefined {
+    for (const eid of this.nodes[from].edges) {
+      if (this.edges[eid].to === to) return this.edges[eid];
+    }
+    return undefined;
   }
 
   heuristic(a: number, b: number): number {

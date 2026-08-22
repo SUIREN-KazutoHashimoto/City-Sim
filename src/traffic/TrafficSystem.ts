@@ -1,4 +1,4 @@
-import { RoadNetwork } from './RoadNetwork';
+import { RoadNetwork, roadWidth, crosswalkSetback, CROSSWALK_DEPTH } from './RoadNetwork';
 import { AStar } from './AStar';
 import { VehicleStore, VehicleState } from './VehicleStore';
 import { SignalSystem } from './SignalSystem';
@@ -86,13 +86,21 @@ export class TrafficSystem {
           leadSpeed = vs.speed[lead];
         }
 
-        // (2) 信号制約: 進行先ノードが赤(または黄)なら停止線=エッジ終端を停止目標に。
+        // (2) 信号制約: 進行先ノードが赤(または黄)なら *停止線* を停止目標に。
+        //     停止線は交差点中心から crosswalkSetback + 横断歩道半分 手前にある。
         //     終端(目的地)エッジは駐車扱いで信号無視。中間エッジのみ信号を見る。
         let gapStop = Infinity;
         if (!isTerminalEdge) {
           const axis = this.net.axisOf(vs.fromNode[v], vs.toNode[v]);
           if (!this.signals.vehicleGreen(vs.toNode[v], axis)) {
-            gapStop = remaining; // 赤: 停止線で止まる
+            const edge = vs.edge[v] >= 0 ? this.net.edges[vs.edge[v]] : null;
+            const rw = roadWidth(edge ? edge.lanes : 1);
+            // 停止線までの距離 = 交差点までの残り - (横断歩道手前までのオフセット)
+            const stopOffset = crosswalkSetback(rw) + CROSSWALK_DEPTH * 0.5 + 0.8;
+            const toStopLine = remaining - stopOffset;
+            // ジレンマゾーン処理: 既に停止線を越えて進入している車は、そのまま
+            // 交差点を通過させる(交差点内で凍結させない)。まだ手前の車だけ停止。
+            if (toStopLine > 0.5) gapStop = toStopLine;
           }
         }
 
