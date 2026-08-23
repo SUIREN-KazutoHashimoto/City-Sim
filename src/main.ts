@@ -107,9 +107,6 @@ async function bootstrap(): Promise<void> {
   const hud = document.getElementById('hud')!; const clockEl = document.getElementById('clock')!;
   let fps = 60, lastStats = 0; const st = world.stats();
   let simBusy = false, pendingReal = 0, simMs = 0;
-  // 鉄道はWorldの非同期batch完了時刻ではなく、同じtimeScaleの連続描画時刻で進める。
-  // これにより倍速時も「止まる→追い付く」のbatch脈動を列車へ持ち込まない。
-  let railVisualSimSeconds = world.clock.totalSeconds;
 
   function clockIcon(h: number): string { if (h >= 5 && h < 7) return '🌅'; if (h >= 7 && h < 17) return '☀️'; if (h >= 17 && h < 19) return '🌇'; if (h >= 19 && h < 22) return '🌆'; return '🌙'; }
 
@@ -155,9 +152,10 @@ async function bootstrap(): Promise<void> {
     vehicleVisuals.update(world.vehicles, dt); vehicleVisuals.apply(world.vehicles);
     try {
       const renderDt = Math.min(dt, 0.1);
-      if (!paused) railVisualSimSeconds += renderDt * world.clock.timeScale;
-      railRenderer.update(railVisualSimSeconds, renderDt);
-      trainLivery.sync();
+      // 列車の運行元時刻も車/バスと同じWorld時計へ戻す。
+      // 最終表示だけTrainLiveryOverlayで一次指数補間し、二次系のばね挙動を画面へ出さない。
+      railRenderer.update(world.clock.totalSeconds, renderDt);
+      trainLivery.sync(renderDt);
       controller.setFollowTarget(inspector.getFollowTarget()); controller.update(dt); dashboard.draw();
 
       const renderStarted = performance.now();
