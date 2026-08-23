@@ -2,8 +2,8 @@ import { latestRailPassengerProvider } from '../rendering/RailPassengerBridge';
 import { World } from './World';
 import './RailPassengerIntegration';
 
-type AnyWorld = World & Record<string, any>;
-const proto = World.prototype as unknown as AnyWorld;
+type AnyWorld = any;
+const proto: AnyWorld = World.prototype as any;
 const originalBeginTrip = proto.beginTrip as (agent: number) => void;
 
 proto.beginTrip = function autoAttachRailPassengerProvider(this: World, agent: number): void {
