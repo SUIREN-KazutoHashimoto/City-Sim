@@ -6,13 +6,16 @@ type AnyRail = Record<string, any>;
 type AnyRun = Record<string, any>;
 type TerminalHost = { lineId: number; end: 0 | 1; stationId: number };
 
-const DEPOT_TRACKS = 4;
+// 縦長の巨大基地ではなく、短く横へ広い留置線群にする。
+const DEPOT_TRACKS = 8;
 const DEPOT_TRACK_GAP = 4.4;
-const DEPOT_SIDE_OFFSET = 13.0;
-const DEPOT_LEAD = 28;
-const DEPOT_LADDER = 62;
-const DEPOT_TRACK_END = 820;
-const DEPOT_SLOT_SPACING = 58;
+const DEPOT_SIDE_OFFSET = 11.0;
+const DEPOT_LEAD = 24;
+const DEPOT_LADDER = 52;
+const DEPOT_BRANCH = 72;
+const DEPOT_TRACK_END = 260;
+const DEPOT_FIRST_SLOT = 108;
+const DEPOT_SLOT_SPACING = 66;
 
 const proto = RailRenderer.prototype as unknown as AnyRail;
 
@@ -41,6 +44,10 @@ function terminalHosts(self: AnyRail): TerminalHost[] {
   return hosts;
 }
 
+function sameHost(a: TerminalHost | null, b: TerminalHost | null): boolean {
+  return !!a && !!b && a.lineId === b.lineId && a.end === b.end && a.stationId === b.stationId;
+}
+
 function depotHostForRun(self: AnyRail, run: AnyRun): TerminalHost | null {
   const hosts = terminalHosts(self);
   if (!hosts.length) return null;
@@ -64,6 +71,14 @@ function depotHostForRun(self: AnyRail, run: AnyRun): TerminalHost | null {
     if (score < bestScore) { bestScore = score; best = host; }
   }
   return best;
+}
+
+function depotSlotForRun(self: AnyRail, run: AnyRun, host: TerminalHost): { track: number; slot: number } {
+  const assigned = (self.trainRuns as AnyRun[])
+    .filter((other) => sameHost(depotHostForRun(self, other), host))
+    .sort((a, b) => a.id - b.id);
+  const rank = Math.max(0, assigned.findIndex((other) => other.id === run.id));
+  return { track: rank % DEPOT_TRACKS, slot: Math.floor(rank / DEPOT_TRACKS) };
 }
 
 function pushTrack(
@@ -97,25 +112,25 @@ proto.buildDepots = function terminalOnlyDepots(this: AnyRail): void {
       z: base.z + Math.sin(base.heading) * outward * along + Math.cos(base.heading) * lateral,
     });
 
-    // 終端駅の先だけに、共通入出庫線→ラダー→4本の留置線を配置する。
-    const throat = makePoint(DEPOT_LEAD, sideSign * 3.0);
-    const ladder = makePoint(DEPOT_LADDER, sideSign * 9.0);
+    // 終端駅の先に、短い共通入出庫線→横長ラダー→8本の留置線。
+    const throat = makePoint(DEPOT_LEAD, sideSign * 2.5);
+    const ladder = makePoint(DEPOT_LADDER, sideSign * 7.0);
     pushTrack(this, { x: base.x, z: base.z }, throat, y, ballast, rails, 3.0);
     pushTrack(this, throat, ladder, y, ballast, rails, 3.0);
 
     for (let track = 0; track < DEPOT_TRACKS; track++) {
       const off = sideSign * (DEPOT_SIDE_OFFSET + track * DEPOT_TRACK_GAP);
-      const branch = makePoint(88, off);
+      const branch = makePoint(DEPOT_BRANCH, off);
       const endPoint = makePoint(DEPOT_TRACK_END, off);
-      pushTrack(this, ladder, branch, y, ballast, rails, 2.8);
-      pushTrack(this, branch, endPoint, y, ballast, rails, 3.2);
+      pushTrack(this, ladder, branch, y, ballast, rails, 2.7);
+      pushTrack(this, branch, endPoint, y, ballast, rails, 3.1);
     }
 
-    const shedOff = sideSign * (DEPOT_SIDE_OFFSET + 3.5 * DEPOT_TRACK_GAP);
-    const shed = makePoint(330, shedOff);
-    sheds.push({ matrix: this.matrix(shed.x, y + 2.6, shed.z, 150, 5.2, 9.0, -base.heading) });
-    const yard = makePoint(410, sideSign * 21);
-    apron.push({ matrix: this.matrix(yard.x, y - 0.20, yard.z, 760, 0.18, 42, -base.heading) });
+    const centerOff = sideSign * (DEPOT_SIDE_OFFSET + (DEPOT_TRACKS - 1) * DEPOT_TRACK_GAP * 0.5);
+    const shed = makePoint(178, centerOff);
+    sheds.push({ matrix: this.matrix(shed.x, y + 2.6, shed.z, 104, 5.2, 18.0, -base.heading) });
+    const yard = makePoint(145, centerOff);
+    apron.push({ matrix: this.matrix(yard.x, y - 0.20, yard.z, 238, 0.18, 68, -base.heading) });
   }
 
   const box = new THREE.BoxGeometry(1, 1, 1);
@@ -133,10 +148,10 @@ proto.depotBasePose = function sharedTerminalDepotPose(this: AnyRail, run: AnyRu
   const outward = host.end === 0 ? -1 : 1;
   const heading = this.wrapAngle(base.heading + (outward < 0 ? Math.PI : 0));
   const sideSign = ((host.lineId + host.end) & 1) === 0 ? 1 : -1;
-  const track = Math.abs(run.id) % DEPOT_TRACKS;
-  const slot = Math.floor(Math.abs(run.id) / DEPOT_TRACKS);
-  const off = sideSign * (DEPOT_SIDE_OFFSET + track * DEPOT_TRACK_GAP);
-  const along = 126 + slot * DEPOT_SLOT_SPACING;
+  const allocation = depotSlotForRun(this, run, host);
+  const off = sideSign * (DEPOT_SIDE_OFFSET + allocation.track * DEPOT_TRACK_GAP);
+  // 基地ごとのローカル採番なので、別路線の大きいrun.idで奥へ飛び出さない。
+  const along = Math.min(DEPOT_TRACK_END - 32, DEPOT_FIRST_SLOT + allocation.slot * DEPOT_SLOT_SPACING);
   return {
     x: base.x + Math.cos(base.heading) * outward * along - Math.sin(base.heading) * off,
     z: base.z + Math.sin(base.heading) * outward * along + Math.cos(base.heading) * off,
