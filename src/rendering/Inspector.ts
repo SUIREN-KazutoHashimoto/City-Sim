@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { World } from '../world/World';
 import { InstancedRenderer } from './InstancedRenderer';
+import { RailRenderer } from './RailRenderer';
 import type { CameraFollowTarget } from './FirstPersonController';
 import { AgentState, Occupation, OCCUPATION_LABEL } from '../agents/AgentStore';
 import { VehicleState } from '../traffic/VehicleStore';
@@ -11,12 +12,18 @@ export class Inspector {
   private raycaster = new THREE.Raycaster(); private pointer = new THREE.Vector2();
   private el: HTMLDivElement; private pinEl: HTMLDivElement;
   private hasPointer = false; private leftHeld = false;
-  private hoveredAgent = -1; private hoveredVehicle = -1;
-  private followKind: 'none' | 'agent' | 'vehicle' = 'none'; private followId = -1;
+  private hoveredAgent = -1; private hoveredVehicle = -1; private hoveredTrain = -1;
+  private followKind: 'none' | 'agent' | 'vehicle' | 'train' = 'none'; private followId = -1;
   readonly followPos = new THREE.Vector3();
   private readonly followTarget: CameraFollowTarget = { kind: 'agent', id: -1, position: this.followPos };
 
-  constructor(private world: World, private gfx: InstancedRenderer, private camera: THREE.PerspectiveCamera, private dom: HTMLElement) {
+  constructor(
+    private world: World,
+    private gfx: InstancedRenderer,
+    private rail: RailRenderer,
+    private camera: THREE.PerspectiveCamera,
+    private dom: HTMLElement,
+  ) {
     this.el = this.panel('none'); this.pinEl = this.panel('none'); this.pinEl.style.left = '8px'; this.pinEl.style.bottom = '8px'; this.pinEl.style.borderColor = '#5a7fb0'; this.pinEl.style.maxWidth = '470px';
     this.dom.addEventListener('mousemove', (e) => { this.pointer.x = (e.clientX / window.innerWidth) * 2 - 1; this.pointer.y = -(e.clientY / window.innerHeight) * 2 + 1; this.el.style.left = `${e.clientX + 16}px`; this.el.style.top = `${e.clientY + 16}px`; this.hasPointer = true; });
     this.dom.addEventListener('mousedown', (e) => { if (e.button === 0) this.leftHeld = true; if (e.button === 1) { e.preventDefault(); this.toggleFollow(); } });
@@ -26,12 +33,15 @@ export class Inspector {
 
   private panel(display: string): HTMLDivElement {
     const el = document.createElement('div');
-    el.style.cssText = ['position:fixed', 'z-index:20', 'pointer-events:none', 'font:12px/1.5 ui-monospace,monospace', 'color:#dfe8f5', 'background:rgba(12,17,25,.92)', 'border:1px solid #3a4a63', 'border-radius:8px', 'padding:8px 10px', 'max-width:330px', 'max-height:calc(100vh - 24px)', 'overflow:hidden', 'box-shadow:0 6px 20px rgba(0,0,0,.4)', 'white-space:pre-line', `display:${display}`].join(';');
+    el.style.cssText = ['position:fixed', 'z-index:20', 'pointer-events:none', 'font:12px/1.5 ui-monospace,monospace', 'color:#dfe8f5', 'background:rgba(12,17,25,.92)', 'border:1px solid #3a4a63', 'border-radius:8px', 'padding:8px 10px', 'max-width:350px', 'max-height:calc(100vh - 24px)', 'overflow:hidden', 'box-shadow:0 6px 20px rgba(0,0,0,.4)', 'white-space:pre-line', `display:${display}`].join(';');
     document.body.appendChild(el); return el;
   }
 
   private toggleFollow(): void {
-    if (this.hoveredVehicle >= 0) {
+    if (this.hoveredTrain >= 0) {
+      if (this.followKind === 'train' && this.followId === this.hoveredTrain) { this.followKind = 'none'; this.followId = -1; }
+      else { this.followKind = 'train'; this.followId = this.hoveredTrain; }
+    } else if (this.hoveredVehicle >= 0) {
       if (this.followKind === 'vehicle' && this.followId === this.hoveredVehicle) { this.followKind = 'none'; this.followId = -1; }
       else { this.followKind = 'vehicle'; this.followId = this.hoveredVehicle; }
     } else if (this.hoveredAgent >= 0) {
@@ -42,6 +52,7 @@ export class Inspector {
 
   get isFollowing(): boolean { return this.followKind !== 'none'; }
   get isFollowingVehicle(): boolean { return this.followKind === 'vehicle'; }
+  get isFollowingTrain(): boolean { return this.followKind === 'train'; }
 
   getFollowTarget(): CameraFollowTarget | null {
     if (this.followKind === 'agent') {
@@ -59,6 +70,13 @@ export class Inspector {
       this.followTarget.firstPersonHeight = vs.isBus[this.followId] ? 2.35 : vs.isTruck[this.followId] ? 2.0 : 1.3;
       return this.followTarget;
     }
+    if (this.followKind === 'train') {
+      const snap = this.rail.trainStatus(this.followId);
+      if (!snap) { this.followKind = 'none'; this.followId = -1; return null; }
+      this.followPos.set(snap.x, RailRenderer.TRACK_Y + 1.85, snap.z);
+      this.followTarget.kind = 'train'; this.followTarget.id = snap.id; this.followTarget.heading = snap.heading; this.followTarget.length = 25; this.followTarget.firstPersonHeight = undefined;
+      return this.followTarget;
+    }
     return null;
   }
 
@@ -70,18 +88,31 @@ export class Inspector {
   update(): void {
     if (this.followKind === 'agent' && this.followId < this.world.store.count) { this.pinEl.textContent = '📌 追跡: 市民\n' + this.describeAgent(this.followId); this.pinEl.style.display = 'block'; }
     else if (this.followKind === 'vehicle' && this.followId < this.world.vehicles.count) { this.pinEl.textContent = '📌 追跡: 車両\n' + this.describeVehicle(this.followId); this.pinEl.style.display = 'block'; }
+    else if (this.followKind === 'train' && this.rail.trainStatus(this.followId)) { this.pinEl.textContent = '📌 追跡: 列車\n' + this.describeTrain(this.followId); this.pinEl.style.display = 'block'; }
     else this.pinEl.style.display = 'none';
 
-    this.hoveredAgent = -1; this.hoveredVehicle = -1;
+    this.hoveredAgent = -1; this.hoveredVehicle = -1; this.hoveredTrain = -1;
     if (this.leftHeld || !this.hasPointer) { this.hide(); return; }
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const aHit = this.gfx.agents ? this.raycaster.intersectObject(this.gfx.agents, false) : [];
     const vHit = this.gfx.vehicles ? this.raycaster.intersectObject(this.gfx.vehicles, false) : [];
+    const tMesh = this.rail.trainHitMesh; const tHit = tMesh ? this.raycaster.intersectObject(tMesh, false) : [];
     const bHit = this.gfx.buildings ? this.raycaster.intersectObject(this.gfx.buildings, false) : [];
-    const aD = aHit.length ? aHit[0].distance : Infinity, vD = vHit.length ? vHit[0].distance : Infinity, bD = bHit.length ? bHit[0].distance : Infinity;
-    if (aD <= vD && aD <= bD && aHit[0]?.instanceId != null) { const idx = this.gfx.agentIndexOf(aHit[0].instanceId); if (idx >= 0) { this.hoveredAgent = idx; this.el.textContent = this.describeAgent(idx); this.el.style.display = 'block'; return; } }
-    if (vD <= bD && vHit[0]?.instanceId != null) { const vi = this.gfx.vehicleIndexOf(vHit[0].instanceId); if (vi >= 0) { this.hoveredVehicle = vi; this.el.textContent = this.describeVehicle(vi); this.el.style.display = 'block'; return; } }
-    if (bHit.length && bHit[0].instanceId != null) { this.el.textContent = this.describeBuilding(bHit[0].instanceId); this.el.style.display = 'block'; } else this.hide();
+    const aD = aHit.length ? aHit[0].distance : Infinity, vD = vHit.length ? vHit[0].distance : Infinity;
+    const tD = tHit.length ? tHit[0].distance : Infinity, bD = bHit.length ? bHit[0].distance : Infinity;
+    const nearest = Math.min(aD, vD, tD, bD);
+
+    if (nearest === tD && tHit[0]?.instanceId != null) {
+      const ti = this.rail.trainIdFromInstance(tHit[0].instanceId); if (ti >= 0) { this.hoveredTrain = ti; this.el.textContent = this.describeTrain(ti); this.el.style.display = 'block'; return; }
+    }
+    if (nearest === aD && aHit[0]?.instanceId != null) {
+      const idx = this.gfx.agentIndexOf(aHit[0].instanceId); if (idx >= 0) { this.hoveredAgent = idx; this.el.textContent = this.describeAgent(idx); this.el.style.display = 'block'; return; }
+    }
+    if (nearest === vD && vHit[0]?.instanceId != null) {
+      const vi = this.gfx.vehicleIndexOf(vHit[0].instanceId); if (vi >= 0) { this.hoveredVehicle = vi; this.el.textContent = this.describeVehicle(vi); this.el.style.display = 'block'; return; }
+    }
+    if (nearest === bD && bHit[0]?.instanceId != null) { this.el.textContent = this.describeBuilding(bHit[0].instanceId); this.el.style.display = 'block'; }
+    else this.hide();
   }
 
   private bar(v: number): string { const n = Math.round(THREE.MathUtils.clamp(v, 0, 1) * 10); return '█'.repeat(n) + '░'.repeat(10 - n); }
@@ -126,6 +157,15 @@ export class Inspector {
     let goalCat = '—'; if (driver >= 0) { const g = this.world.store.goalPOI[driver]; if (g >= 0) goalCat = POICategory[this.world.city.poi.get(g).category]; }
     const path = vs.paths[v]; const prog = path.length > 1 ? `${vs.pathCursor[v]}/${path.length - 1}` : '—'; const status = vs.speed[v] < 0.3 ? '🛑 停止(信号待ち/渋滞)' : '🚗 走行中';
     return `🚗 車両 #${v}\n${status}\n速度 ${kmh.toFixed(0)} km/h (上限 ${maxKmh.toFixed(0)})\n加速度 ${accel >= 0 ? '+' : ''}${accel.toFixed(1)} m/s²\n目的地 ${goalCat}   経路 ${prog}\n運転者 市民#${driver}`;
+  }
+
+  private describeTrain(id: number): string {
+    const s = this.rail.trainStatus(id); if (!s) return `🚆 列車 #${id}\n運行情報なし`;
+    const status = s.state === 'dwell' ? `🛑 ${s.currentStationName} 停車中 あと${s.dwellRemaining.toFixed(1)}s`
+      : s.state === 'signal' ? `🚦 ${s.currentStationName} で閉塞待ち`
+        : `🚆 走行中 → ${s.nextStationName}`;
+    const loop = s.passingLoop ? '待避線あり' : '本線';
+    return `🚆 列車 #${s.id}  ${s.lineName}\n${status}\n速度 ${(s.speed * 3.6).toFixed(0)} km/h (上限 ${(s.cruiseSpeed * 3.6).toFixed(0)})\n現在地 (${s.x.toFixed(1)}, ${s.z.toFixed(1)})\n方向 ${s.direction > 0 ? '下り' : '上り'}   ${loop}`;
   }
 
   private describeBuilding(i: number): string {
