@@ -18,12 +18,14 @@ export interface RailPassengerTrainPosition {
   x: number;
   z: number;
   heading: number;
+  capacity: number;
 }
 
 declare module './RailRenderer' {
   interface RailRenderer {
     boardingTrains(): RailBoardingTrainSnapshot[];
     passengerTrainPosition(id: number): RailPassengerTrainPosition | null;
+    passengerTrainPositions(): RailPassengerTrainPosition[];
   }
 }
 
@@ -89,5 +91,27 @@ proto.boardingTrains = function boardingTrains(this: AnyRail): RailBoardingTrain
 proto.passengerTrainPosition = function passengerTrainPosition(this: RailRenderer, id: number): RailPassengerTrainPosition | null {
   const status = this.trainStatus(id);
   if (!status || status.state === 'depot') return null;
-  return { id: status.id, x: status.x, z: status.z, heading: status.heading };
+  return {
+    id: status.id,
+    x: status.x,
+    z: status.z,
+    heading: status.heading,
+    capacity: Math.max(80, status.carCount * 120),
+  };
+};
+
+proto.passengerTrainPositions = function passengerTrainPositions(this: AnyRail): RailPassengerTrainPosition[] {
+  const out: RailPassengerTrainPosition[] = [];
+  for (const run of this.trainRuns as AnyRun[]) {
+    if (run.state === 'depot') continue;
+    if (![run.x, run.z, run.heading].every(Number.isFinite)) continue;
+    out.push({
+      id: run.id,
+      x: run.x,
+      z: run.z,
+      heading: run.heading,
+      capacity: Math.max(80, run.carCount * 120),
+    });
+  }
+  return out;
 };
