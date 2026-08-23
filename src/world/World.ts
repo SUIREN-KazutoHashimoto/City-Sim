@@ -130,7 +130,7 @@ export class World {
   private stepCore(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): void {
     const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
     for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, false); }
-    this.stepAfterPed(now, updateActivities);
+    this.stepAfterPed(now, updateActivities, dtSec);
   }
 
   private async stepCoreAsync(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): Promise<void> {
@@ -138,7 +138,7 @@ export class World {
     this.pedWorkers.begin(s.count);
     for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, true); }
     await this.pedWorkers.flush(dtSec, s.count);
-    this.stepAfterPed(now, updateActivities);
+    this.stepAfterPed(now, updateActivities, dtSec);
   }
 
   private stepBeforePed(dtSec: number, updateNeeds: boolean, updateDecisions: boolean): number {
@@ -151,9 +151,9 @@ export class World {
     this.logistics.update(dtSec); this.buildTravelerIndex(); return now;
   }
 
-  private stepAfterPed(now: number, updateActivities: boolean): void {
+  private stepAfterPed(now: number, updateActivities: boolean, dtSec: number): void {
     const s = this.store; this.handleArrivedVehicles();
-    if (updateActivities) for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Engaged) this.activity(i, now, this.clock.stepDt);
+    if (updateActivities) for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Engaged) this.activity(i, now, dtSec);
   }
 
   private decideAgentsSync(): void {
