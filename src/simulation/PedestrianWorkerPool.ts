@@ -35,7 +35,7 @@ export class PedestrianWorkerPool {
   private readonly gridOrigin = -32;
   private readonly gridWidth: number;
 
-  constructor(private readonly store: AgentStore, worldSizeMeters: number) {
+  constructor(store: AgentStore, worldSizeMeters: number) {
     const shared = store.sharedMemory && typeof SharedArrayBuffer !== 'undefined';
     const alloc = (bytes: number): ArrayBufferLike => shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
     const f32 = () => new Float32Array(alloc(store.capacity * Float32Array.BYTES_PER_ELEMENT));
