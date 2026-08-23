@@ -9,6 +9,7 @@ export function isWorkTime(occ: Occupation, start: number, end: number, hour: nu
   return hour >= start || hour < end;
 }
 interface ActionDef { readonly name: string; readonly category: POICategory; score(s: AgentStore, i: number, clock: SimulationClock): number; }
+export interface AgentActionPlan { category: POICategory; directTarget: number; }
 const ACTIONS: ActionDef[] = [
   { name: 'sleep', category: POICategory.Home, score: (s, i, clock) => { const occ = s.occupation[i] as Occupation; const h = clock.hourF; let sleepy: number; if (occ === Occupation.NightShift) sleepy = (h >= 8 && h < 15) ? 0.5 : 0; else sleepy = (h >= 23 || h < 6) ? 0.5 : 0; return Math.min(1, urgency(s.energy[i]) + sleepy); } },
   { name: 'eat', category: POICategory.Food, score: (s, i, clock) => { const h = clock.hourF; const meal = (Math.abs(h - 8) < 1 || Math.abs(h - 12.5) < 1 || Math.abs(h - 20) < 1.5) ? 0.25 : 0; return Math.min(1, urgency(s.hunger[i]) * 1.1 + meal); } },
@@ -19,17 +20,31 @@ const ACTIONS: ActionDef[] = [
 ];
 export class UtilityBrain {
   constructor(private readonly poi: POIRegistry) {}
-  decide(s: AgentStore, i: number, clock: SimulationClock): void {
+
+  /** 行動の種類だけ決める。POI検索が必要な行動はdirectTarget=-1で返す。 */
+  plan(s: AgentStore, i: number, clock: SimulationClock): AgentActionPlan | null {
     let best: ActionDef | null = null, bestScore = 0.06;
     for (const a of ACTIONS) { const sc = a.score(s, i, clock); if (sc > bestScore) { bestScore = sc; best = a; } }
-    if (!best) { s.state[i] = AgentState.Idle; return; }
-    let target = -1;
-    if (best.name === 'work') target = s.workPOI[i];
-    else if (best.name === 'sleep' || best.name === 'routine-home') target = s.homePOI[i];
-    else target = this.poi.findBest(best.category, s.posX[i], s.posZ[i], s.wealth[i]);
-    if (target < 0) { s.state[i] = AgentState.Idle; return; }
+    if (!best) return null;
+    let directTarget = -1;
+    if (best.name === 'work') directTarget = s.workPOI[i];
+    else if (best.name === 'sleep' || best.name === 'routine-home') directTarget = s.homePOI[i];
+    return { category: best.category, directTarget };
+  }
+
+  /** CoordinatorまたはPOI Workerが選んだ施設をAgentへ反映する。 */
+  applyTarget(s: AgentStore, i: number, target: number): boolean {
+    if (target < 0 || target >= this.poi.size) { s.state[i] = AgentState.Idle; return false; }
     const p = this.poi.get(target);
-    s.goalPOI[i] = target; s.goalCategory[i] = p.category; s.goalX[i] = p.x; s.goalZ[i] = p.z;
-    s.state[i] = AgentState.Routing;
+    s.goalPOI[i] = target; s.goalCategory[i] = p.category; s.goalX[i] = p.x; s.goalZ[i] = p.z; s.state[i] = AgentState.Routing;
+    return true;
+  }
+
+  /** Workerを使わない環境向けの従来互換同期決定。 */
+  decide(s: AgentStore, i: number, clock: SimulationClock): void {
+    const plan = this.plan(s, i, clock);
+    if (!plan) { s.state[i] = AgentState.Idle; return; }
+    const target = plan.directTarget >= 0 ? plan.directTarget : this.poi.findBest(plan.category, s.posX[i], s.posZ[i], s.wealth[i]);
+    this.applyTarget(s, i, target);
   }
 }
