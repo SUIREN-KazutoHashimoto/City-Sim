@@ -4,24 +4,52 @@ interface PendingJob { remaining: number; resolve: () => void; reject: (reason?:
 interface WorkerReply { type: 'done'; jobId: number; }
 
 /**
- * 歩行者の最終移動積分をSharedArrayBuffer上で並列化する。
- * 目標ノード、信号、到着、近傍回避の判断はCoordinator側で済ませ、
- * Workerは確定済みdesired vectorから速度・位置・向き・energyだけ更新する。
+ * Pedestrian spatial index / avoidance / movement integration worker pool.
+ *
+ * Coordinator side only resolves path cursor, signals and state transitions. The worker pool:
+ * 1. snapshots active pedestrian positions,
+ * 2. builds a shared linked-cell spatial index,
+ * 3. calculates separation/avoidance,
+ * 4. integrates velocity/position/heading/energy.
+ *
+ * The snapshot makes neighbor queries deterministic within a step even while other workers
+ * write the live position arrays.
  */
 export class PedestrianWorkerPool {
   private readonly workers: Worker[] = [];
   private readonly pending = new Map<number, PendingJob>();
   private nextJobId = 1;
+
   private readonly desiredX: Float32Array;
   private readonly desiredZ: Float32Array;
-  private readonly moveMask: Uint8Array;
+  private readonly activeIds: Int32Array;
+  private readonly moveIds: Int32Array;
+  private readonly snapshotX: Float32Array;
+  private readonly snapshotZ: Float32Array;
+  private readonly cellHead: Int32Array;
+  private readonly nextInCell: Int32Array;
 
-  constructor(private readonly store: AgentStore) {
+  private activeCount = 0;
+  private moveCount = 0;
+  private readonly cellSize = 8;
+  private readonly gridOrigin = -32;
+  private readonly gridWidth: number;
+
+  constructor(private readonly store: AgentStore, worldSizeMeters: number) {
     const shared = store.sharedMemory && typeof SharedArrayBuffer !== 'undefined';
-    const fBuffer: ArrayBufferLike = shared ? new SharedArrayBuffer(store.capacity * Float32Array.BYTES_PER_ELEMENT) : new ArrayBuffer(store.capacity * Float32Array.BYTES_PER_ELEMENT);
-    const zBuffer: ArrayBufferLike = shared ? new SharedArrayBuffer(store.capacity * Float32Array.BYTES_PER_ELEMENT) : new ArrayBuffer(store.capacity * Float32Array.BYTES_PER_ELEMENT);
-    const mBuffer: ArrayBufferLike = shared ? new SharedArrayBuffer(store.capacity * Uint8Array.BYTES_PER_ELEMENT) : new ArrayBuffer(store.capacity * Uint8Array.BYTES_PER_ELEMENT);
-    this.desiredX = new Float32Array(fBuffer); this.desiredZ = new Float32Array(zBuffer); this.moveMask = new Uint8Array(mBuffer);
+    const alloc = (bytes: number): ArrayBufferLike => shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
+    const f32 = () => new Float32Array(alloc(store.capacity * Float32Array.BYTES_PER_ELEMENT));
+    const i32 = () => new Int32Array(alloc(store.capacity * Int32Array.BYTES_PER_ELEMENT));
+
+    this.desiredX = f32(); this.desiredZ = f32();
+    this.activeIds = i32(); this.moveIds = i32();
+    this.snapshotX = f32(); this.snapshotZ = f32(); this.nextInCell = i32();
+
+    // 32m padding on each side. At a 10km city this is about 1.58M Int32 cells (~6.3MB).
+    this.gridWidth = Math.max(8, Math.ceil((worldSizeMeters - this.gridOrigin + 32) / this.cellSize) + 1);
+    this.cellHead = new Int32Array(alloc(this.gridWidth * this.gridWidth * Int32Array.BYTES_PER_ELEMENT));
+    this.cellHead.fill(-1);
+
     if (!shared || typeof Worker === 'undefined') return;
 
     const hc = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 4) : 4;
@@ -31,7 +59,8 @@ export class PedestrianWorkerPool {
       worker.onmessage = (ev: MessageEvent<WorkerReply>) => {
         if (ev.data.type !== 'done') return;
         const job = this.pending.get(ev.data.jobId); if (!job) return;
-        job.remaining--; if (job.remaining <= 0) { this.pending.delete(ev.data.jobId); job.resolve(); }
+        job.remaining--;
+        if (job.remaining <= 0) { this.pending.delete(ev.data.jobId); job.resolve(); }
       };
       worker.onerror = (ev) => {
         const err = new Error(`Pedestrian worker failed: ${ev.message}`);
@@ -39,10 +68,16 @@ export class PedestrianWorkerPool {
       };
       worker.postMessage({
         type: 'init',
+        cellSize: this.cellSize,
+        gridOrigin: this.gridOrigin,
+        gridWidth: this.gridWidth,
         buffers: {
           posX: store.posX.buffer, posZ: store.posZ.buffer, velX: store.velX.buffer, velZ: store.velZ.buffer,
           heading: store.heading.buffer, maxSpeed: store.maxSpeed.buffer, energy: store.energy.buffer,
-          desiredX: this.desiredX.buffer, desiredZ: this.desiredZ.buffer, moveMask: this.moveMask.buffer,
+          desiredX: this.desiredX.buffer, desiredZ: this.desiredZ.buffer,
+          activeIds: this.activeIds.buffer, moveIds: this.moveIds.buffer,
+          snapshotX: this.snapshotX.buffer, snapshotZ: this.snapshotZ.buffer,
+          cellHead: this.cellHead.buffer, nextInCell: this.nextInCell.buffer,
         },
       });
       this.workers.push(worker);
@@ -51,21 +86,40 @@ export class PedestrianWorkerPool {
 
   get active(): boolean { return this.workers.length > 0; }
   get workerCount(): number { return this.workers.length; }
+  get queuedPedestrians(): number { return this.activeCount; }
+  get queuedMovers(): number { return this.moveCount; }
 
-  begin(count = this.store.count): void { this.moveMask.fill(0, 0, count); }
+  begin(): void { this.activeCount = 0; this.moveCount = 0; }
 
-  queue(agent: number, desiredX: number, desiredZ: number): void {
-    this.desiredX[agent] = desiredX; this.desiredZ[agent] = desiredZ; this.moveMask[agent] = 1;
+  /** Include a pedestrian in neighbor avoidance even when it is currently waiting/stopped. */
+  include(agent: number): void {
+    if (this.activeCount >= this.activeIds.length) return;
+    this.activeIds[this.activeCount++] = agent;
   }
 
-  flush(dt: number, count = this.store.count): Promise<void> {
-    if (!this.active || count <= 0 || dt <= 0) return Promise.resolve();
-    const used = Math.min(this.workers.length, count), jobId = this.nextJobId++;
-    return new Promise<void>((resolve, reject) => {
-      this.pending.set(jobId, { remaining: used, resolve, reject });
+  /** Queue the base desired direction. Separation is added in the Worker. */
+  queue(agent: number, desiredX: number, desiredZ: number): void {
+    if (this.moveCount >= this.moveIds.length) return;
+    this.desiredX[agent] = desiredX; this.desiredZ[agent] = desiredZ;
+    this.moveIds[this.moveCount++] = agent;
+  }
+
+  /** Build snapshot/index first, then run avoidance + movement in parallel. */
+  async flush(dt: number): Promise<void> {
+    if (!this.active || this.activeCount <= 0 || this.moveCount <= 0 || dt <= 0) return;
+
+    const indexJobId = this.nextJobId++;
+    await new Promise<void>((resolve, reject) => {
+      this.pending.set(indexJobId, { remaining: 1, resolve, reject });
+      this.workers[0].postMessage({ type: 'index', jobId: indexJobId, activeCount: this.activeCount });
+    });
+
+    const used = Math.min(this.workers.length, this.moveCount), moveJobId = this.nextJobId++;
+    await new Promise<void>((resolve, reject) => {
+      this.pending.set(moveJobId, { remaining: used, resolve, reject });
       for (let w = 0; w < used; w++) {
-        const begin = Math.floor((count * w) / used), end = Math.floor((count * (w + 1)) / used);
-        this.workers[w].postMessage({ type: 'move', jobId, begin, end, dt });
+        const begin = Math.floor((this.moveCount * w) / used), end = Math.floor((this.moveCount * (w + 1)) / used);
+        this.workers[w].postMessage({ type: 'move', jobId: moveJobId, begin, end, dt });
       }
     });
   }
