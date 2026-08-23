@@ -152,15 +152,10 @@ async function bootstrap(): Promise<void> {
     vehicleVisuals.update(world.vehicles, dt); vehicleVisuals.apply(world.vehicles);
     try {
       const renderDt = Math.min(dt, 0.1);
-      // 列車の運行元時刻も車/バスと同じWorld時計へ戻す。
-      // 最終表示だけTrainLiveryOverlayで一次指数補間し、二次系のばね挙動を画面へ出さない。
+      // 列車の編成距離はRailRenderer内で一次補間済み。外装と追跡はそのposeをそのまま使う。
       railRenderer.update(world.clock.totalSeconds, renderDt);
       trainLivery.sync(renderDt);
       const followTarget = inspector.getFollowTarget();
-      if (followTarget?.kind === 'train') {
-        const heading = trainLivery.getTrainPose(followTarget.id, followTarget.position);
-        if (heading != null) followTarget.heading = heading;
-      }
       controller.setFollowTarget(followTarget); controller.update(dt); dashboard.draw();
 
       const renderStarted = performance.now();
