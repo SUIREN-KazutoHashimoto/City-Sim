@@ -49,6 +49,26 @@ export interface Building {
   district: DistrictType;
   landValue: number;
   frontage: FrontageSide;
+  developmentIntensity: number;
+  coverageRatio: number;
+  floorAreaRatio: number;
+  grossFloorArea: number;
+  siteArea: number;
+  parcelCount: number;
+}
+
+export interface DevelopmentSite {
+  id: number;
+  blockId: number;
+  parcelIds: number[];
+  x: number;
+  z: number;
+  width: number;
+  depth: number;
+  frontage: FrontageSide;
+  roadClass: RoadClass;
+  roadLanes: number;
+  intensity: number;
 }
 
 export interface ParkingLot {
@@ -60,11 +80,12 @@ export interface ParkingLot {
  * City Generator v2.
  * Phase 1: city planning + road hierarchy.
  * Phase 2: road-bounded blocks + frontage-aware parcels + setback-aware buildings.
+ * Phase 2.5: land-value/density driven redevelopment, parcel consolidation, coverage/FAR based massing.
  */
 export class CityGenerator {
   readonly net = new RoadNetwork(); readonly poi = new POIRegistry();
   readonly buildings: Building[] = []; readonly parkingLots: ParkingLot[] = [];
-  readonly blocks: UrbanBlock[] = []; readonly parcels: LandParcel[] = [];
+  readonly blocks: UrbanBlock[] = []; readonly parcels: LandParcel[] = []; readonly developmentSites: DevelopmentSite[] = [];
   readonly lotByPOI = new Map<number, number>();
   readonly gateNodes: number[] = [];
   readonly sizeMeters: number; readonly planning: CityPlanning; urbanThreshold = 0.5;
@@ -72,7 +93,7 @@ export class CityGenerator {
   private arterialEvery = 10; private collectorEvery = 4;
   private arterialOffsetX = 0; private arterialOffsetZ = 0;
   private collectorOffsetX = 0; private collectorOffsetZ = 0;
-  private nextParcel = 0;
+  private nextParcel = 0; private nextSite = 0;
 
   constructor(private cfg: CityConfig) {
     this.rng = makeRng(cfg.seed ^ 0x9e3779b9);
@@ -165,40 +186,145 @@ export class CityGenerator {
         () => this.nextParcel++,
       );
       this.parcels.push(...parcels);
-      this.fillBlockParcels(parcels);
+      const sites = this.consolidateParcels(parcels);
+      this.developmentSites.push(...sites);
+      this.fillDevelopmentSites(sites);
     }
   }
 
-  private fillBlockParcels(parcels: LandParcel[]): void {
-    if (parcels.length === 0) return;
+  private consolidateParcels(parcels: LandParcel[]): DevelopmentSite[] {
+    const bySide = new Map<FrontageSide, LandParcel[]>();
+    for (const p of parcels) {
+      let list = bySide.get(p.frontage); if (!list) { list = []; bySide.set(p.frontage, list); }
+      list.push(p);
+    }
+
+    const result: DevelopmentSite[] = [];
+    for (const [side, list] of bySide) {
+      list.sort((a, b) => (side === 'north' || side === 'south' ? a.x - b.x : a.z - b.z));
+      let i = 0;
+      while (i < list.length) {
+        const first = list[i];
+        const firstPlan = this.planning.sample(first.x, first.z);
+        const intensity = this.developmentIntensity(firstPlan);
+        const limit = this.consolidationLimit(firstPlan.district, intensity);
+        const group: LandParcel[] = [first];
+        let j = i + 1;
+        while (group.length < limit && j < list.length) {
+          const next = list[j], nextPlan = this.planning.sample(next.x, next.z);
+          const compatible = next.blockId === first.blockId
+            && next.frontage === first.frontage
+            && next.roadClass === first.roadClass
+            && next.roadLanes === first.roadLanes
+            && nextPlan.district === firstPlan.district
+            && this.parcelsAdjacent(group[group.length - 1], next);
+          if (!compatible || this.rng() >= this.consolidationChance(firstPlan.district, intensity)) break;
+          group.push(next); j++;
+        }
+        result.push(this.makeDevelopmentSite(group));
+        i += group.length;
+      }
+    }
+    return result;
+  }
+
+  private makeDevelopmentSite(group: LandParcel[]): DevelopmentSite {
+    let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+    for (const p of group) {
+      minX = Math.min(minX, p.x - p.width / 2); maxX = Math.max(maxX, p.x + p.width / 2);
+      minZ = Math.min(minZ, p.z - p.depth / 2); maxZ = Math.max(maxZ, p.z + p.depth / 2);
+    }
+    const x = (minX + maxX) / 2, z = (minZ + maxZ) / 2;
+    return {
+      id: this.nextSite++, blockId: group[0].blockId, parcelIds: group.map((p) => p.id),
+      x, z, width: maxX - minX, depth: maxZ - minZ,
+      frontage: group[0].frontage, roadClass: group[0].roadClass, roadLanes: group[0].roadLanes,
+      intensity: this.developmentIntensity(this.planning.sample(x, z)),
+    };
+  }
+
+  private parcelsAdjacent(a: LandParcel, b: LandParcel): boolean {
+    if (a.frontage === 'north' || a.frontage === 'south') {
+      const gap = (b.x - b.width / 2) - (a.x + a.width / 2);
+      return Math.abs(gap) < 1.5 && Math.abs(a.z - b.z) < 1.5 && Math.abs(a.depth - b.depth) < 2.5;
+    }
+    const gap = (b.z - b.depth / 2) - (a.z + a.depth / 2);
+    return Math.abs(gap) < 1.5 && Math.abs(a.x - b.x) < 1.5 && Math.abs(a.width - b.width) < 2.5;
+  }
+
+  private developmentIntensity(plan: PlanningSample): number {
+    let districtBias = 0;
+    switch (plan.district) {
+      case DistrictType.CBD: districtBias = 0.12; break;
+      case DistrictType.Commercial: districtBias = 0.08; break;
+      case DistrictType.MixedUse: districtBias = 0.04; break;
+      case DistrictType.ResidentialHigh: districtBias = 0.02; break;
+      case DistrictType.ResidentialLow: districtBias = -0.18; break;
+      case DistrictType.Industrial: districtBias = -0.12; break;
+      case DistrictType.Logistics: districtBias = -0.18; break;
+      case DistrictType.Civic: districtBias = -0.02; break;
+      case DistrictType.Park: districtBias = -0.60; break;
+    }
+    return clamp(plan.landValue * 0.62 + plan.density * 0.48 + districtBias, 0, 1);
+  }
+
+  private consolidationLimit(district: DistrictType, intensity: number): number {
+    if (district === DistrictType.CBD) return intensity > 0.84 ? 4 : intensity > 0.66 ? 3 : intensity > 0.50 ? 2 : 1;
+    if (district === DistrictType.Commercial) return intensity > 0.78 ? 3 : intensity > 0.56 ? 2 : 1;
+    if (district === DistrictType.MixedUse || district === DistrictType.ResidentialHigh) return intensity > 0.82 ? 3 : intensity > 0.62 ? 2 : 1;
+    if (district === DistrictType.Civic) return intensity > 0.68 ? 2 : 1;
+    return 1;
+  }
+
+  private consolidationChance(district: DistrictType, intensity: number): number {
+    switch (district) {
+      case DistrictType.CBD: return clamp(0.08 + intensity * 0.58, 0, 0.72);
+      case DistrictType.Commercial: return clamp(0.06 + intensity * 0.43, 0, 0.55);
+      case DistrictType.MixedUse: return clamp(0.04 + intensity * 0.34, 0, 0.44);
+      case DistrictType.ResidentialHigh: return clamp(0.03 + intensity * 0.24, 0, 0.32);
+      case DistrictType.Civic: return clamp(intensity * 0.20, 0, 0.24);
+      default: return 0;
+    }
+  }
+
+  private fillDevelopmentSites(sites: DevelopmentSite[]): void {
+    if (sites.length === 0) return;
     let parkingPlaced = false;
-    for (const parcel of parcels) {
-      const plan = this.planning.sample(parcel.x, parcel.z);
+    for (const site of sites) {
+      const plan = this.planning.sample(site.x, site.z);
       if (plan.urbanScore < this.urbanThreshold) continue;
       if (plan.district === DistrictType.Park && this.rng() > 0.10) continue;
 
-      const parkingChance = this.parkingChance(plan.district);
+      const parkingChance = this.parkingChance(plan.district) * (1 - site.intensity * 0.55);
       if (!parkingPlaced && plan.district !== DistrictType.CBD && plan.district !== DistrictType.Park && this.rng() < parkingChance) {
-        const mx = Math.max(2, Math.min(5, parcel.width * 0.08));
-        const mz = Math.max(2, Math.min(5, parcel.depth * 0.08));
-        this.addParkingRect(parcel.x, parcel.z, Math.max(8, parcel.width - mx * 2), Math.max(8, parcel.depth - mz * 2));
+        const mx = Math.max(2, Math.min(6, site.width * 0.08));
+        const mz = Math.max(2, Math.min(6, site.depth * 0.08));
+        this.addParkingRect(site.x, site.z, Math.max(8, site.width - mx * 2), Math.max(8, site.depth - mz * 2));
         parkingPlaced = true;
         continue;
       }
-      if (this.rng() < this.emptyChance(plan.district)) continue;
-      this.placeParcelBuilding(parcel, plan);
+      if (this.rng() < this.emptyChance(plan.district) * (1 - site.intensity * 0.50)) continue;
+      this.placeDevelopmentBuilding(site, plan);
     }
   }
 
-  private placeParcelBuilding(parcel: LandParcel, plan: PlanningSample): void {
-    const category = plan.district === DistrictType.Park ? POICategory.Leisure : this.pickCategory(plan, parcel.roadClass);
-    let floors = this.baseFloorsForPlan(plan);
-    const roughW = Math.max(6, parcel.width * 0.72), roughD = Math.max(6, parcel.depth * 0.72);
-    const archetype = this.pickArchetype(category, plan, floors, roughW, roughD);
-    floors = this.adjustFloors(archetype, floors);
-
-    const footprint = this.buildingFootprint(parcel, plan.district, archetype);
+  private placeDevelopmentBuilding(site: DevelopmentSite, plan: PlanningSample): void {
+    const category = plan.district === DistrictType.Park ? POICategory.Leisure : this.pickCategory(plan, site.roadClass);
+    const roughFloors = this.baseFloorsForPlan(plan);
+    const roughW = Math.max(6, site.width * 0.72), roughD = Math.max(6, site.depth * 0.72);
+    const archetype = this.pickArchetype(category, plan, roughFloors, roughW, roughD);
+    const targetCoverage = this.targetCoverageRatio(plan, archetype, site.intensity, site.parcelIds.length);
+    const targetFar = this.targetFloorAreaRatio(plan, archetype, site.intensity);
+    const footprint = this.buildingFootprint(site, plan.district, archetype, targetCoverage);
     if (!footprint || footprint.width < 4 || footprint.depth < 4) return;
+
+    const footprintArea = footprint.width * footprint.depth;
+    const siteArea = Math.max(1, site.width * site.depth);
+    const floors = this.floorsForDevelopment(plan, archetype, roughFloors, siteArea, footprintArea, targetFar);
+    const floorplateFactor = this.effectiveFloorplateFactor(archetype);
+    const grossFloorArea = footprintArea * floors * floorplateFactor;
+    const coverageRatio = footprintArea / siteArea;
+    const floorAreaRatio = grossFloorArea / siteArea;
 
     const id = this.buildings.length;
     const roofType = this.pickRoofType(archetype);
@@ -207,40 +333,133 @@ export class CityGenerator {
     this.buildings.push({
       id, x: footprint.x, z: footprint.z, width: footprint.width, depth: footprint.depth, floors, category, archetype,
       roofType, palette, styleSeed, rotation: footprint.rotation,
-      urbanity: plan.urbanScore, district: plan.district, landValue: plan.landValue, frontage: parcel.frontage,
+      urbanity: plan.urbanScore, district: plan.district, landValue: plan.landValue, frontage: site.frontage,
+      developmentIntensity: site.intensity, coverageRatio, floorAreaRatio, grossFloorArea, siteArea, parcelCount: site.parcelIds.length,
     });
     this.registerPOIs(id, footprint.x, footprint.z, category, floors, archetype);
   }
 
+  private targetCoverageRatio(plan: PlanningSample, type: BuildingArchetype, intensity: number, parcelCount: number): number {
+    let base: number;
+    switch (plan.district) {
+      case DistrictType.CBD: base = 0.58 + intensity * 0.20; break;
+      case DistrictType.Commercial: base = 0.54 + intensity * 0.18; break;
+      case DistrictType.MixedUse: base = 0.49 + intensity * 0.17; break;
+      case DistrictType.ResidentialHigh: base = 0.42 + intensity * 0.16; break;
+      case DistrictType.ResidentialLow: base = 0.28 + intensity * 0.08; break;
+      case DistrictType.Industrial: base = 0.48; break;
+      case DistrictType.Logistics: base = 0.42; break;
+      case DistrictType.Civic: base = 0.40 + intensity * 0.10; break;
+      case DistrictType.Park: base = 0.12; break;
+    }
+    if (type === BuildingArchetype.DetachedHouse) base *= 0.78;
+    else if (type === BuildingArchetype.ResidentialTower) base *= 0.88;
+    else if (type === BuildingArchetype.OfficeTower || type === BuildingArchetype.MixedUse) base *= 0.96;
+    else if (type === BuildingArchetype.RetailBox || type === BuildingArchetype.CommercialBlock) base *= 1.06;
+    if (parcelCount > 1) base += Math.min(0.05, (parcelCount - 1) * 0.018);
+    return clamp(base * (0.93 + this.rng() * 0.14), 0.18, 0.84);
+  }
+
+  private targetFloorAreaRatio(plan: PlanningSample, type: BuildingArchetype, intensity: number): number {
+    let far: number;
+    switch (plan.district) {
+      case DistrictType.CBD: far = 3.8 + intensity * 10.4; break;
+      case DistrictType.Commercial: far = 2.2 + intensity * 7.0; break;
+      case DistrictType.MixedUse: far = 1.8 + intensity * 6.0; break;
+      case DistrictType.ResidentialHigh: far = 1.2 + intensity * 4.8; break;
+      case DistrictType.ResidentialLow: far = 0.45 + intensity * 0.70; break;
+      case DistrictType.Industrial: far = 0.55 + intensity * 0.55; break;
+      case DistrictType.Logistics: far = 0.42 + intensity * 0.42; break;
+      case DistrictType.Civic: far = 0.8 + intensity * 2.2; break;
+      case DistrictType.Park: far = 0.15; break;
+    }
+    if (type === BuildingArchetype.OfficeTower) far *= 1.16;
+    else if (type === BuildingArchetype.ResidentialTower) far *= 1.08;
+    else if (type === BuildingArchetype.MixedUse) far *= 1.10;
+    else if (type === BuildingArchetype.SmallShop) far *= 0.52;
+    else if (type === BuildingArchetype.RetailBox) far *= 0.60;
+    else if (type === BuildingArchetype.DetachedHouse) far *= 0.62;
+    return Math.max(0.12, far * (0.86 + this.rng() * 0.28));
+  }
+
+  private floorsForDevelopment(
+    plan: PlanningSample,
+    type: BuildingArchetype,
+    roughFloors: number,
+    siteArea: number,
+    footprintArea: number,
+    targetFar: number,
+  ): number {
+    const effectiveFloorplate = Math.max(20, footprintArea * this.effectiveFloorplateFactor(type));
+    const farFloors = Math.max(1, Math.round((siteArea * targetFar) / effectiveFloorplate));
+    let floors = Math.round(farFloors * 0.78 + roughFloors * 0.22);
+    floors = Math.min(this.maxFloorsForDistrict(plan.district), Math.max(1, floors));
+    return this.adjustFloors(type, floors);
+  }
+
+  private effectiveFloorplateFactor(type: BuildingArchetype): number {
+    switch (type) {
+      case BuildingArchetype.OfficeTower: return 0.56;
+      case BuildingArchetype.ResidentialTower: return 0.54;
+      case BuildingArchetype.MixedUse: return 0.66;
+      case BuildingArchetype.OfficeSlab: return 0.82;
+      case BuildingArchetype.MidRiseApartment: return 0.84;
+      case BuildingArchetype.CommercialBlock: return 0.90;
+      default: return 0.96;
+    }
+  }
+
+  private maxFloorsForDistrict(district: DistrictType): number {
+    switch (district) {
+      case DistrictType.CBD: return 42;
+      case DistrictType.Commercial: return 30;
+      case DistrictType.MixedUse: return 28;
+      case DistrictType.ResidentialHigh: return 24;
+      case DistrictType.ResidentialLow: return 6;
+      case DistrictType.Industrial: return 4;
+      case DistrictType.Logistics: return 3;
+      case DistrictType.Civic: return 18;
+      case DistrictType.Park: return 5;
+    }
+  }
+
   private buildingFootprint(
-    parcel: LandParcel,
+    site: DevelopmentSite,
     district: DistrictType,
     archetype: BuildingArchetype,
+    targetCoverage: number,
   ): { x: number; z: number; width: number; depth: number; rotation: number } | null {
     const front = this.frontSetback(district, archetype);
     const rear = this.rearSetback(district, archetype);
     const side = this.sideSetback(district, archetype);
-    const minX = parcel.x - parcel.width / 2, maxX = parcel.x + parcel.width / 2;
-    const minZ = parcel.z - parcel.depth / 2, maxZ = parcel.z + parcel.depth / 2;
+    const minX = site.x - site.width / 2, maxX = site.x + site.width / 2;
+    const minZ = site.z - site.depth / 2, maxZ = site.z + site.depth / 2;
+    const siteArea = Math.max(1, site.width * site.depth);
 
-    let localWidth: number, localDepth: number, x = parcel.x, z = parcel.z, rotation = 0;
-    if (parcel.frontage === 'north' || parcel.frontage === 'south') {
-      const frontageAvail = parcel.width - side * 2, depthAvail = parcel.depth - front - rear;
+    const fitMass = (frontageAvail: number, depthAvail: number): [number, number] => {
+      const baseW = frontageAvail * this.frontageFill(archetype), baseD = depthAvail * this.depthFill(archetype);
+      const baseArea = Math.max(1, baseW * baseD);
+      const targetArea = Math.min(frontageAvail * depthAvail * 0.98, siteArea * targetCoverage);
+      const scale = clamp(Math.sqrt(targetArea / baseArea), 0.52, 1.16);
+      return [Math.min(frontageAvail, baseW * scale), Math.min(depthAvail, baseD * scale)];
+    };
+
+    let localWidth: number, localDepth: number, x = site.x, z = site.z, rotation = 0;
+    if (site.frontage === 'north' || site.frontage === 'south') {
+      const frontageAvail = site.width - side * 2, depthAvail = site.depth - front - rear;
       if (frontageAvail < 4 || depthAvail < 4) return null;
-      localWidth = frontageAvail * this.frontageFill(archetype);
-      localDepth = depthAvail * this.depthFill(archetype);
+      [localWidth, localDepth] = fitMass(frontageAvail, depthAvail);
       const lateralSpare = Math.max(0, frontageAvail - localWidth);
-      x += (this.rng() - 0.5) * lateralSpare * 0.55;
-      z = parcel.frontage === 'north' ? minZ + front + localDepth / 2 : maxZ - front - localDepth / 2;
+      x += (this.rng() - 0.5) * lateralSpare * 0.48;
+      z = site.frontage === 'north' ? minZ + front + localDepth / 2 : maxZ - front - localDepth / 2;
       rotation = 0;
     } else {
-      const frontageAvail = parcel.depth - side * 2, depthAvail = parcel.width - front - rear;
+      const frontageAvail = site.depth - side * 2, depthAvail = site.width - front - rear;
       if (frontageAvail < 4 || depthAvail < 4) return null;
-      localWidth = frontageAvail * this.frontageFill(archetype);
-      localDepth = depthAvail * this.depthFill(archetype);
+      [localWidth, localDepth] = fitMass(frontageAvail, depthAvail);
       const lateralSpare = Math.max(0, frontageAvail - localWidth);
-      z += (this.rng() - 0.5) * lateralSpare * 0.55;
-      x = parcel.frontage === 'west' ? minX + front + localDepth / 2 : maxX - front - localDepth / 2;
+      z += (this.rng() - 0.5) * lateralSpare * 0.48;
+      x = site.frontage === 'west' ? minX + front + localDepth / 2 : maxX - front - localDepth / 2;
       return { x, z, width: localDepth, depth: localWidth, rotation: 0 };
     }
     return { x, z, width: localWidth, depth: localDepth, rotation };
