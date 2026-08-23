@@ -8,8 +8,8 @@ import { World } from './World';
  * そのままだと列車が存在しても通勤鉄道需要がほぼ発生しないため、
  * 駅徒歩圏の非自動車就業者の一部を「別駅勢圏への通勤」に再配置する。
  *
- * 強制的に列車へ乗せるのではなく、既存のRailPassengerIntegrationの
- * 交通手段選択に、実際に競争力のあるODを供給するための需要生成レイヤー。
+ * 重要: populate() は起動時の同期処理なので、AgentごとにPOI.findBest()を呼ばない。
+ * Work POIを一度だけ駅別に索引化し、その後は配列参照だけで通勤ODを作る。
  */
 type AnyWorld = any;
 const proto: AnyWorld = World.prototype as any;
@@ -41,11 +41,11 @@ function poiById(world: AnyWorld, id: number): POI | null {
 }
 
 function nearestStation(rail: RailNetworkPlan, x: number, z: number, maxDistance = 500): RailStation | null {
-  let best: RailStation | null = null, bestD = maxDistance;
+  let best: RailStation | null = null, bestD2 = maxDistance * maxDistance;
   for (const station of rail.stations) {
     if (!validPoint(station)) continue;
-    const d = Math.hypot(station.x - x, station.z - z);
-    if (d < bestD) { bestD = d; best = station; }
+    const dx = station.x - x, dz = station.z - z, d2 = dx * dx + dz * dz;
+    if (d2 < bestD2) { bestD2 = d2; best = station; }
   }
   return best;
 }
@@ -74,19 +74,44 @@ function destinationStations(rail: RailNetworkPlan, origin: RailStation): RailSt
   return out;
 }
 
-function workNearStation(world: AnyWorld, station: RailStation, agent: number): number {
-  const s = world.store;
-  if (!validPoint(station)) return -1;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const angle = hash01(agent * 31 + attempt * 997) * Math.PI * 2;
-    const radius = 60 + hash01(agent * 131 + attempt * 17) * 300;
-    const x = station.x + Math.cos(angle) * radius;
-    const z = station.z + Math.sin(angle) * radius;
-    const candidate = world.city.poi.findBest(POICategory.Work, x, z, s.wealth[agent]);
-    const work = poiById(world, candidate);
-    if (!work || work.capacity <= 0) continue;
-    if (Math.hypot(work.x - station.x, work.z - station.z) > 500) continue;
-    return candidate;
+function buildDestinationIndex(rail: RailNetworkPlan): Map<number, RailStation[]> {
+  const index = new Map<number, RailStation[]>();
+  for (const station of rail.stations) {
+    if (!validPoint(station)) continue;
+    const destinations = destinationStations(rail, station);
+    if (destinations.length) index.set(station.id, destinations);
+  }
+  return index;
+}
+
+function buildWorkIndex(world: AnyWorld, rail: RailNetworkPlan): Map<number, number[]> {
+  const index = new Map<number, number[]>();
+  const pois = world.city.poi.all() as POI[];
+  for (const poi of pois) {
+    if (!poi || poi.category !== POICategory.Work || poi.capacity <= 0 || !validPoint(poi)) continue;
+    const station = nearestStation(rail, poi.x, poi.z, 500); if (!station) continue;
+    const list = index.get(station.id);
+    if (list) list.push(poi.id); else index.set(station.id, [poi.id]);
+  }
+  return index;
+}
+
+function chooseWork(
+  world: AnyWorld,
+  pool: number[],
+  home: POI,
+  agent: number,
+  assigned: Int32Array,
+): number {
+  if (!pool.length) return -1;
+  const start = Math.floor(hash01(agent * 3253 + 193) * pool.length) % pool.length;
+  for (let n = 0; n < pool.length; n++) {
+    const id = pool[(start + n) % pool.length];
+    const work = poiById(world, id); if (!work || work.capacity <= 0) continue;
+    if (assigned[id] >= work.capacity) continue;
+    const dx = work.x - home.x, dz = work.z - home.z;
+    if (dx * dx + dz * dz < 1450 * 1450) continue;
+    return id;
   }
   return -1;
 }
@@ -96,30 +121,51 @@ proto.populate = function populateWithRailCommuters(this: AnyWorld, count: numbe
   const rail = this.city.planning.rail as RailNetworkPlan | undefined;
   if (!rail?.stations?.length || !rail.lines?.length) return;
 
+  // 高コストなPOI検索をAgentループの外へ出す。
+  const destinationIndex = buildDestinationIndex(rail);
+  const workIndex = buildWorkIndex(this, rail);
+  if (!destinationIndex.size || !workIndex.size) return;
+
   const s = this.store;
+  const assigned = new Int32Array(this.city.poi.size);
+  for (let i = 0; i < s.count; i++) {
+    const workId = s.workPOI[i];
+    if (workId >= 0 && workId < assigned.length) assigned[workId]++;
+  }
+
+  let eligible = 0, reassigned = 0;
   for (let i = 0; i < s.count; i++) {
     if (s.ownsCar[i]) continue;
     const occupation = s.occupation[i] as Occupation;
     if (occupation === Occupation.Unemployed || occupation === Occupation.Retiree) continue;
-    // 駅徒歩圏の非自動車就業者の約80%を都市内鉄道通勤候補にする。
     if (hash01(i * 7919 + 41) >= 0.80) continue;
 
-    const home = poiById(this, s.homePOI[i]);
-    if (!home) continue;
-    const origin = nearestStation(rail, home.x, home.z); if (!origin) continue;
-    const candidates = destinationStations(rail, origin); if (!candidates.length) continue;
+    const home = poiById(this, s.homePOI[i]); if (!home) continue;
+    const origin = nearestStation(rail, home.x, home.z, 500); if (!origin) continue;
+    const destinations = destinationIndex.get(origin.id); if (!destinations?.length) continue;
+    eligible++;
 
-    const start = Math.floor(hash01(i * 1543 + 73) * candidates.length) % candidates.length;
-    for (let n = 0; n < candidates.length; n++) {
-      const destination = candidates[(start + n) % candidates.length];
+    const start = Math.floor(hash01(i * 1543 + 73) * destinations.length) % destinations.length;
+    for (let n = 0; n < destinations.length; n++) {
+      const destination = destinations[(start + n) % destinations.length];
       if (!validPoint(destination)) continue;
-      if (Math.hypot(destination.x - home.x, destination.z - home.z) < 1600) continue;
-      const workId = workNearStation(this, destination, i + n * 100003);
-      const work = poiById(this, workId);
-      if (!work) continue;
-      if (Math.hypot(work.x - home.x, work.z - home.z) < 1450) continue;
+      const dx = destination.x - home.x, dz = destination.z - home.z;
+      if (dx * dx + dz * dz < 1600 * 1600) continue;
+      const pool = workIndex.get(destination.id); if (!pool?.length) continue;
+      const workId = chooseWork(this, pool, home, i + n * 100003, assigned); if (workId < 0) continue;
+
+      const oldWorkId = s.workPOI[i];
+      if (oldWorkId >= 0 && oldWorkId < assigned.length && assigned[oldWorkId] > 0) assigned[oldWorkId]--;
       s.workPOI[i] = workId;
+      assigned[workId]++;
+      reassigned++;
       break;
     }
   }
+
+  console.info('[City-Sim] rail commuter demand', {
+    eligible,
+    reassigned,
+    stationsWithWork: workIndex.size,
+  });
 };
