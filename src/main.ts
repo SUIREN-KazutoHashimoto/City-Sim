@@ -9,6 +9,7 @@ import { buildAlignedBusStops } from './rendering/BusStopRenderer';
 import { buildSpecialFacilityVisuals } from './rendering/SpecialFacilityRenderer';
 import { RailRenderer } from './rendering/RailRenderer';
 import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
+import { reserveRailStationClearance } from './generation/RailStationClearance';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
 
 async function bootstrap(): Promise<void> {
@@ -23,9 +24,11 @@ async function bootstrap(): Promise<void> {
     runtime.agentCapacity,
     runtime.vehicleCapacity,
   );
-  // Phase 4: TODは生成時の計画駅位置で既に反映済み。ここで実線路を道路A*へ寄せ、駅前バスを追加する。
+  // TODは計画駅位置で生成時に反映済み。道路完成後に実駅位置を確定し、駅構内空地を人口生成前に確保する。
   const rail = world.city.planning.rail;
   rail.alignToRoadNetwork(world.city.net);
+  const railClearance = reserveRailStationClearance(world.city, rail);
+  console.info('[City-Sim] rail station clearance', railClearance);
   world.bus.addRailStationFeeders(rail.stations);
   world.populate(runtime.population);
 
@@ -96,7 +99,7 @@ async function bootstrap(): Promise<void> {
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Tab') { e.preventDefault(); paused = !paused; }
     if (e.code === 'Space') e.preventDefault();
-    if (e.code === 'KeyV') controller.toggleVehicleView();
+    if (e.code === 'KeyV') controller.toggleFollowView();
   });
 
   const hud = document.getElementById('hud')!; const clockEl = document.getElementById('clock')!;
@@ -146,8 +149,8 @@ async function bootstrap(): Promise<void> {
     // SIM値とは別の実時間補間poseを、camera/Inspector/render/lightの間だけVehicleStoreへ適用する。
     vehicleVisuals.update(world.vehicles, dt); vehicleVisuals.apply(world.vehicles);
     try {
-      // 列車poseを先に更新し、その同じフレームのposeを追跡cameraとInspectorが使う。
-      railRenderer.update(world.clock.totalSeconds);
+      // 列車運行はSIM時刻へ追従し、描画距離だけ実時間補間する。
+      railRenderer.update(world.clock.totalSeconds, dt);
       controller.setFollowTarget(inspector.getFollowTarget()); controller.update(dt); dashboard.draw();
 
       const renderStarted = performance.now();
@@ -171,8 +174,11 @@ async function bootstrap(): Promise<void> {
       if (now - lastStats > 250) {
         lastStats = now; const dv = world.stats();
         const threadText = world.simulationWorkerCount > 0 ? `${world.simulationWorkerCount} workers/SAB` : 'single-thread fallback';
-        const followText = controller.isFollowing ? (controller.isVehicleFirstPerson ? '追跡中 車両固定一人称' : controller.isFollowingTrain ? `列車追跡中 dist ${controller.followDistance.toFixed(0)}m` : `追跡中 dist ${controller.followDistance.toFixed(0)}m`) : `speed ${controller.moveSpeed.toFixed(0)} m/s`;
-        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  列車${railRenderer.trainCount}編成  閉塞待ち${railRenderer.waitingTrainCount}\n駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=vehicle view  MMB=人/車/列車を追跡]`;
+        const followKind = controller.isFollowingTrain ? '列車' : controller.isFollowingVehicle ? '車両' : controller.isFollowingAgent ? '市民' : '対象';
+        const followText = controller.isFollowing
+          ? controller.isFirstPerson ? `追跡中 ${followKind}一人称` : `追跡中 ${followKind} dist ${controller.followDistance.toFixed(0)}m`
+          : `speed ${controller.moveSpeed.toFixed(0)} m/s`;
+        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  列車${railRenderer.trainCount}編成  鉄道信号${railRenderer.signalCount}  信号待ち${railRenderer.waitingTrainCount}\n駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m  駅用除去 建物${railClearance.buildingsRemoved}/駐車${railClearance.parkingLotsRemoved}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=追跡一人称/三人称  MMB=人/車/列車を追跡]`;
       }
     } finally {
       vehicleVisuals.restore(world.vehicles);
