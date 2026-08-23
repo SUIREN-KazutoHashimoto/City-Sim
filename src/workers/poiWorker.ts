@@ -9,6 +9,7 @@ let capacity = new Int32Array(0), category = new Uint8Array(0), occupancy = new 
 const grids = new Map<number, Map<number, number[]>>();
 const gridDim = 1 << 16;
 const key = (cx: number, cz: number): number => ((cx + (gridDim >> 1)) << 16) | (cz + (gridDim >> 1));
+const occupied = (id: number): number => typeof SharedArrayBuffer !== 'undefined' && occupancy.buffer instanceof SharedArrayBuffer ? Atomics.load(occupancy, id) : occupancy[id];
 
 function buildIndex(): void {
   grids.clear();
@@ -37,7 +38,7 @@ function queryExpanding(cat: number, qx: number, qz: number, radii: readonly num
 function findBest(q: BestQuery): number {
   let bestId = -1, bestCost = Infinity;
   queryExpanding(q.category, q.x, q.z, [300, 800, 2000, 5000], (id) => {
-    if (occupancy[id] >= capacity[id]) return;
+    if (occupied(id) >= capacity[id]) return;
     const dx = x[id] - q.x, dz = z[id] - q.z, pm = Math.abs(priceTier[id] - q.wealth);
     const cost = dx * dx + dz * dz + pm * pm * 400 * 400;
     if (cost < bestCost) { bestCost = cost; bestId = id; }
@@ -48,7 +49,7 @@ function findBest(q: BestQuery): number {
 function findNearest(q: NearestQuery): number {
   let bestId = -1, bestD = Infinity;
   queryExpanding(q.category, q.x, q.z, [300, 800, 2000, 5000, 12000], (id) => {
-    if (occupancy[id] >= capacity[id]) return;
+    if (occupied(id) >= capacity[id]) return;
     const dx = x[id] - q.x, dz = z[id] - q.z, d2 = dx * dx + dz * dz;
     if (d2 < bestD) { bestD = d2; bestId = id; }
   }, () => bestId >= 0);
