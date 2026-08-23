@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RailLine, RailNetworkPlan, RailPoint, RailStationKind } from '../generation/RailPlanning';
 import { RoadNetwork, roadWidth } from '../traffic/RoadNetwork';
+import { RailTimetable } from './RailTimetable';
 
 interface StaticPart { matrix: THREE.Matrix4; }
 interface SmoothLine {
@@ -11,7 +12,7 @@ interface SmoothLine {
   stationDistances: number[];
 }
 
-type TrainState = 'dwell' | 'running' | 'signal';
+type TrainState = 'dwell' | 'running' | 'signal' | 'schedule';
 export type TrainService = 'local' | 'rapid' | 'limited';
 type SignalAspect = 'red' | 'yellow' | 'green';
 
@@ -28,6 +29,9 @@ interface TrainRun {
   originStationIndex: number;
   nextStationIndex: number;
   dwellRemaining: number;
+  scheduledDepartureAt: number;
+  waitingSince: number;
+  trainOrdinal: number;
   state: TrainState;
   x: number;
   z: number;
@@ -88,6 +92,16 @@ export interface TrainStatusSnapshot {
   firstPersonForwardOffset: number;
 }
 
+/**
+ * Railway renderer + lightweight timetable/interlocking.
+ *
+ * - physical blocks are shared across overlapping lines;
+ * - a repeating directional timetable keeps opposing trains out of single-track sections;
+ * - only the immediate next block/route is reserved, preventing circular multi-resource holds;
+ * - limited > rapid > local is used for dispatch order, while starvation protection keeps locals moving;
+ * - junction/turnout routes are locked before a train may enter;
+ * - trains are advanced every render frame for smooth motion.
+ */
 export class RailRenderer {
   static readonly TRACK_Y = 8.2;
   private static readonly TRAIN_WIDTH = 2.86;
@@ -102,6 +116,8 @@ export class RailRenderer {
   private static readonly SWITCH_APPROACH = 48;
   private static readonly BLOCK_SAMPLE = 14;
   private static readonly BLOCK_QUANTIZE = 11;
+  private static readonly DEADLOCK_WATCH_SECONDS = 45;
+  private static readonly RECOVERY_HOLD_SECONDS = 40;
 
   private readonly smoothLines = new Map<number, SmoothLine>();
   private readonly trainRuns: TrainRun[] = [];
@@ -113,7 +129,13 @@ export class RailRenderer {
   private readonly blockReservations = new Map<number, number>();
   private readonly routeReservations = new Map<string, RouteReservation>();
   private readonly turnoutState = new Map<number, string>();
+  private readonly timetable = new RailTimetable();
   private readonly d = new THREE.Object3D();
+
+  private railTime = 0;
+  private lastProgressAt = 0;
+  private recoveryTrainId = -1;
+  private recoveryUntil = 0;
 
   private trainBody: THREE.InstancedMesh | null = null;
   private trainCabin: THREE.InstancedMesh | null = null;
@@ -192,7 +214,9 @@ export class RailRenderer {
     const nextStationId = run.nextStationIndex >= 0 ? line.stationIds[run.nextStationIndex] ?? -1 : -1;
     const currentStation = currentStationId >= 0 ? this.rail.stations[currentStationId] : null;
     const nextStation = nextStationId >= 0 ? this.rail.stations[nextStationId] : null;
-    const stateLabel = run.state === 'dwell' ? '停車中' : run.state === 'signal' ? '信号待ち' : '走行中';
+    const stateLabel = run.state === 'dwell' ? '停車中'
+      : run.state === 'schedule' ? 'ダイヤ待ち'
+        : run.state === 'signal' ? '信号待ち' : '走行中';
     const loopIndex = run.currentStationIndex >= 0 ? run.currentStationIndex : run.nextStationIndex;
     const consistLength = this.consistLength(run);
     return {
@@ -220,19 +244,51 @@ export class RailRenderer {
     return 1;
   }
 
-  private reservationDepth(service: TrainService): number {
-    if (service === 'limited') return 3;
-    if (service === 'rapid') return 2;
-    return 1;
+  private stepOperations(dt: number): void {
+    this.railTime += dt;
+    this.rebuildDispatchReservations();
+    const ordered = this.dispatchOrder();
+    let progressed = false;
+    for (const run of ordered) {
+      const before = run.distance;
+      this.stepTrain(run, dt);
+      if (Math.abs(run.distance - before) > 0.02) progressed = true;
+    }
+    if (progressed) {
+      this.lastProgressAt = this.railTime;
+      if (this.recoveryTrainId >= 0 && this.railTime >= this.recoveryUntil) this.recoveryTrainId = -1;
+    } else if (this.railTime - this.lastProgressAt >= RailRenderer.DEADLOCK_WATCH_SECONDS) {
+      this.activateRecoveryGrant();
+    }
   }
 
-  private stepOperations(dt: number): void {
-    this.rebuildDispatchReservations();
-    const ordered = this.trainRuns.slice().sort((a, b) => {
+  private dispatchOrder(): TrainRun[] {
+    return this.trainRuns.slice().sort((a, b) => {
+      if (a.id === this.recoveryTrainId && b.id !== this.recoveryTrainId) return -1;
+      if (b.id === this.recoveryTrainId && a.id !== this.recoveryTrainId) return 1;
+      const ak = this.timetable.dispatchKey(a.scheduledDepartureAt, a.waitingSince, a.service, this.isAtTerminal(a), this.railTime);
+      const bk = this.timetable.dispatchKey(b.scheduledDepartureAt, b.waitingSince, b.service, this.isAtTerminal(b), this.railTime);
+      if (Math.abs(ak - bk) > 1e-6) return ak - bk;
       const p = this.servicePriority(b.service) - this.servicePriority(a.service);
       return p !== 0 ? p : a.id - b.id;
     });
-    for (const run of ordered) this.stepTrain(run, dt);
+  }
+
+  private activateRecoveryGrant(): void {
+    const waiting = this.trainRuns.filter((r) => r.currentStationIndex >= 0 && (r.state === 'signal' || r.state === 'schedule'));
+    if (waiting.length === 0) { this.lastProgressAt = this.railTime; return; }
+    waiting.sort((a, b) => {
+      const at = this.isAtTerminal(a) ? 1 : 0, bt = this.isAtTerminal(b) ? 1 : 0;
+      if (at !== bt) return bt - at;
+      const aw = a.waitingSince >= 0 ? a.waitingSince : this.railTime;
+      const bw = b.waitingSince >= 0 ? b.waitingSince : this.railTime;
+      if (aw !== bw) return aw - bw;
+      const p = this.servicePriority(b.service) - this.servicePriority(a.service);
+      return p !== 0 ? p : a.id - b.id;
+    });
+    this.recoveryTrainId = waiting[0].id;
+    this.recoveryUntil = this.railTime + RailRenderer.RECOVERY_HOLD_SECONDS;
+    this.lastProgressAt = this.railTime;
   }
 
   private stepTrain(run: TrainRun, dt: number): void {
@@ -242,17 +298,40 @@ export class RailRenderer {
     if (run.currentStationIndex >= 0) {
       run.speed = 0;
       if (run.dwellRemaining > 0) {
-        run.dwellRemaining = Math.max(0, run.dwellRemaining - dt); run.state = 'dwell'; return;
+        run.dwellRemaining = Math.max(0, run.dwellRemaining - dt);
+        run.state = 'dwell';
+        return;
       }
+
+      let reversedAtTerminal = false;
       if ((run.direction > 0 && run.currentStationIndex >= lastStation) || (run.direction < 0 && run.currentStationIndex <= 0)) {
         run.direction = run.direction > 0 ? -1 : 1;
+        reversedAtTerminal = true;
       }
+      if (reversedAtTerminal) {
+        run.scheduledDepartureAt = this.timetable.nextTerminalDeparture(
+          Math.max(this.railTime, run.scheduledDepartureAt), run.lineId, run.direction, run.service, run.trainOrdinal,
+        );
+      }
+
       const next = run.currentStationIndex + run.direction;
       if (next < 0 || next > lastStation) return;
-      if (!this.canEnterBlock(run, run.currentStationIndex, next)) { run.state = 'signal'; return; }
+
+      if (!this.timetableDepartureAllowed(run, run.currentStationIndex, next)) {
+        if (run.waitingSince < 0) run.waitingSince = this.railTime;
+        run.state = 'schedule';
+        return;
+      }
+      if (!this.canEnterBlock(run, run.currentStationIndex, next)) {
+        if (run.waitingSince < 0) run.waitingSince = this.railTime;
+        run.state = 'signal';
+        return;
+      }
+
       run.originStationIndex = run.currentStationIndex;
       run.nextStationIndex = next;
       run.currentStationIndex = -1;
+      run.waitingSince = -1;
       run.state = 'running';
     }
 
@@ -263,7 +342,7 @@ export class RailRenderer {
     const following = boundaryIndex + run.direction;
     const scheduledStop = this.shouldStop(run, boundaryIndex);
     const signalStop = !scheduledStop && following >= 0 && following <= lastStation
-      && !this.canEnterBlock(run, boundaryIndex, following);
+      && (!this.timetableDepartureAllowed(run, boundaryIndex, following) || !this.canEnterBlock(run, boundaryIndex, following));
 
     let brakeDistance = boundaryRemaining;
     if (!scheduledStop && !signalStop) {
@@ -286,19 +365,58 @@ export class RailRenderer {
     run.distance = boundaryDistance;
     const stationId = smooth.line.stationIds[boundaryIndex];
     if (scheduledStop) {
-      run.speed = 0; run.currentStationIndex = boundaryIndex; run.originStationIndex = -1; run.nextStationIndex = -1;
-      run.state = 'dwell'; run.dwellRemaining = this.dwellSeconds(run, stationId); return;
+      const dwell = this.dwellSeconds(run, stationId);
+      run.speed = 0;
+      run.currentStationIndex = boundaryIndex;
+      run.originStationIndex = -1;
+      run.nextStationIndex = -1;
+      run.state = 'dwell';
+      run.dwellRemaining = dwell;
+      run.scheduledDepartureAt = this.railTime + dwell;
+      run.waitingSince = -1;
+      return;
     }
     if (following < 0 || following > lastStation) {
-      run.speed = 0; run.currentStationIndex = boundaryIndex; run.originStationIndex = -1; run.nextStationIndex = -1;
-      run.state = 'dwell'; run.dwellRemaining = this.dwellSeconds(run, stationId); return;
+      const dwell = this.dwellSeconds(run, stationId);
+      run.speed = 0;
+      run.currentStationIndex = boundaryIndex;
+      run.originStationIndex = -1;
+      run.nextStationIndex = -1;
+      run.state = 'dwell';
+      run.dwellRemaining = dwell;
+      run.scheduledDepartureAt = this.railTime + dwell;
+      run.waitingSince = -1;
+      return;
     }
-    if (!this.canEnterBlock(run, boundaryIndex, following)) {
-      run.speed = 0; run.currentStationIndex = boundaryIndex; run.originStationIndex = -1; run.nextStationIndex = -1;
-      run.state = 'signal'; run.dwellRemaining = 0; return;
+    if (!this.timetableDepartureAllowed(run, boundaryIndex, following) || !this.canEnterBlock(run, boundaryIndex, following)) {
+      run.speed = 0;
+      run.currentStationIndex = boundaryIndex;
+      run.originStationIndex = -1;
+      run.nextStationIndex = -1;
+      run.state = this.timetableDepartureAllowed(run, boundaryIndex, following) ? 'signal' : 'schedule';
+      run.dwellRemaining = 0;
+      run.scheduledDepartureAt = Math.max(run.scheduledDepartureAt, this.railTime);
+      if (run.waitingSince < 0) run.waitingSince = this.railTime;
+      return;
     }
     run.originStationIndex = boundaryIndex;
     run.nextStationIndex = following;
+  }
+
+  private timetableDepartureAllowed(run: TrainRun, fromIndex: number, toIndex: number): boolean {
+    if (this.railTime + 1e-6 < run.scheduledDepartureAt) return false;
+    if (!this.timetable.directionWindowOpen(this.railTime, run.lineId, run.direction)) return false;
+    const remain = this.timetable.secondsUntilWindowClose(this.railTime, run.lineId, run.direction);
+    const required = this.estimatedBlockTravelSeconds(run, fromIndex, toIndex) + 5;
+    return remain >= Math.min(58, required);
+  }
+
+  private estimatedBlockTravelSeconds(run: TrainRun, fromIndex: number, toIndex: number): number {
+    const smooth = this.smoothLines.get(run.lineId); if (!smooth) return 30;
+    const a = smooth.stationDistances[fromIndex] ?? 0, b = smooth.stationDistances[toIndex] ?? a;
+    const distance = Math.abs(b - a);
+    const effective = Math.max(8, run.cruiseSpeed * 0.82);
+    return Math.max(12, distance / effective);
   }
 
   private canEnterBlock(run: TrainRun, fromIndex: number, toIndex: number): boolean {
@@ -340,10 +458,17 @@ export class RailRenderer {
     const line = this.rail.lines[run.lineId]; if (!line) return false;
     const stationId = line.stationIds[toIndex], station = this.rail.stations[stationId];
     if (!station || station.kind !== RailStationKind.Terminal) return true;
-    return !this.trainRuns.some((other) => other.id !== run.id
-      && other.lineId === run.lineId && other.currentStationIndex === toIndex);
+    return !this.trainRuns.some((other) => {
+      if (other.id === run.id || other.currentStationIndex < 0) return false;
+      const otherLine = this.rail.lines[other.lineId]; if (!otherLine) return false;
+      return otherLine.stationIds[other.currentStationIndex] === stationId;
+    });
   }
 
+  /**
+   * 予約は「次の1閉塞＋その進路」だけ。
+   * 多段先行予約をやめることで循環待ちを構造的に抑える。
+   */
   private rebuildDispatchReservations(): void {
     this.blockOccupancy.clear();
     this.blockReservations.clear();
@@ -356,24 +481,17 @@ export class RailRenderer {
       if (blockId >= 0 && !this.blockOccupancy.has(blockId)) this.blockOccupancy.set(blockId, run.id);
     }
 
-    const ordered = this.trainRuns.slice().sort((a, b) => {
-      const p = this.servicePriority(b.service) - this.servicePriority(a.service);
-      if (p !== 0) return p;
-      const aTerminal = this.isAtTerminal(a) ? 1 : 0;
-      const bTerminal = this.isAtTerminal(b) ? 1 : 0;
-      return bTerminal !== aTerminal ? bTerminal - aTerminal : a.id - b.id;
-    });
-
-    for (const run of ordered) {
-      const segments = this.upcomingSegments(run, this.reservationDepth(run.service));
-      for (const seg of segments) {
-        const blockId = this.blockIdFor(run.lineId, seg.fromIndex, seg.toIndex);
-        if (blockId < 0 || !this.blockAvailableFor(run.id, blockId)) break;
-        if (!this.terminalAvailable(run, seg.toIndex)) break;
-        const routeKeys = this.routeKeysForSegment(run, seg.fromIndex, seg.toIndex);
-        if (!this.reserveRoutes(run, routeKeys)) break;
-        this.blockReservations.set(blockId, run.id);
-      }
+    for (const run of this.dispatchOrder()) {
+      const segments = this.upcomingSegments(run, 1);
+      const seg = segments[0]; if (!seg) continue;
+      if (run.currentStationIndex >= 0 && !this.timetableDepartureAllowed(run, seg.fromIndex, seg.toIndex)) continue;
+      const blockId = this.blockIdFor(run.lineId, seg.fromIndex, seg.toIndex);
+      if (blockId < 0 || !this.blockAvailableFor(run.id, blockId)) continue;
+      if (!this.terminalAvailable(run, seg.toIndex)) continue;
+      if (!this.stationTrackAvailable(run, seg.toIndex)) continue;
+      const routeKeys = this.routeKeysForSegment(run, seg.fromIndex, seg.toIndex);
+      if (!this.reserveRoutes(run, routeKeys)) continue;
+      this.blockReservations.set(blockId, run.id);
     }
   }
 
@@ -462,7 +580,7 @@ export class RailRenderer {
         if (run.service === 'local') keys.push(`station:${run.lineId}:${stationId}:loop:${run.direction}`);
         else keys.push(`station:${run.lineId}:${stationId}:main`);
       }
-      if (station.kind === RailStationKind.Terminal) keys.push(`terminal:${run.lineId}:${stationId}`);
+      if (station.kind === RailStationKind.Terminal) keys.push(`terminal:${stationId}`);
     }
     return [...new Set(keys)];
   }
@@ -827,12 +945,19 @@ export class RailRenderer {
         if (stationIndex <= 0) direction = 1; else if (stationIndex >= maxStation) direction = -1;
         const carCount = service === 'limited' ? 5 : service === 'rapid' ? 5 : line.kind === 'trunk' ? 4 : 3;
         const id = this.trainRuns.length;
+        const initialDwell = 4 + i * 3;
+        const station = this.rail.stations[line.stationIds[stationIndex]];
+        let scheduledDepartureAt = initialDwell;
+        if (station?.kind === RailStationKind.Terminal) {
+          scheduledDepartureAt = this.timetable.nextTerminalDeparture(initialDwell, line.id, direction, service, i);
+        }
         const run: TrainRun = {
           id, lineId: line.id, service, carCount,
           cruiseSpeed: service === 'limited' ? 31.0 : service === 'rapid' ? 27.0 : line.kind === 'trunk' ? 21.5 : 17.0,
           direction, speed: 0, distance: 0,
           currentStationIndex: stationIndex, originStationIndex: -1, nextStationIndex: -1,
-          dwellRemaining: 5 + i * 3, state: 'dwell', x: 0, z: 0, heading: 0,
+          dwellRemaining: initialDwell, scheduledDepartureAt, waitingSince: -1, trainOrdinal: i,
+          state: 'dwell', x: 0, z: 0, heading: 0,
         };
         run.distance = this.stationDistanceForRun(run, smooth, stationIndex);
         this.trainRuns.push(run);
@@ -921,6 +1046,8 @@ export class RailRenderer {
   }
 
   private signalAspect(signal: RailSignal): SignalAspect {
+    if (!this.timetable.directionWindowOpen(this.railTime, signal.lineId, signal.direction)) return 'red';
+    const remainingWindow = this.timetable.secondsUntilWindowClose(this.railTime, signal.lineId, signal.direction);
     const to = signal.stationIndex + signal.direction;
     const blockId = this.blockIdFor(signal.lineId, signal.stationIndex, to);
     if (blockId < 0) return 'red';
@@ -944,6 +1071,7 @@ export class RailRenderer {
     const junction = this.routeReservations.get(`junction:${targetStationId}`);
     if (junction && junction.lineId !== signal.lineId) return 'red';
 
+    if (remainingWindow < 14) return 'yellow';
     const next = to + signal.direction;
     if (next >= 0 && next < line.stationIds.length) {
       const nextBlock = this.blockIdFor(signal.lineId, to, next);
