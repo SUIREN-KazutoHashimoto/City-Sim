@@ -22,10 +22,8 @@ interface TrainRun {
   cruiseSpeed: number;
   direction: 1 | -1;
   speed: number;
-  /** 運行上の編成中心距離。 */
+  /** 線路上の編成中心距離。描画も運行もこの1値を共有する。 */
   distance: number;
-  /** 表示用の編成中心距離。全車両はこの1値から台車poseを再計算する。 */
-  visualDistance: number;
   currentStationIndex: number;
   originStationIndex: number;
   nextStationIndex: number;
@@ -73,7 +71,7 @@ export interface TrainStatusSnapshot {
  * City Generator v2 Phase 4.6 railway renderer + lightweight operations.
  *
  * - short articulated cars: every car uses front/rear bogie points on the actual track;
- * - one first-order filter is applied to consist progress, then every car is rebuilt from that progress;
+ * - railway operations advance every render frame instead of following asynchronous World batches;
  * - local trains use passing loops, rapid trains keep the through track and overtake at stations;
  * - railway block signals are rendered and updated from occupancy;
  * - station platforms follow curves and station access lands outside the roadway.
@@ -100,7 +98,6 @@ export class RailRenderer {
   private trainCabin: THREE.InstancedMesh | null = null;
   private trainStripe: THREE.InstancedMesh | null = null;
   private signalLamp: THREE.InstancedMesh | null = null;
-  private lastSimSeconds = Number.NaN;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -140,43 +137,21 @@ export class RailRenderer {
   }
 
   /**
-   * 運行状態はWorldのSIM時刻で進める。
-   * 表示はVehicleVisualSmootherと同じ一次指数補間を線路上距離へ1回だけ適用する。
-   * 速度項やPD制御を持たないためオーバーシュートせず、全車両の連結間隔も維持される。
+   * 鉄道は軽量なので非同期World batchを待たず、描画フレームごとに直接運行を進める。
+   * これにより「batch到着→追従→遅れ」の周期を根本からなくす。
    */
-  update(simSeconds: number, realDt = 1 / 60): void {
+  update(realDt = 1 / 60, timeScale = 1, paused = false): void {
     if (!this.trainBody || !this.trainCabin || !this.trainStripe || this.trainRuns.length === 0) return;
-    const renderDt = THREE.MathUtils.clamp(realDt, 0, 0.1);
+    const frameDt = THREE.MathUtils.clamp(realDt, 0, 0.05);
+    const scale = Number.isFinite(timeScale) ? Math.max(0, timeScale) : 0;
 
-    if (!Number.isFinite(this.lastSimSeconds)) {
-      this.lastSimSeconds = simSeconds;
-      for (const run of this.trainRuns) run.visualDistance = run.distance;
-      this.updateTrainMeshes(); this.updateSignals();
-      return;
-    }
-
-    let simAdvance = simSeconds - this.lastSimSeconds;
-    this.lastSimSeconds = simSeconds;
-    if (simAdvance < 0) simAdvance = 0;
-    simAdvance = Math.min(simAdvance, 300);
-
-    if (simAdvance > 1e-5) {
-      let remaining = simAdvance;
-      while (remaining > 1e-4) {
-        const dt = Math.min(0.35, remaining);
+    if (!paused && frameDt > 0 && scale > 0) {
+      let remaining = Math.min(frameDt * scale, 180);
+      while (remaining > 1e-5) {
+        const dt = Math.min(0.5, remaining);
         this.stepOperations(dt);
         remaining -= dt;
       }
-    }
-
-    const alpha = 1 - Math.exp(-renderDt * 9);
-    for (const run of this.trainRuns) {
-      const smooth = this.smoothLines.get(run.lineId); if (!smooth) continue;
-      const error = run.distance - run.visualDistance;
-      const snapDistance = Math.max(900, smooth.length * 0.45);
-      if (Math.abs(error) > snapDistance) run.visualDistance = run.distance;
-      else run.visualDistance += error * alpha;
-      run.visualDistance = THREE.MathUtils.clamp(run.visualDistance, 0, smooth.length);
     }
 
     this.updateTrainMeshes();
@@ -191,6 +166,7 @@ export class RailRenderer {
 
   trainStatus(id: number): TrainStatusSnapshot | null {
     const run = this.trainRuns[id]; if (!run) return null;
+    if (!Number.isFinite(run.x) || !Number.isFinite(run.z) || !Number.isFinite(run.heading)) return null;
     const line = this.rail.lines[run.lineId]; if (!line) return null;
     const currentStationId = run.currentStationIndex >= 0 ? line.stationIds[run.currentStationIndex] ?? -1 : -1;
     const nextStationId = run.nextStationIndex >= 0 ? line.stationIds[run.nextStationIndex] ?? -1 : -1;
@@ -375,7 +351,7 @@ export class RailRenderer {
   private carPose(run: TrainRun, smooth: SmoothLine, carIndex: number): { x: number; z: number; heading: number } | null {
     const spacing = RailRenderer.CAR_LENGTH + RailRenderer.CAR_GAP;
     const along = ((run.carCount - 1) * 0.5 - carIndex) * spacing * run.direction;
-    const center = run.visualDistance + along;
+    const center = run.distance + along;
     const front = this.sampleTrainTrack(run, smooth, center + RailRenderer.BOGIE_HALF * run.direction);
     const rear = this.sampleTrainTrack(run, smooth, center - RailRenderer.BOGIE_HALF * run.direction);
     if (!front || !rear) return null;
@@ -524,7 +500,6 @@ export class RailRenderer {
     const concourseY = 5.3;
     const platformY = RailRenderer.TRACK_Y + 0.40;
     const shaftHeight = Math.max(1.0, platformY - concourseY);
-    // ホームから中間コンコースへ降りる縦動線（簡易階段塔）。
     stairs.push({ matrix: this.matrix(
       anchor.x,
       concourseY + shaftHeight * 0.5,
@@ -534,10 +509,8 @@ export class RailRenderer {
       2.4,
       -anchor.heading,
     ) });
-    // 車道上は十分なクリアランスを持つ中間コンコースで横断する。
     this.pushRibbonSegment(anchor, outer, concourseY, 0.28, 2.6, stairs);
 
-    // 実際の下降階段は道路半幅より外側＝歩道側に置く。
     const steps = 12, run = 15.5;
     for (let i = 0; i < steps; i++) {
       const t = i / Math.max(1, steps - 1);
@@ -620,11 +593,11 @@ export class RailRenderer {
         const run: TrainRun = {
           id, lineId: line.id, service, carCount,
           cruiseSpeed: service === 'rapid' ? 27.0 : line.kind === 'trunk' ? 21.5 : 17.0,
-          direction, speed: 0, distance: 0, visualDistance: 0,
+          direction, speed: 0, distance: 0,
           currentStationIndex: stationIndex, originStationIndex: -1, nextStationIndex: -1,
           dwellRemaining: 5 + i * 3, state: 'dwell', x: 0, z: 0, heading: 0,
         };
-        run.distance = this.stationDistanceForRun(run, smooth, stationIndex); run.visualDistance = run.distance;
+        run.distance = this.stationDistanceForRun(run, smooth, stationIndex);
         this.trainRuns.push(run);
       }
     }
