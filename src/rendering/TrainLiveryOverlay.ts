@@ -8,6 +8,7 @@ import './RailLightingAndIndicators';
 import './RailSupportClearance';
 import './PedestrianSignalOrientation';
 import '../world/RailPassengerAutoAttach';
+import './TrainPassengerInspector';
 
 /**
  * 列車の外装レイヤー。
