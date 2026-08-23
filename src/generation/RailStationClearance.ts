@@ -52,8 +52,7 @@ export function reserveRailStationClearance(city: CityGenerator, rail: RailNetwo
     const radius = Math.hypot(lot.width, lot.depth) * 0.32;
     if (intersectsAnyStation(lot.x, lot.z, radius, rail)) {
       parkingLotsRemoved++;
-      const p = city.poi.get(lot.poiId);
-      p.capacity = 0; p.occupancy = 0; p.stock = 0; p.maxStock = 0;
+      city.poi.disable(lot.poiId);
       continue;
     }
     lot.id = keptLots.length;
