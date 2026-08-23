@@ -10,12 +10,14 @@ export class TrainLiveryOverlay {
   private capacity = 0;
   private readonly bodyMatrix = new THREE.Matrix4();
   private readonly local = new THREE.Matrix4();
-  private readonly world = new THREE.Matrix4();
   private readonly position = new THREE.Vector3();
+  private readonly stripePosition = new THREE.Vector3();
   private readonly quaternion = new THREE.Quaternion();
   private readonly scale = new THREE.Vector3();
+  private readonly stripeScale = new THREE.Vector3();
   private readonly offset = new THREE.Vector3();
   private readonly color = new THREE.Color();
+  private readonly rapidAccent = new THREE.Color(0xffb000);
 
   constructor(private readonly scene: THREE.Scene, private readonly rail: RailRenderer) {}
 
@@ -39,15 +41,12 @@ export class TrainLiveryOverlay {
       const sideOffset = Math.abs(this.scale.z) * 0.5 + 0.075;
       const stripeLength = Math.max(4, Math.abs(this.scale.x) * 0.91);
       const stripeHeight = service === 'rapid' ? 0.72 : 0.62;
-      const stripeY = 0.12;
+      this.stripeScale.set(stripeLength, stripeHeight, 0.15);
 
       for (const side of [-1, 1]) {
-        this.offset.set(0, stripeY, sideOffset * side).applyQuaternion(this.quaternion);
-        this.local.compose(
-          this.position.clone().add(this.offset),
-          this.quaternion,
-          new THREE.Vector3(stripeLength, stripeHeight, 0.15),
-        );
+        this.offset.set(0, 0.12, sideOffset * side).applyQuaternion(this.quaternion);
+        this.stripePosition.copy(this.position).add(this.offset);
+        this.local.compose(this.stripePosition, this.quaternion, this.stripeScale);
         this.stripes.setMatrixAt(out, this.local);
         this.stripes.setColorAt(out, routeColor);
         out++;
@@ -79,7 +78,7 @@ export class TrainLiveryOverlay {
   private routeColor(lineId: number, service: TrainService): THREE.Color {
     const palette = [0x0877c9, 0xd83b32, 0x15925f, 0x7a48b7, 0xe57a18, 0x0097aa, 0xbb2f71];
     this.color.setHex(palette[Math.abs(lineId) % palette.length]);
-    if (service === 'rapid') this.color.lerp(new THREE.Color(0xffb000), 0.32);
-    return this.color.clone();
+    if (service === 'rapid') this.color.lerp(this.rapidAccent, 0.32);
+    return this.color;
   }
 }
