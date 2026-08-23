@@ -1,5 +1,6 @@
 import { latestRailPassengerProvider } from '../rendering/RailPassengerBridge';
 import '../rendering/RailPassengerStairClearance';
+import '../rendering/RailPassengerGroundStairs';
 import { World } from './World';
 import './RailPassengerIntegration';
 
