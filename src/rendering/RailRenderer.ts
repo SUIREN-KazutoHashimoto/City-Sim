@@ -92,16 +92,6 @@ export interface TrainStatusSnapshot {
   firstPersonForwardOffset: number;
 }
 
-/**
- * Railway renderer + lightweight timetable/interlocking.
- *
- * - physical blocks are shared across overlapping lines;
- * - a repeating directional timetable keeps opposing trains out of single-track sections;
- * - only the immediate next block/route is reserved, preventing circular multi-resource holds;
- * - limited > rapid > local is used for dispatch order, while starvation protection keeps locals moving;
- * - junction/turnout routes are locked before a train may enter;
- * - trains are advanced every render frame for smooth motion.
- */
 export class RailRenderer {
   static readonly TRACK_Y = 8.2;
   private static readonly TRAIN_WIDTH = 2.86;
@@ -439,7 +429,6 @@ export class RailRenderer {
       const otherLine = this.rail.lines[other.lineId]; if (!otherLine) continue;
       const otherStationId = otherLine.stationIds[other.currentStationIndex];
       if (otherStationId !== targetStationId) continue;
-
       if (other.lineId !== run.lineId) {
         if (this.rail.stations[targetStationId]?.lineIds.length > 1) return false;
         continue;
@@ -465,10 +454,6 @@ export class RailRenderer {
     });
   }
 
-  /**
-   * 予約は「次の1閉塞＋その進路」だけ。
-   * 多段先行予約をやめることで循環待ちを構造的に抑える。
-   */
   private rebuildDispatchReservations(): void {
     this.blockOccupancy.clear();
     this.blockReservations.clear();
@@ -479,12 +464,14 @@ export class RailRenderer {
       if (run.state !== 'running' || run.originStationIndex < 0 || run.nextStationIndex < 0) continue;
       const blockId = this.blockIdFor(run.lineId, run.originStationIndex, run.nextStationIndex);
       if (blockId >= 0 && !this.blockOccupancy.has(blockId)) this.blockOccupancy.set(blockId, run.id);
+      // 走行中の列車がポイント/共有駅を抜け切るまでは現在進路を鎖錠する。
+      this.reserveRoutes(run, this.routeKeysForSegment(run, run.originStationIndex, run.nextStationIndex));
     }
 
     for (const run of this.dispatchOrder()) {
       const segments = this.upcomingSegments(run, 1);
       const seg = segments[0]; if (!seg) continue;
-      if (run.currentStationIndex >= 0 && !this.timetableDepartureAllowed(run, seg.fromIndex, seg.toIndex)) continue;
+      if (!this.timetableDepartureAllowed(run, seg.fromIndex, seg.toIndex)) continue;
       const blockId = this.blockIdFor(run.lineId, seg.fromIndex, seg.toIndex);
       if (blockId < 0 || !this.blockAvailableFor(run.id, blockId)) continue;
       if (!this.terminalAvailable(run, seg.toIndex)) continue;
@@ -607,6 +594,7 @@ export class RailRenderer {
       }
     }
 
+    // 別路線でも実際に同じ空間を走る区間だけを共通物理閉塞にする。
     for (let i = 0; i < this.lineBlocks.length; i++) for (let j = i + 1; j < this.lineBlocks.length; j++) {
       const a = this.lineBlocks[i], b = this.lineBlocks[j];
       if (a.lineId === b.lineId) continue;
@@ -616,20 +604,8 @@ export class RailRenderer {
       for (const key of small) if (large.has(key) && ++overlap >= 3) break;
       if (overlap >= 3) this.addBlockConflict(a.id, b.id);
     }
-
-    for (const station of this.rail.stations) {
-      if (station.lineIds.length < 2) continue;
-      const adjacent: number[] = [];
-      for (const lineId of station.lineIds) {
-        const line = this.rail.lines[lineId]; if (!line) continue;
-        const idx = line.stationIds.indexOf(station.id); if (idx < 0) continue;
-        if (idx > 0) { const id = this.blockIdFor(lineId, idx - 1, idx); if (id >= 0) adjacent.push(id); }
-        if (idx < line.stationIds.length - 1) { const id = this.blockIdFor(lineId, idx, idx + 1); if (id >= 0) adjacent.push(id); }
-      }
-      for (let i = 0; i < adjacent.length; i++) for (let j = i + 1; j < adjacent.length; j++) {
-        if (this.lineBlocks[adjacent[i]]?.lineId !== this.lineBlocks[adjacent[j]]?.lineId) this.addBlockConflict(adjacent[i], adjacent[j]);
-      }
-    }
+    // 共有駅の喉部は上の物理重複判定ではなく junction route lock で排他する。
+    // これにより駅前四方を巨大な一閉塞として扱う過剰な競合を避ける。
   }
 
   private addBlockConflict(a: number, b: number): void {
