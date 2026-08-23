@@ -12,7 +12,7 @@ interface SmoothLine {
   stationDistances: number[];
 }
 
-type TrainState = 'dwell' | 'running' | 'signal' | 'schedule';
+type TrainState = 'depot' | 'dwell' | 'running' | 'signal' | 'schedule';
 export type TrainService = 'local' | 'rapid' | 'limited';
 type SignalAspect = 'red' | 'yellow' | 'green';
 type RouteMode = 'main' | 'siding';
@@ -24,6 +24,7 @@ interface TrainRun {
   service: TrainService;
   carCount: number;
   cruiseSpeed: number;
+  currentSpeedLimit: number;
   direction: 1 | -1;
   speed: number;
   distance: number;
@@ -32,6 +33,8 @@ interface TrainRun {
   nextStationIndex: number;
   dwellRemaining: number;
   scheduledDepartureAt: number;
+  scheduledArrivalAt: number;
+  arrivalDelaySeconds: number;
   waitingSince: number;
   trainOrdinal: number;
   state: TrainState;
@@ -40,6 +43,11 @@ interface TrainRun {
   laneChangeStationIndex: number;
   blocked: boolean;
   caution: boolean;
+  reserve: boolean;
+  retireAtTerminal: boolean;
+  depotEnd: 0 | 1;
+  depotTrack: number;
+  depotSlot: number;
   x: number;
   y: number;
   z: number;
@@ -84,6 +92,7 @@ interface RailSignal {
   x: number;
   y: number;
   z: number;
+  heading: number;
 }
 
 type TurnoutKind = 'main' | 'siding' | 'crossover-normal' | 'crossover-reverse';
@@ -113,7 +122,10 @@ export interface TrainStatusSnapshot {
   heading: number;
   speed: number;
   cruiseSpeed: number;
+  currentSpeedLimit: number;
   direction: 1 | -1;
+  originStationId: number;
+  originStationName: string;
   currentStationId: number;
   currentStationName: string;
   nextStationId: number;
@@ -123,6 +135,7 @@ export interface TrainStatusSnapshot {
   passingLoop: boolean;
   firstPersonForwardOffset: number;
   scheduledDepartureAt: number;
+  scheduledArrivalAt: number;
   delaySeconds: number;
 }
 
@@ -134,7 +147,7 @@ export interface RailTimetableRow {
   currentStationName: string;
   nextStationName: string;
   stateLabel: string;
-  scheduledDepartureAt: number;
+  scheduledArrivalAt: number;
   delaySeconds: number;
   speedKmh: number;
 }
@@ -143,6 +156,9 @@ export class RailRenderer {
   static readonly TRACK_Y = 8.2;
   private static readonly BLOCKS_PER_INTERVAL = 3;
   private static readonly YELLOW_SPEED = 12.0;
+  private static readonly TURNOUT_SPEED = 11.1;
+  private static readonly CROSSOVER_SPEED = 8.4;
+  private static readonly SIDING_SPEED = 15.0;
   private static readonly TRAIN_WIDTH = 2.86;
   private static readonly CAR_LENGTH = 10.2;
   private static readonly CAR_GAP = 0.72;
@@ -160,6 +176,17 @@ export class RailRenderer {
   private static readonly BLOCK_QUANTIZE = 6;
   private static readonly LINE_LEVEL_STEP = 4.8;
   private static readonly DEADLOCK_WATCH_SECONDS = 70;
+  private static readonly SERVICE_START = 5 * 3600;
+  private static readonly LAST_DEPARTURE = 23 * 3600 + 30 * 60;
+  private static readonly MORNING_PEAK_START = 7 * 3600;
+  private static readonly MORNING_PEAK_END = 9 * 3600 + 30 * 60;
+  private static readonly EVENING_PEAK_START = 17 * 3600;
+  private static readonly EVENING_PEAK_END = 19 * 3600 + 30 * 60;
+  private static readonly DEPOT_TRACKS = 4;
+  private static readonly DEPOT_TRACK_GAP = 4.4;
+  private static readonly DEPOT_SIDE_OFFSET = 13.0;
+  private static readonly DEPOT_SLOT_SPACING = 64;
+  private static readonly DEPOT_RELEASE_HEADWAY = 36;
 
   private readonly smoothLines = new Map<number, SmoothLine>();
   private readonly lineY = new Map<number, number>();
@@ -174,10 +201,11 @@ export class RailRenderer {
   private readonly railSignals: RailSignal[] = [];
   private readonly turnoutIndicators: TurnoutIndicator[] = [];
   private readonly timetable = new RailTimetable();
+  private readonly lastDepotReleaseAt = new Map<number, number>();
   private readonly d = new THREE.Object3D();
 
-  private railTime = 0;
-  private lastProgressAt = 0;
+  private railTime = 8 * 3600;
+  private lastProgressAt = this.railTime;
   private recoveryTrainId = -1;
   private timetablePanel: HTMLDivElement | null = null;
   private timetableVisible = false;
@@ -209,6 +237,7 @@ export class RailRenderer {
     this.buildBlocks();
     this.buildTrackGeometry();
     this.buildStations();
+    this.buildDepots();
     this.buildTrains();
     this.buildRailSignals();
     this.buildTurnoutIndicators();
@@ -240,7 +269,7 @@ export class RailRenderer {
   }
 
   get trainCount(): number { return this.trainRuns.length; }
-  get waitingTrainCount(): number { return this.trainRuns.filter((r) => r.state === 'signal' || (r.blocked && r.speed < 0.5)).length; }
+  get waitingTrainCount(): number { return this.trainRuns.filter((r) => r.state !== 'depot' && (r.state === 'signal' || (r.blocked && r.speed < 0.5))).length; }
   get signalCount(): number { return this.railSignals.length; }
   get trainHitMesh(): THREE.InstancedMesh | null { return this.trainBody; }
   trainIdFromInstance(instanceId: number): number { return this.trainInstanceToRun[instanceId] ?? -1; }
@@ -249,39 +278,47 @@ export class RailRenderer {
     const run = this.trainRuns[id]; if (!run) return null;
     if (![run.x, run.y, run.z, run.heading].every(Number.isFinite)) return null;
     const line = this.rail.lines[run.lineId]; if (!line) return null;
+    const originStationId = run.originStationIndex >= 0 ? line.stationIds[run.originStationIndex] ?? -1 : -1;
     const currentStationId = run.currentStationIndex >= 0 ? line.stationIds[run.currentStationIndex] ?? -1 : -1;
     const nextStationId = run.nextStationIndex >= 0 ? line.stationIds[run.nextStationIndex] ?? -1 : -1;
-    const currentStation = currentStationId >= 0 ? this.rail.stations[currentStationId] : null;
-    const nextStation = nextStationId >= 0 ? this.rail.stations[nextStationId] : null;
     const consistLength = this.consistLength(run);
     const loopIndex = run.currentStationIndex >= 0 ? run.currentStationIndex : run.nextStationIndex;
     return {
       id: run.id, lineId: run.lineId, lineName: line.name,
       service: run.service, serviceLabel: this.serviceLabel(run.service), carCount: run.carCount, consistLength,
       state: run.state, stateLabel: this.actualStateLabel(run), x: run.x, y: run.y, z: run.z, heading: run.heading,
-      speed: run.speed, cruiseSpeed: run.cruiseSpeed, direction: run.direction,
-      currentStationId, currentStationName: currentStation?.name ?? '—',
-      nextStationId, nextStationName: nextStation?.name ?? '—',
+      speed: run.speed, cruiseSpeed: run.cruiseSpeed, currentSpeedLimit: run.currentSpeedLimit, direction: run.direction,
+      originStationId, originStationName: originStationId >= 0 ? this.rail.stations[originStationId]?.name ?? '—' : '—',
+      currentStationId, currentStationName: currentStationId >= 0 ? this.rail.stations[currentStationId]?.name ?? '—' : '—',
+      nextStationId, nextStationName: nextStationId >= 0 ? this.rail.stations[nextStationId]?.name ?? '—' : '—',
       dwellRemaining: Math.max(0, run.dwellRemaining), waitingForBlock: run.state === 'signal' || run.blocked,
       passingLoop: loopIndex >= 0 && this.lineStationHasPassingLoop(run.lineId, loopIndex),
       firstPersonForwardOffset: consistLength * 0.5 + 0.45,
       scheduledDepartureAt: run.scheduledDepartureAt,
-      delaySeconds: Math.max(0, this.railTime - run.scheduledDepartureAt),
+      scheduledArrivalAt: run.scheduledArrivalAt,
+      delaySeconds: this.arrivalDelayForRun(run),
     };
   }
 
   timetableRows(): RailTimetableRow[] {
     return this.trainRuns.map((run) => {
       const line = this.rail.lines[run.lineId];
+      const originId = run.originStationIndex >= 0 ? line?.stationIds[run.originStationIndex] ?? -1 : -1;
       const currentId = run.currentStationIndex >= 0 ? line?.stationIds[run.currentStationIndex] ?? -1 : -1;
       const nextId = run.nextStationIndex >= 0 ? line?.stationIds[run.nextStationIndex] ?? -1 : -1;
+      const current = run.state === 'depot'
+        ? '車両基地'
+        : currentId >= 0
+          ? this.rail.stations[currentId]?.name ?? '—'
+          : originId >= 0
+            ? this.rail.stations[originId]?.name ?? '駅間'
+            : '駅間';
       return {
         trainId: run.id, lineName: line?.name ?? `L${run.lineId}`, serviceLabel: this.serviceLabel(run.service),
-        directionLabel: run.direction > 0 ? '下り' : '上り',
-        currentStationName: currentId >= 0 ? this.rail.stations[currentId]?.name ?? '—' : '駅間',
+        directionLabel: run.direction > 0 ? '下り' : '上り', currentStationName: current,
         nextStationName: nextId >= 0 ? this.rail.stations[nextId]?.name ?? '—' : '—',
-        stateLabel: this.actualStateLabel(run), scheduledDepartureAt: run.scheduledDepartureAt,
-        delaySeconds: Math.max(0, this.railTime - run.scheduledDepartureAt), speedKmh: run.speed * 3.6,
+        stateLabel: this.actualStateLabel(run), scheduledArrivalAt: run.scheduledArrivalAt,
+        delaySeconds: this.arrivalDelayForRun(run), speedKmh: run.speed * 3.6,
       };
     });
   }
@@ -295,7 +332,8 @@ export class RailRenderer {
   }
 
   private actualStateLabel(run: TrainRun): string {
-    if (run.state === 'dwell') return '停車中';
+    if (run.state === 'depot') return '車両基地';
+    if (run.state === 'dwell') return run.retireAtTerminal ? '終電・入庫待ち' : '停車中';
     if (run.state === 'schedule') return 'ダイヤ待ち';
     if (run.state === 'signal' || (run.blocked && run.speed < 0.5)) return '信号待ち';
     if (run.caution) return run.speed < 1.0 ? '徐行待ち' : '徐行中';
@@ -322,6 +360,7 @@ export class RailRenderer {
 
   private stepOperations(dt: number): void {
     this.railTime += dt;
+    this.updateServicePlan();
     this.rebuildDispatchReservations();
     let progressed = false;
     for (const run of this.dispatchOrder()) {
@@ -335,8 +374,62 @@ export class RailRenderer {
     }
   }
 
+  private secondOfDay(): number {
+    const d = this.railTime % 86400;
+    return d < 0 ? d + 86400 : d;
+  }
+
+  private serviceOpen(): boolean {
+    const t = this.secondOfDay();
+    return t >= RailRenderer.SERVICE_START && t < RailRenderer.LAST_DEPARTURE;
+  }
+
+  private peakDemand(): boolean {
+    const t = this.secondOfDay();
+    return (t >= RailRenderer.MORNING_PEAK_START && t < RailRenderer.MORNING_PEAK_END)
+      || (t >= RailRenderer.EVENING_PEAK_START && t < RailRenderer.EVENING_PEAK_END);
+  }
+
+  private updateServicePlan(): void {
+    const open = this.serviceOpen(), peak = this.peakDemand();
+    for (const run of this.trainRuns) {
+      if (run.state === 'depot') {
+        if (open && (!run.reserve || peak)) this.tryReleaseDepotTrain(run);
+        continue;
+      }
+      run.retireAtTerminal = !open || (run.reserve && !peak);
+    }
+  }
+
+  private tryReleaseDepotTrain(run: TrainRun): void {
+    const line = this.rail.lines[run.lineId], smooth = this.smoothLines.get(run.lineId); if (!line || !smooth) return;
+    const lastRelease = this.lastDepotReleaseAt.get(run.lineId) ?? -Infinity;
+    if (this.railTime - lastRelease < RailRenderer.DEPOT_RELEASE_HEADWAY) return;
+    const stationIndex = run.depotEnd === 0 ? 0 : line.stationIds.length - 1;
+    const occupied = this.trainRuns.some((other) => other.id !== run.id && other.state !== 'depot'
+      && other.lineId === run.lineId && other.currentStationIndex === stationIndex);
+    if (occupied) return;
+    run.direction = run.depotEnd === 0 ? 1 : -1;
+    run.lane = line.kind === 'trunk' ? run.direction : 0;
+    run.previousLane = run.lane; run.laneChangeStationIndex = -1;
+    run.currentStationIndex = stationIndex; run.originStationIndex = -1; run.nextStationIndex = -1;
+    run.distance = this.stationDistanceForRun(run, smooth, stationIndex);
+    run.speed = 0; run.currentSpeedLimit = run.cruiseSpeed; run.state = 'dwell'; run.dwellRemaining = 6;
+    run.retireAtTerminal = false; run.waitingSince = -1; run.arrivalDelaySeconds = 0; run.scheduledArrivalAt = 0;
+    run.scheduledDepartureAt = this.timetable.nextTerminalDeparture(this.railTime + 6, run.lineId, run.direction, run.service, run.trainOrdinal);
+    this.lastDepotReleaseAt.set(run.lineId, this.railTime);
+  }
+
+  private parkInDepot(run: TrainRun, terminalIndex: number): void {
+    const line = this.rail.lines[run.lineId]; if (!line) return;
+    run.depotEnd = terminalIndex <= 0 ? 0 : 1;
+    run.state = 'depot'; run.speed = 0; run.currentSpeedLimit = 0; run.currentStationIndex = -1;
+    run.originStationIndex = -1; run.nextStationIndex = -1; run.dwellRemaining = 0; run.waitingSince = -1;
+    run.blocked = false; run.caution = false; run.retireAtTerminal = false; run.scheduledArrivalAt = 0; run.arrivalDelaySeconds = 0;
+  }
+
   private dispatchOrder(): TrainRun[] {
-    return this.trainRuns.slice().sort((a, b) => {
+    return this.trainRuns.filter((r) => r.state !== 'depot').slice().sort((a, b) => {
       if (a.id === this.recoveryTrainId && b.id !== this.recoveryTrainId) return -1;
       if (b.id === this.recoveryTrainId && a.id !== this.recoveryTrainId) return 1;
       const ak = this.timetable.dispatchKey(a.scheduledDepartureAt, a.waitingSince, a.service, this.isAtTerminal(a), this.railTime);
@@ -348,7 +441,7 @@ export class RailRenderer {
   }
 
   private oldestWaitingTrain(): number {
-    const waiting = this.trainRuns.filter((r) => r.state === 'signal' || r.blocked);
+    const waiting = this.trainRuns.filter((r) => r.state !== 'depot' && (r.state === 'signal' || r.blocked));
     waiting.sort((a, b) => {
       const at = this.isAtTerminal(a) ? 1 : 0, bt = this.isAtTerminal(b) ? 1 : 0;
       if (at !== bt) return bt - at;
@@ -361,6 +454,7 @@ export class RailRenderer {
   }
 
   private stepTrain(run: TrainRun, dt: number): void {
+    if (run.state === 'depot') return;
     const smooth = this.smoothLines.get(run.lineId); if (!smooth || smooth.stationDistances.length < 2) return;
     const lastStation = smooth.line.stationIds.length - 1;
     run.blocked = false; run.caution = false;
@@ -370,13 +464,17 @@ export class RailRenderer {
       if (run.dwellRemaining > 0) {
         run.dwellRemaining = Math.max(0, run.dwellRemaining - dt); run.state = 'dwell'; return;
       }
+      if (this.isTerminalIndex(run.lineId, run.currentStationIndex) && run.retireAtTerminal) {
+        this.parkInDepot(run, run.currentStationIndex); return;
+      }
       let reversed = false;
       if ((run.direction > 0 && run.currentStationIndex >= lastStation) || (run.direction < 0 && run.currentStationIndex <= 0)) {
         run.direction = run.direction > 0 ? -1 : 1; reversed = true;
       }
       if (reversed) {
+        run.lane = smooth.line.kind === 'trunk' ? run.direction : 0; run.previousLane = run.lane; run.laneChangeStationIndex = -1;
         run.scheduledDepartureAt = this.timetable.nextTerminalDeparture(
-          Math.max(this.railTime, run.scheduledDepartureAt), run.lineId, run.direction, run.service, run.trainOrdinal,
+          Math.max(this.railTime + 2, run.scheduledDepartureAt), run.lineId, run.direction, run.service, run.trainOrdinal,
         );
       }
       const next = run.currentStationIndex + run.direction;
@@ -415,7 +513,9 @@ export class RailRenderer {
     const brakingTarget = Number.isFinite(brakeDistance)
       ? Math.sqrt(Math.max(0, 2 * RailRenderer.BRAKE * Math.max(0, brakeDistance - 0.25))) : run.cruiseSpeed;
     const cautionCap = run.caution ? RailRenderer.YELLOW_SPEED : run.cruiseSpeed;
-    const targetSpeed = Math.min(run.cruiseSpeed, cautionCap, brakingTarget);
+    const geometryLimit = this.trackSpeedLimit(run, smooth, run.distance);
+    run.currentSpeedLimit = Math.min(run.cruiseSpeed, cautionCap, geometryLimit);
+    const targetSpeed = Math.min(run.currentSpeedLimit, brakingTarget);
     if (run.speed < targetSpeed) run.speed = Math.min(targetSpeed, run.speed + RailRenderer.ACCEL * dt);
     else run.speed = Math.max(targetSpeed, run.speed - RailRenderer.BRAKE * dt);
 
@@ -428,13 +528,20 @@ export class RailRenderer {
 
     if (boundaryRemaining > 0.34 && move < boundaryRemaining - 0.02) return;
     run.distance = boundaryDistance;
+    this.recordArrival(run);
     const stationId = smooth.line.stationIds[boundaryIndex];
     if (scheduledStop || following < 0 || following > lastStation) { this.stopAtStation(run, boundaryIndex, stationId); return; }
     if (!nextPlan) {
       run.speed = 0; run.currentStationIndex = boundaryIndex; run.originStationIndex = -1; run.nextStationIndex = -1;
       run.state = 'signal'; run.dwellRemaining = 0; if (run.waitingSince < 0) run.waitingSince = this.railTime; return;
     }
+    run.scheduledDepartureAt = run.scheduledArrivalAt > 0 ? run.scheduledArrivalAt : this.railTime;
     this.enterPlannedRoute(run, nextPlan);
+  }
+
+  private recordArrival(run: TrainRun): void {
+    if (run.scheduledArrivalAt > 0) run.arrivalDelaySeconds = Math.max(0, this.railTime - run.scheduledArrivalAt);
+    else run.arrivalDelaySeconds = 0;
   }
 
   private sectionControl(run: TrainRun): { caution: boolean; redDistance: number } {
@@ -460,15 +567,16 @@ export class RailRenderer {
       const stopCenter = boundary - run.direction * (half + 2.0);
       return { caution: false, redDistance: Math.max(0, Math.abs(stopCenter - run.distance)) };
     }
-    const followingId = sequence[nextPos + 1] ?? -1;
+    const followingId = sequence[nextPos + 1] ?? this.nextBlockAfter(sequence[nextPos], run.direction);
     const caution = followingId >= 0 && !this.blockFreeIgnoringOwnReservation(followingId, run.id);
     return { caution, redDistance: Infinity };
   }
 
   private stopAtStation(run: TrainRun, stationIndex: number, stationId: number): void {
     const dwell = this.dwellSeconds(run, stationId);
-    run.speed = 0; run.currentStationIndex = stationIndex; run.originStationIndex = -1; run.nextStationIndex = -1;
-    run.state = 'dwell'; run.dwellRemaining = dwell; run.scheduledDepartureAt = this.railTime + dwell;
+    const plannedArrival = run.scheduledArrivalAt > 0 ? run.scheduledArrivalAt : this.railTime;
+    run.speed = 0; run.currentSpeedLimit = 0; run.currentStationIndex = stationIndex; run.originStationIndex = -1; run.nextStationIndex = -1;
+    run.state = 'dwell'; run.dwellRemaining = dwell; run.scheduledDepartureAt = plannedArrival + dwell;
     run.waitingSince = -1; run.blocked = false; run.caution = false;
     if (!this.laneTransitionActive(run)) { run.previousLane = run.lane; run.laneChangeStationIndex = -1; }
   }
@@ -481,6 +589,61 @@ export class RailRenderer {
     }
     run.originStationIndex = plan.fromIndex; run.nextStationIndex = plan.toIndex; run.currentStationIndex = -1;
     run.waitingSince = -1; run.state = 'running'; run.blocked = false; run.caution = false;
+    run.scheduledArrivalAt = run.scheduledDepartureAt + this.nominalTravelSeconds(run, plan.fromIndex, plan.toIndex);
+  }
+
+  private nominalTravelSeconds(run: TrainRun, fromIndex: number, toIndex: number): number {
+    const smooth = this.smoothLines.get(run.lineId); if (!smooth) return 60;
+    const a = smooth.stationDistances[fromIndex] ?? 0, b = smooth.stationDistances[toIndex] ?? a;
+    const lo = Math.min(a, b), hi = Math.max(a, b), length = Math.max(1, hi - lo);
+    const step = 30; let seconds = 0;
+    for (let d = lo; d < hi - 0.01; d += step) {
+      const e = Math.min(hi, d + step), mid = (d + e) * 0.5;
+      const limit = Math.max(7, Math.min(run.cruiseSpeed, this.curveSpeedLimit(smooth, mid)));
+      seconds += (e - d) / limit;
+    }
+    return Math.max(10, seconds * 1.10 + Math.min(8, length / 300));
+  }
+
+  private arrivalDelayForRun(run: TrainRun): number {
+    if (run.state === 'depot') return 0;
+    if (run.currentStationIndex >= 0) return Math.max(0, run.arrivalDelaySeconds);
+    if (run.scheduledArrivalAt <= 0 || run.nextStationIndex < 0) return Math.max(0, run.arrivalDelaySeconds);
+    const smooth = this.smoothLines.get(run.lineId); if (!smooth) return Math.max(0, run.arrivalDelaySeconds);
+    const target = this.stationDistanceForRun(run, smooth, run.nextStationIndex);
+    const remaining = Math.abs(target - run.distance);
+    const estimateSpeed = Math.max(4.5, Math.min(run.cruiseSpeed, Math.max(run.speed, run.currentSpeedLimit * 0.72)));
+    const predictedArrival = this.railTime + remaining / estimateSpeed;
+    return Math.max(0, predictedArrival - run.scheduledArrivalAt);
+  }
+
+  private trackSpeedLimit(run: TrainRun, smooth: SmoothLine, distance: number): number {
+    let limit = this.curveSpeedLimit(smooth, distance);
+    if (this.laneTransitionActive(run)) limit = Math.min(limit, RailRenderer.CROSSOVER_SPEED);
+    if (run.service === 'local' && smooth.line.kind === 'trunk') {
+      for (let i = 1; i < smooth.stationDistances.length - 1; i++) {
+        if (!this.lineStationHasPassingLoop(run.lineId, i)) continue;
+        const half = this.platformLength(smooth.line.stationIds[i]) * 0.5;
+        const profile = this.sidingProfile(Math.abs(distance - smooth.stationDistances[i]), half);
+        if (profile > 0.04 && profile < 0.96) limit = Math.min(limit, RailRenderer.TURNOUT_SPEED);
+        else if (profile >= 0.96) limit = Math.min(limit, RailRenderer.SIDING_SPEED);
+      }
+    }
+    return limit;
+  }
+
+  private curveSpeedLimit(smooth: SmoothLine, distance: number): number {
+    const look = 15;
+    const a = this.sampleSmooth(smooth, Math.max(0, distance - look));
+    const b = this.sampleSmooth(smooth, Math.min(smooth.length, distance + look));
+    if (!a || !b) return 35;
+    const delta = Math.abs(this.wrapAngle(b.heading - a.heading));
+    const deg = delta * 180 / Math.PI;
+    if (deg < 3) return 35.0;
+    if (deg < 8) return 27.8;
+    if (deg < 16) return 22.2;
+    if (deg < 28) return 16.7;
+    return 12.5;
   }
 
   private plannedRouteFor(run: TrainRun, fromIndex: number, toIndex: number): PlannedRoute | null {
@@ -492,6 +655,7 @@ export class RailRenderer {
     this.blockOccupancy.clear(); this.blockReservations.clear(); this.routeReservations.clear(); this.plannedRoutes.clear();
 
     for (const run of this.trainRuns) {
+      if (run.state === 'depot') continue;
       if (run.currentStationIndex >= 0) {
         const key = this.platformKey(run, run.currentStationIndex, run.lane);
         this.routeReservations.set(key, { ownerTrainId: run.id, lineId: run.lineId, route: 'platform' });
@@ -540,13 +704,23 @@ export class RailRenderer {
     const frontD = run.distance + run.direction * half;
     for (let i = 0; i < sequence.length; i++) {
       const b = this.blocks[sequence[i]];
-      if (frontD >= b.startD - 0.4 && frontD <= b.endD + 0.4) return sequence[i + 1] ?? -1;
+      if (frontD >= b.startD - 0.4 && frontD <= b.endD + 0.4) return sequence[i + 1] ?? this.nextBlockAfter(sequence[i], run.direction);
     }
     return sequence[0] ?? -1;
   }
 
+  private nextBlockAfter(blockId: number, direction: 1 | -1): number {
+    const block = this.blocks[blockId]; if (!block) return -1;
+    if (direction > 0) {
+      if (block.section < RailRenderer.BLOCKS_PER_INTERVAL - 1) return this.blockId(block.lineId, block.intervalIndex, block.lane, block.section + 1);
+      return this.blockId(block.lineId, block.intervalIndex + 1, block.lane, 0);
+    }
+    if (block.section > 0) return this.blockId(block.lineId, block.intervalIndex, block.lane, block.section - 1);
+    return this.blockId(block.lineId, block.intervalIndex - 1, block.lane, RailRenderer.BLOCKS_PER_INTERVAL - 1);
+  }
+
   private upcomingSegmentForPlan(run: TrainRun): { from: number; to: number } | null {
-    const line = this.rail.lines[run.lineId]; if (!line || line.stationIds.length < 2) return null;
+    const line = this.rail.lines[run.lineId]; if (!line || line.stationIds.length < 2 || run.state === 'depot') return null;
     if (run.currentStationIndex >= 0) {
       let dir = run.direction, last = line.stationIds.length - 1;
       if (run.currentStationIndex === last && dir > 0) dir = -1;
@@ -692,7 +866,12 @@ export class RailRenderer {
     const line = this.rail.lines[lineId]; if (!line) return [];
     const interval = Math.min(fromIndex, toIndex), actualLane: TrackLane = line.kind === 'trunk' ? lane : 0;
     const sections = toIndex > fromIndex ? [0, 1, 2] : [2, 1, 0];
-    return sections.map((s) => this.blockIdByKey.get(this.blockKey(lineId, interval, actualLane, s)) ?? -1).filter((id) => id >= 0);
+    return sections.map((s) => this.blockId(lineId, interval, actualLane, s)).filter((id) => id >= 0);
+  }
+
+  private blockId(lineId: number, interval: number, lane: TrackLane, section: number): number {
+    if (interval < 0 || section < 0 || section >= RailRenderer.BLOCKS_PER_INTERVAL) return -1;
+    return this.blockIdByKey.get(this.blockKey(lineId, interval, lane, section)) ?? -1;
   }
 
   private blockKey(lineId: number, interval: number, lane: TrackLane, section: number): string {
@@ -911,36 +1090,85 @@ export class RailRenderer {
     return roadWidth(lanes) * 0.5;
   }
 
+  private buildDepots(): void {
+    const ballast: StaticPart[] = [], rails: StaticPart[] = [], sheds: StaticPart[] = [], apron: StaticPart[] = [];
+    for (const line of this.rail.lines) {
+      const smooth = this.smoothLines.get(line.id); if (!smooth || smooth.path.length < 2) continue;
+      const y = this.lineTrackY(line.id);
+      for (const end of [0, 1] as const) {
+        const baseD = end === 0 ? 0 : smooth.length;
+        const base = this.sampleSmooth(smooth, baseD); if (!base) continue;
+        const outward = end === 0 ? -1 : 1;
+        const sideSign = ((line.id + end) & 1) === 0 ? 1 : -1;
+        for (let track = 0; track < RailRenderer.DEPOT_TRACKS; track++) {
+          const off = sideSign * (RailRenderer.DEPOT_SIDE_OFFSET + track * RailRenderer.DEPOT_TRACK_GAP);
+          let prev: RailPoint | null = null;
+          for (let along = 28; along <= 230; along += 8) {
+            const x = base.x + Math.cos(base.heading) * outward * along - Math.sin(base.heading) * off;
+            const z = base.z + Math.sin(base.heading) * outward * along + Math.cos(base.heading) * off;
+            const q = { x, z };
+            if (prev) this.pushTrackSegment(prev, q, y, ballast, rails, 3.2);
+            prev = q;
+          }
+          const leadA = this.offsetPoint(smooth, THREE.MathUtils.clamp(baseD + outward * -18, 0, smooth.length), line.kind === 'trunk' ? RailRenderer.MAIN_OFFSET * (end === 0 ? -1 : 1) : 0);
+          const leadB = {
+            x: base.x + Math.cos(base.heading) * outward * 32 - Math.sin(base.heading) * off,
+            z: base.z + Math.sin(base.heading) * outward * 32 + Math.cos(base.heading) * off,
+          };
+          if (leadA) this.pushTrackSegment(leadA, leadB, y, ballast, rails, 2.7);
+        }
+        const shedOff = sideSign * (RailRenderer.DEPOT_SIDE_OFFSET + (RailRenderer.DEPOT_TRACKS - 0.5) * RailRenderer.DEPOT_TRACK_GAP);
+        const shedAlong = 150;
+        const sx = base.x + Math.cos(base.heading) * outward * shedAlong - Math.sin(base.heading) * shedOff;
+        const sz = base.z + Math.sin(base.heading) * outward * shedAlong + Math.cos(base.heading) * shedOff;
+        sheds.push({ matrix: this.matrix(sx, y + 2.6, sz, 86, 5.2, 9.0, -base.heading) });
+        const ax = base.x + Math.cos(base.heading) * outward * 125 - Math.sin(base.heading) * sideSign * 20;
+        const az = base.z + Math.sin(base.heading) * outward * 125 + Math.cos(base.heading) * sideSign * 20;
+        apron.push({ matrix: this.matrix(ax, y - 0.20, az, 190, 0.18, 34, -base.heading) });
+      }
+    }
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    this.addStatic(box, new THREE.MeshStandardMaterial({ color: 0x4b5158, roughness: 0.95 }), ballast);
+    this.addStatic(box, new THREE.MeshStandardMaterial({ color: 0xaab1b8, roughness: 0.38, metalness: 0.72 }), rails);
+    this.addStatic(box, new THREE.MeshStandardMaterial({ color: 0x66717a, roughness: 0.72, metalness: 0.18 }), sheds);
+    this.addStatic(box, new THREE.MeshStandardMaterial({ color: 0x555b60, roughness: 0.96 }), apron);
+  }
+
   private buildTrains(): void {
     for (const line of this.rail.lines) {
       const smooth = this.smoothLines.get(line.id); if (!smooth || smooth.length < 300 || line.stationIds.length < 2) continue;
-      const services: TrainService[] = [];
-      if (line.kind === 'trunk') {
-        services.push('local'); if (smooth.length > 4500) services.push('local');
-        if (line.stationIds.length >= 5) services.push('rapid'); if (line.stationIds.length >= 7) services.push('limited');
-      } else services.push('local');
-      for (let i = 0; i < services.length; i++) {
-        const service = services[i], maxStation = line.stationIds.length - 1;
-        const stationIndex = Math.min(maxStation, Math.round((i * maxStation) / Math.max(1, services.length - 1)));
-        let direction: 1 | -1 = (i & 1) === 0 ? 1 : -1;
-        if (stationIndex <= 0) direction = 1; else if (stationIndex >= maxStation) direction = -1;
-        const lane: TrackLane = line.kind === 'trunk' ? direction : 0;
-        const carCount = service === 'limited' || service === 'rapid' ? 5 : line.kind === 'trunk' ? 4 : 3;
-        const initialDwell = 4 + i * 3;
-        let scheduledDepartureAt = initialDwell;
-        if (this.rail.stations[line.stationIds[stationIndex]]?.kind === RailStationKind.Terminal) {
-          scheduledDepartureAt = this.timetable.nextTerminalDeparture(initialDwell, line.id, direction, service, i);
+      const n = line.stationIds.length;
+      const localBase = Math.max(1, Math.round(n * 0.50));
+      const rapidCount = line.kind === 'trunk' && n >= 4 ? Math.max(1, Math.round(n * 0.30)) : 0;
+      const limitedCount = line.kind === 'trunk' && n >= 6 ? Math.max(1, Math.round(n * 0.10)) : 0;
+      const reserveLocal = line.kind === 'trunk' ? Math.max(1, Math.round(localBase * 0.40)) : 0;
+      const lineRuns: TrainRun[] = [];
+      let fleetOrdinal = 0;
+      const add = (service: TrainService, count: number, reserve: boolean): void => {
+        for (let ordinal = 0; ordinal < count; ordinal++) {
+          const depotEnd: 0 | 1 = (fleetOrdinal & 1) === 0 ? 0 : 1;
+          const direction: 1 | -1 = depotEnd === 0 ? 1 : -1;
+          const lane: TrackLane = line.kind === 'trunk' ? direction : 0;
+          const carCount = service === 'limited' || service === 'rapid' ? 5 : line.kind === 'trunk' ? 4 : 3;
+          const cruiseSpeed = service === 'limited' ? 31 : service === 'rapid' ? 27 : line.kind === 'trunk' ? 21.5 : 17;
+          const run: TrainRun = {
+            id: this.trainRuns.length, lineId: line.id, service, carCount, cruiseSpeed, currentSpeedLimit: cruiseSpeed,
+            direction, speed: 0, distance: 0, currentStationIndex: -1, originStationIndex: -1, nextStationIndex: -1,
+            dwellRemaining: 0, scheduledDepartureAt: this.railTime, scheduledArrivalAt: 0, arrivalDelaySeconds: 0,
+            waitingSince: -1, trainOrdinal: ordinal, state: 'depot', lane, previousLane: lane, laneChangeStationIndex: -1,
+            blocked: false, caution: false, reserve, retireAtTerminal: false, depotEnd,
+            depotTrack: Math.floor(fleetOrdinal / 2) % RailRenderer.DEPOT_TRACKS,
+            depotSlot: Math.floor(fleetOrdinal / (RailRenderer.DEPOT_TRACKS * 2)),
+            x: 0, y: this.lineTrackY(line.id), z: 0, heading: 0,
+          };
+          this.trainRuns.push(run); lineRuns.push(run); fleetOrdinal++;
         }
-        const run: TrainRun = {
-          id: this.trainRuns.length, lineId: line.id, service, carCount,
-          cruiseSpeed: service === 'limited' ? 31 : service === 'rapid' ? 27 : line.kind === 'trunk' ? 21.5 : 17,
-          direction, speed: 0, distance: 0, currentStationIndex: stationIndex, originStationIndex: -1, nextStationIndex: -1,
-          dwellRemaining: initialDwell, scheduledDepartureAt, waitingSince: -1, trainOrdinal: i, state: 'dwell',
-          lane, previousLane: lane, laneChangeStationIndex: -1, blocked: false, caution: false,
-          x: 0, y: this.lineTrackY(line.id), z: 0, heading: 0,
-        };
-        run.distance = this.stationDistanceForRun(run, smooth, stationIndex); this.trainRuns.push(run);
-      }
+      };
+      add('local', localBase, false);
+      add('rapid', rapidCount, false);
+      add('limited', limitedCount, false);
+      add('local', reserveLocal, true);
+      this.seedInitialService(line, smooth, lineRuns);
     }
     if (!this.trainRuns.length) return;
     let cap = 0; for (const run of this.trainRuns) cap += run.carCount;
@@ -961,6 +1189,42 @@ export class RailRenderer {
     }
   }
 
+  private seedInitialService(line: RailLine, smooth: SmoothLine, runs: TrainRun[]): void {
+    const active = runs.filter((r) => !r.reserve || this.peakDemand());
+    const byDirection = new Map<1 | -1, TrainRun[]>([[1, []], [-1, []]]);
+    for (const run of active) byDirection.get(run.direction)!.push(run);
+    for (const dir of [1, -1] as const) {
+      const group = byDirection.get(dir)!;
+      for (let rank = 0; rank < group.length; rank++) {
+        const run = group[rank];
+        const f = (rank + 1) / (group.length + 1);
+        const distance = dir > 0 ? smooth.length * f : smooth.length * (1 - f);
+        const interval = this.intervalAtDistance(smooth, distance);
+        if (interval < 0) continue;
+        run.state = 'running'; run.currentStationIndex = -1;
+        run.originStationIndex = dir > 0 ? interval : interval + 1;
+        run.nextStationIndex = dir > 0 ? interval + 1 : interval;
+        run.distance = distance;
+        run.lane = line.kind === 'trunk' ? dir : 0; run.previousLane = run.lane;
+        run.speed = Math.min(run.cruiseSpeed, this.curveSpeedLimit(smooth, distance)) * 0.68;
+        run.currentSpeedLimit = Math.min(run.cruiseSpeed, this.curveSpeedLimit(smooth, distance));
+        const targetD = this.stationDistanceForRun(run, smooth, run.nextStationIndex);
+        const remaining = Math.abs(targetD - run.distance);
+        const nominal = Math.max(8, run.currentSpeedLimit * 0.82);
+        run.scheduledDepartureAt = this.railTime - 4;
+        run.scheduledArrivalAt = this.railTime + remaining / nominal;
+      }
+    }
+  }
+
+  private intervalAtDistance(smooth: SmoothLine, distance: number): number {
+    for (let i = 0; i < smooth.stationDistances.length - 1; i++) {
+      const a = smooth.stationDistances[i], b = smooth.stationDistances[i + 1];
+      if (distance >= Math.min(a, b) && distance <= Math.max(a, b)) return i;
+    }
+    return smooth.stationDistances.length >= 2 ? smooth.stationDistances.length - 2 : -1;
+  }
+
   private updateTrainMeshes(): void {
     if (!this.trainBody || !this.trainCabin || !this.trainStripe) return;
     let instance = 0;
@@ -968,15 +1232,45 @@ export class RailRenderer {
       const smooth = this.smoothLines.get(run.lineId); if (!smooth) continue;
       const y = this.lineTrackY(run.lineId);
       for (let car = 0; car < run.carCount; car++) {
-        const pose = this.carPose(run, smooth, car); if (!pose) continue;
+        const pose = run.state === 'depot' ? this.depotCarPose(run, smooth, car) : this.carPose(run, smooth, car); if (!pose) continue;
         this.pose(this.trainBody, instance, pose.x, y + 1.80, pose.z, pose.heading, RailRenderer.CAR_LENGTH, 3.05, RailRenderer.TRAIN_WIDTH);
         this.pose(this.trainStripe, instance, pose.x, y + 2.12, pose.z, pose.heading, RailRenderer.CAR_LENGTH * 0.97, 0.34, RailRenderer.TRAIN_WIDTH + 0.05);
         this.pose(this.trainCabin, instance, pose.x, y + 3.14, pose.z, pose.heading, RailRenderer.CAR_LENGTH * 0.78, 0.62, 2.40); instance++;
       }
-      const center = this.consistPose(run, smooth); if (center) { run.x = center.x; run.y = y; run.z = center.z; run.heading = center.heading; }
+      const center = run.state === 'depot' ? this.depotConsistPose(run, smooth) : this.consistPose(run, smooth);
+      if (center) { run.x = center.x; run.y = y; run.z = center.z; run.heading = center.heading; }
     }
     this.trainBody.count = instance; this.trainCabin.count = instance; this.trainStripe.count = instance;
     this.trainBody.instanceMatrix.needsUpdate = true; this.trainCabin.instanceMatrix.needsUpdate = true; this.trainStripe.instanceMatrix.needsUpdate = true;
+  }
+
+  private depotCarPose(run: TrainRun, smooth: SmoothLine, carIndex: number): { x: number; z: number; heading: number } | null {
+    const center = this.depotBasePose(run, smooth); if (!center) return null;
+    const spacing = RailRenderer.CAR_LENGTH + RailRenderer.CAR_GAP;
+    const alongCar = ((run.carCount - 1) * 0.5 - carIndex) * spacing;
+    return {
+      x: center.x + Math.cos(center.heading) * alongCar,
+      z: center.z + Math.sin(center.heading) * alongCar,
+      heading: center.heading,
+    };
+  }
+
+  private depotConsistPose(run: TrainRun, smooth: SmoothLine): { x: number; z: number; heading: number } | null {
+    return this.depotBasePose(run, smooth);
+  }
+
+  private depotBasePose(run: TrainRun, smooth: SmoothLine): { x: number; z: number; heading: number } | null {
+    const base = this.sampleSmooth(smooth, run.depotEnd === 0 ? 0 : smooth.length); if (!base) return null;
+    const outward = run.depotEnd === 0 ? -1 : 1;
+    const heading = this.wrapAngle(base.heading + (outward < 0 ? Math.PI : 0));
+    const sideSign = ((run.lineId + run.depotEnd) & 1) === 0 ? 1 : -1;
+    const off = sideSign * (RailRenderer.DEPOT_SIDE_OFFSET + run.depotTrack * RailRenderer.DEPOT_TRACK_GAP);
+    const along = 62 + run.depotSlot * RailRenderer.DEPOT_SLOT_SPACING;
+    return {
+      x: base.x + Math.cos(base.heading) * outward * along - Math.sin(base.heading) * off,
+      z: base.z + Math.sin(base.heading) * outward * along + Math.cos(base.heading) * off,
+      heading,
+    };
   }
 
   private carPose(run: TrainRun, smooth: SmoothLine, carIndex: number): { x: number; z: number; heading: number } | null {
@@ -1047,11 +1341,9 @@ export class RailRenderer {
         const off = this.trackOffsetAt(smooth, block.lane, d), side = direction > 0 ? -2.35 : 2.35;
         const x = p.x - Math.sin(p.heading) * (off + side), z = p.z + Math.cos(p.heading) * (off + side), y = this.lineTrackY(block.lineId);
         poles.push({ matrix: this.matrix(x, y + 1.65, z, 0.18, 3.3, 0.18) });
-        heads.push({ matrix: this.matrix(x, y + 3.45, z, 0.76, 2.05, 0.52, -p.heading) });
-        const sequence = this.blockSequence(block.lineId, block.intervalIndex, block.intervalIndex + 1, block.lane);
-        const ordered = direction > 0 ? sequence : sequence.slice().reverse();
-        const pos = ordered.indexOf(block.id), nextBlockId = pos >= 0 ? ordered[pos + 1] ?? -1 : -1;
-        this.railSignals.push({ lineId: block.lineId, lane: block.lane, direction, blockId: block.id, nextBlockId, instanceIndex: this.railSignals.length, x, y, z });
+        heads.push({ matrix: this.matrix(x, y + 3.45, z, 0.76, 2.05, 0.52, -p.heading + Math.PI / 2) });
+        const nextBlockId = this.nextBlockAfter(block.id, direction);
+        this.railSignals.push({ lineId: block.lineId, lane: block.lane, direction, blockId: block.id, nextBlockId, instanceIndex: this.railSignals.length, x, y, z, heading: p.heading });
       }
     }
     const box = new THREE.BoxGeometry(1, 1, 1);
@@ -1082,7 +1374,10 @@ export class RailRenderer {
 
   private setSignalLamp(mesh: THREE.InstancedMesh, signal: RailSignal, lamp: 0 | 1 | 2, on: boolean): void {
     const yy = signal.y + 4.02 - lamp * 0.58, size = on ? 0.30 : 0.105;
-    mesh.setMatrixAt(signal.instanceIndex, this.matrix(signal.x, yy, signal.z, size, size, size));
+    const face = -signal.direction * 0.31;
+    const x = signal.x + Math.cos(signal.heading) * face;
+    const z = signal.z + Math.sin(signal.heading) * face;
+    mesh.setMatrixAt(signal.instanceIndex, this.matrix(x, yy, z, size, size, size));
   }
 
   private buildTurnoutIndicators(): void {
@@ -1166,9 +1461,14 @@ export class RailRenderer {
   }
 
   private consistLength(run: TrainRun): number { return run.carCount * RailRenderer.CAR_LENGTH + Math.max(0, run.carCount - 1) * RailRenderer.CAR_GAP; }
+
+  private isTerminalIndex(lineId: number, stationIndex: number): boolean {
+    const line = this.rail.lines[lineId];
+    return !!line && (stationIndex === 0 || stationIndex === line.stationIds.length - 1);
+  }
+
   private isAtTerminal(run: TrainRun): boolean {
-    if (run.currentStationIndex < 0) return false;
-    const line = this.rail.lines[run.lineId]; return !!line && this.rail.stations[line.stationIds[run.currentStationIndex]]?.kind === RailStationKind.Terminal;
+    return run.currentStationIndex >= 0 && this.isTerminalIndex(run.lineId, run.currentStationIndex);
   }
 
   private lineStationHasPassingLoop(lineId: number, stationIndex: number): boolean {
@@ -1193,7 +1493,7 @@ export class RailRenderer {
   private buildTimetablePanel(): void {
     if (typeof document === 'undefined' || this.timetablePanel) return;
     const el = document.createElement('div');
-    el.style.cssText = ['position:fixed', 'right:8px', 'bottom:8px', 'z-index:18', 'display:none', 'width:620px', 'max-height:46vh', 'overflow:auto', 'padding:9px 11px', 'background:rgba(9,13,19,.94)', 'border:1px solid #3d526c', 'border-radius:8px', 'color:#dce6f4', 'font:11px/1.45 ui-monospace,monospace', 'box-shadow:0 6px 22px rgba(0,0,0,.45)'].join(';');
+    el.style.cssText = ['position:fixed', 'right:8px', 'bottom:8px', 'z-index:18', 'display:none', 'width:660px', 'max-height:46vh', 'overflow:auto', 'padding:9px 11px', 'background:rgba(9,13,19,.94)', 'border:1px solid #3d526c', 'border-radius:8px', 'color:#dce6f4', 'font:11px/1.45 ui-monospace,monospace', 'box-shadow:0 6px 22px rgba(0,0,0,.45)'].join(';');
     document.body.appendChild(el); this.timetablePanel = el;
   }
 
@@ -1209,15 +1509,18 @@ export class RailRenderer {
     this.lastTimetableDraw = this.railTime;
     const rows = this.timetableRows().sort((a, b) => a.lineName.localeCompare(b.lineName) || a.trainId - b.trainId);
     const body = rows.map((r) => {
-      const dep = this.formatRailTime(r.scheduledDepartureAt), delay = r.delaySeconds > 1 ? `+${Math.round(r.delaySeconds)}s` : '定刻';
-      return `<tr><td>${r.lineName}</td><td>${r.serviceLabel}</td><td>${r.directionLabel}</td><td>#${r.trainId}</td><td>${r.currentStationName}</td><td>→ ${r.nextStationName}</td><td>${r.stateLabel}</td><td>${dep}</td><td>${delay}</td><td>${Math.round(r.speedKmh)}</td></tr>`;
+      const arrival = r.scheduledArrivalAt > 0 ? this.formatRailTime(r.scheduledArrivalAt) : '—';
+      const delay = r.delaySeconds > 1 ? `+${Math.round(r.delaySeconds)}s` : '定刻';
+      return `<tr><td>${r.lineName}</td><td>${r.serviceLabel}</td><td>${r.directionLabel}</td><td>#${r.trainId}</td><td>${r.currentStationName}</td><td>→ ${r.nextStationName}</td><td>${r.stateLabel}</td><td>${arrival}</td><td>${delay}</td><td>${Math.round(r.speedKmh)}</td></tr>`;
     }).join('');
-    this.timetablePanel.innerHTML = `<div style="font-weight:700;font-size:13px;margin-bottom:5px">🚆 鉄道ダイヤ <span style="font-weight:400;opacity:.65">[T=表示/非表示] 運転時刻 ${this.formatRailTime(this.railTime)}</span></div><table style="width:100%;border-collapse:collapse;white-space:nowrap"><thead style="color:#91a9c4"><tr><th>路線</th><th>種別</th><th>方向</th><th>列車</th><th>現在</th><th>次</th><th>状態</th><th>発車予定</th><th>遅れ</th><th>km/h</th></tr></thead><tbody>${body}</tbody></table>`;
+    const peak = this.peakDemand() ? ' 🚉ピーク増発中' : '';
+    this.timetablePanel.innerHTML = `<div style="font-weight:700;font-size:13px;margin-bottom:5px">🚆 鉄道ダイヤ <span style="font-weight:400;opacity:.65">[T=表示/非表示] ${this.formatRailTime(this.railTime)}${peak}</span></div><table style="width:100%;border-collapse:collapse;white-space:nowrap"><thead style="color:#91a9c4"><tr><th>路線</th><th>種別</th><th>方向</th><th>列車</th><th>発</th><th>着</th><th>状態</th><th>到着予定</th><th>遅れ</th><th>km/h</th></tr></thead><tbody>${body}</tbody></table>`;
     for (const cell of this.timetablePanel.querySelectorAll('td,th')) (cell as HTMLElement).style.cssText = 'padding:2px 5px;border-bottom:1px solid rgba(120,145,175,.15);text-align:left';
   }
 
   private formatRailTime(seconds: number): string {
-    const s = Math.max(0, Math.floor(seconds)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const daySeconds = ((Math.floor(seconds) % 86400) + 86400) % 86400;
+    const h = Math.floor(daySeconds / 3600), m = Math.floor((daySeconds % 3600) / 60), sec = daySeconds % 60;
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
 
