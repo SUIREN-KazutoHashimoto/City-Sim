@@ -1,3 +1,5 @@
+import { DEFAULT_CITY_PLANNING, type CityPlanningOptions } from '../generation/CityPlanning';
+
 export type CitySeedSetting = number | 'random';
 
 export interface RuntimeCityConfig {
@@ -8,6 +10,7 @@ export interface RuntimeCityConfig {
   population: number;
   agentCapacity: number;
   vehicleCapacity: number;
+  planning: CityPlanningOptions;
 }
 
 const DEFAULT_CONFIG: RuntimeCityConfig = {
@@ -18,6 +21,7 @@ const DEFAULT_CONFIG: RuntimeCityConfig = {
   population: 50_000,
   agentCapacity: 60_000,
   vehicleCapacity: 30_000,
+  planning: { ...DEFAULT_CITY_PLANNING },
 };
 
 function requireFinite(name: string, value: number, min: number, max: number): number {
@@ -32,7 +36,12 @@ export async function loadCityConfig(url = '/config/city.json'): Promise<Runtime
   if (!response.ok) throw new Error(`Failed to load city config: ${response.status} ${response.statusText}`);
 
   const raw = await response.json() as Partial<RuntimeCityConfig>;
-  const cfg: RuntimeCityConfig = { ...DEFAULT_CONFIG, ...raw };
+  const rawPlanning = raw.planning ?? {};
+  const cfg: RuntimeCityConfig = {
+    ...DEFAULT_CONFIG,
+    ...raw,
+    planning: { ...DEFAULT_CITY_PLANNING, ...rawPlanning },
+  };
 
   if (cfg.seed !== 'random' && (!Number.isFinite(cfg.seed) || typeof cfg.seed !== 'number')) {
     throw new Error(`seed must be a number or "random". actual=${String(cfg.seed)}`);
@@ -44,6 +53,12 @@ export async function loadCityConfig(url = '/config/city.json'): Promise<Runtime
   cfg.population = Math.floor(requireFinite('population', cfg.population, 1, 1_000_000));
   cfg.agentCapacity = Math.floor(requireFinite('agentCapacity', cfg.agentCapacity, cfg.population, 1_500_000));
   cfg.vehicleCapacity = Math.floor(requireFinite('vehicleCapacity', cfg.vehicleCapacity, 1, 1_000_000));
+
+  cfg.planning.subCenters = Math.floor(requireFinite('planning.subCenters', cfg.planning.subCenters, 0, 8));
+  cfg.planning.arterialSpacing = requireFinite('planning.arterialSpacing', cfg.planning.arterialSpacing, cfg.blockSize * 3, 5000);
+  cfg.planning.collectorSpacing = requireFinite('planning.collectorSpacing', cfg.planning.collectorSpacing, cfg.blockSize * 2, cfg.planning.arterialSpacing);
+  cfg.planning.industrialRatio = requireFinite('planning.industrialRatio', cfg.planning.industrialRatio, 0, 0.35);
+  cfg.planning.parkRatio = requireFinite('planning.parkRatio', cfg.planning.parkRatio, 0, 0.25);
 
   return cfg;
 }
