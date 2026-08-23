@@ -294,7 +294,8 @@ export class RailNetworkPlan {
       if (len > 1) { tx = dx / len; tz = dz / len; break; }
     }
     const nx = -tz, nz = tx;
-    const side = ((station.id + station.lineIds[0]) & 1) === 0 ? 1 : -1;
+    const firstLineId = station.lineIds[0] ?? 0;
+    const side = ((station.id + firstLineId) & 1) === 0 ? 1 : -1;
     const candidate = (sign: number): RailPoint => ({
       x: clamp(base.x + tx * 18 + nx * 64 * sign, 24, this.sizeMeters - 24),
       z: clamp(base.z + tz * 18 + nz * 64 * sign, 24, this.sizeMeters - 24),
