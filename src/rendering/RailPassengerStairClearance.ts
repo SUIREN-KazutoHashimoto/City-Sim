@@ -10,7 +10,6 @@ type Level = { y: number; lineIds: number[] };
 type PlatformSpec = {
   stationId: number;
   lineId: number;
-  stationIndex: number;
   smooth: AnySmooth;
   offset: number;
   centerD: number;
@@ -104,7 +103,6 @@ function specForOffset(self: AnyRail, stationId: number, lineId: number, offset:
   return {
     stationId,
     lineId,
-    stationIndex,
     smooth,
     offset,
     centerD,
@@ -133,15 +131,6 @@ function specForDirection(self: AnyRail, stationId: number, lineId: number, dire
     : specs.reduce((best, item) => item.offset > best.offset ? item : best);
 }
 
-function pointAlong(spec: PlatformSpec, along: number, y = spec.y): RailPassengerPoint3D | null {
-  const d = THREE.MathUtils.clamp(spec.centerD + along, 0, spec.smooth.length as number);
-  const p = (RailRenderer.prototype as unknown as AnyRail).offsetPoint;
-  void p;
-  const sample = (spec as AnyRail).__self?.offsetPoint;
-  void sample;
-  return null;
-}
-
 function platformPoint(self: AnyRail, spec: PlatformSpec, along: number, y = spec.y): RailPassengerPoint3D | null {
   const d = THREE.MathUtils.clamp(spec.centerD + along, 0, spec.smooth.length as number);
   const p = self.offsetPoint(spec.smooth, d, spec.offset) as { x: number; z: number; heading: number } | null;
@@ -152,7 +141,7 @@ function cross(ax: number, az: number, bx: number, bz: number): number {
   return ax * bz - az * bx;
 }
 
-function connectionBetween(self: AnyRail, lower: PlatformSpec, upper: PlatformSpec): StairConnection | null {
+function connectionBetween(lower: PlatformSpec, upper: PlatformSpec): StairConnection | null {
   const ax = Math.cos(lower.heading), az = Math.sin(lower.heading);
   const bx = Math.cos(upper.heading), bz = Math.sin(upper.heading);
   const rx = upper.x - lower.x, rz = upper.z - lower.z;
@@ -176,9 +165,7 @@ function connectionBetween(self: AnyRail, lower: PlatformSpec, upper: PlatformSp
     const nx = -az, nz = ax;
     const separation = Math.abs(rx * nx + rz * nz);
     if (separation > 2.2) return null;
-    lowerAlong = rx * ax + rz * az;
-    const limitLower = Math.max(5, lower.length * 0.32);
-    if (Math.abs(lowerAlong) > limitLower) lowerAlong = THREE.MathUtils.clamp(lowerAlong, -limitLower, limitLower);
+    lowerAlong = THREE.MathUtils.clamp(rx * ax + rz * az, -lower.length * 0.32, lower.length * 0.32);
     ix = lower.x + ax * lowerAlong * 0.5;
     iz = lower.z + az * lowerAlong * 0.5;
     upperAlong = (ix - upper.x) * bx + (iz - upper.z) * bz;
@@ -188,16 +175,8 @@ function connectionBetween(self: AnyRail, lower: PlatformSpec, upper: PlatformSp
   const upperRoom = Math.max(1.35, upper.length * 0.43 - Math.abs(upperAlong));
   const lowerRun = Math.min(STAIR_HALF_RUN, lowerRoom);
   const upperRun = Math.min(STAIR_HALF_RUN, upperRoom);
-  const lowerStart = {
-    x: ix - ax * lowerRun,
-    y: lower.y,
-    z: iz - az * lowerRun,
-  };
-  const upperEnd = {
-    x: ix + bx * upperRun,
-    y: upper.y,
-    z: iz + bz * upperRun,
-  };
+  const lowerStart = { x: ix - ax * lowerRun, y: lower.y, z: iz - az * lowerRun };
+  const upperEnd = { x: ix + bx * upperRun, y: upper.y, z: iz + bz * upperRun };
   const mid = { x: ix, y: (lower.y + upper.y) * 0.5, z: iz };
   const score = Math.hypot(ix - (lower.x + upper.x) * 0.5, iz - (lower.z + upper.z) * 0.5)
     + (Math.sign(lower.offset) === Math.sign(upper.offset) ? 0 : 3.0);
@@ -209,9 +188,9 @@ function bestConnection(self: AnyRail, stationId: number, lowerLevel: Level, upp
   const preferredSide = Math.sign(upper.offset) || 1;
   for (const lineId of lowerLevel.lineIds) {
     const candidates = specsForLine(self, stationId, lineId)
-      .sort((a, b) => (Math.sign(a.offset) === preferredSide ? -1 : 1) - (Math.sign(b.offset) === preferredSide ? -1 : 1));
+      .sort((a, b) => Number(Math.sign(b.offset) === preferredSide) - Number(Math.sign(a.offset) === preferredSide));
     for (const lower of candidates) {
-      const candidate = connectionBetween(self, lower, upper);
+      const candidate = connectionBetween(lower, upper);
       if (candidate && (!best || candidate.score < best.score)) best = candidate;
     }
   }
@@ -226,7 +205,7 @@ function connectionChain(self: AnyRail, stationId: number, target: PlatformSpec)
   let upper = target;
   while (levelIndex > 0) {
     const connection = bestConnection(self, stationId, levels[levelIndex - 1], upper);
-    if (!connection) break;
+    if (!connection) return [];
     reversed.push(connection);
     upper = connection.lower;
     levelIndex--;
@@ -236,8 +215,6 @@ function connectionChain(self: AnyRail, stationId: number, target: PlatformSpec)
 
 function groundEntrance(self: AnyRail, spec: PlatformSpec, near: RailPassengerPoint3D): RailPassengerPoint3D | null {
   const side = spec.offset >= 0 ? 1 : -1;
-  const center = self.sampleSmooth(spec.smooth, spec.centerD) as { x: number; z: number; heading: number } | null;
-  if (!center) return null;
   const roadHalf = self.roadHalfWidthAt(near.x, near.z, spec.heading) as number;
   const outerAbs = Math.max(Math.abs(spec.offset) + 4.0, roadHalf + 3.4);
   const outer = self.offsetPoint(spec.smooth, spec.centerD, side * outerAbs) as { x: number; z: number; heading: number } | null;
@@ -259,10 +236,14 @@ function addFlight(self: AnyRail, from: RailPassengerPoint3D, to: RailPassengerP
   const depth = Math.max(0.46, horizontal / Math.max(1, steps - 1) * 1.10);
   for (let i = 0; i < steps; i++) {
     const t = steps <= 1 ? 1 : i / (steps - 1);
-    const x = THREE.MathUtils.lerp(from.x, to.x, t);
-    const y = THREE.MathUtils.lerp(from.y, to.y, t);
-    const z = THREE.MathUtils.lerp(from.z, to.z, t);
-    stairs.push({ matrix: self.matrix(x, y - 0.09, z, depth, 0.18, 1.45, -heading) });
+    stairs.push({
+      matrix: self.matrix(
+        THREE.MathUtils.lerp(from.x, to.x, t),
+        THREE.MathUtils.lerp(from.y, to.y, t) - 0.09,
+        THREE.MathUtils.lerp(from.z, to.z, t),
+        depth, 0.18, 1.45, -heading,
+      ),
+    });
   }
 }
 
@@ -290,39 +271,24 @@ function markOnce(stairs: StaticPart[], key: string): boolean {
   return true;
 }
 
-function fallbackSafeConnection(self: AnyRail, lower: PlatformSpec, upper: PlatformSpec): StairConnection {
-  const lowerPoint = platformPoint(self, lower, 0) ?? { x: lower.x, y: lower.y, z: lower.z };
-  const upperPoint = platformPoint(self, upper, 0) ?? { x: upper.x, y: upper.y, z: upper.z };
-  const ax = Math.cos(lower.heading), az = Math.sin(lower.heading);
-  const bx = Math.cos(upper.heading), bz = Math.sin(upper.heading);
-  const lowerStart = { x: lowerPoint.x - ax * 2.2, y: lower.y, z: lowerPoint.z - az * 2.2 };
-  const upperEnd = { x: upperPoint.x + bx * 2.2, y: upper.y, z: upperPoint.z + bz * 2.2 };
-  const mid = {
-    x: (lowerPoint.x + upperPoint.x) * 0.5,
-    y: (lower.y + upper.y) * 0.5,
-    z: (lowerPoint.z + upperPoint.z) * 0.5,
-  };
-  return { lower, upper, lowerStart, mid, upperEnd, score: 999 };
-}
-
 proto.buildPlatformAccess = function trainClearPlatformAccess(
   this: AnyRail,
   smooth: AnySmooth,
   distance: number,
   offset: number,
-  direction: -1 | 1,
-  y: number,
+  _direction: -1 | 1,
+  _y: number,
   stairs: StaticPart[],
 ): void {
   const stationIndex = nearestStationIndex(this, smooth, distance);
   if (stationIndex < 0) {
-    previousBuildPlatformAccess.call(this, smooth, distance, offset, direction, y, stairs);
+    previousBuildPlatformAccess.call(this, smooth, distance, offset, _direction, _y, stairs);
     return;
   }
   const stationId = smooth.line.stationIds[stationIndex];
   const levels = stationLevels(this, stationId);
   if (levels.length <= 1) {
-    previousBuildPlatformAccess.call(this, smooth, distance, offset, direction, y, stairs);
+    previousBuildPlatformAccess.call(this, smooth, distance, offset, _direction, _y, stairs);
     return;
   }
 
@@ -360,10 +326,9 @@ proto.passengerStationAccesses = function trainClearPassengerAccesses(
   if (!target) return [];
   const targetLevel = levels.findIndex((level) => level.lineIds.includes(lineId));
   const wait = platformPoint(this, target, 0) ?? { x: target.x, y: target.y, z: target.z };
-  const chain = connectionChain(this, stationId, target);
   const length = target.length;
 
-  if (targetLevel <= 0 || !chain.length) {
+  if (targetLevel <= 0) {
     const platform = platformPoint(this, target, -3.0) ?? wait;
     const entrance = groundEntrance(this, target, platform);
     if (!entrance) return [];
@@ -378,9 +343,12 @@ proto.passengerStationAccesses = function trainClearPassengerAccesses(
     }];
   }
 
+  const chain = connectionChain(this, stationId, target);
+  if (chain.length !== targetLevel) return [];
   const first = chain[0];
   const entrance = groundEntrance(this, first.lower, first.lowerStart);
   if (!entrance) return [];
+
   if (chain.length === 1) {
     return [{
       stationId, lineId, direction, heading: target.heading,
