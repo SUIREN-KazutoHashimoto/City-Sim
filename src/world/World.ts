@@ -4,6 +4,7 @@ import { AgentStore, AgentState, Occupation } from '../agents/AgentStore';
 import { NeedSystem } from '../agents/NeedSystem';
 import { UtilityBrain } from '../agents/UtilityBrain';
 import { AgentWorkerPool } from '../simulation/AgentWorkerPool';
+import { POISearchWorkerPool, POIBestQuery } from '../simulation/POISearchWorkerPool';
 import { CityGenerator, CityConfig } from '../generation/CityGenerator';
 import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
 import { TrafficSystem } from '../traffic/TrafficSystem';
@@ -23,7 +24,7 @@ export class World {
   readonly bus: BusSystem; readonly logistics: LogisticsSystem;
   private readonly grid = new SpatialHashGrid(8);
   private readonly needs = new NeedSystem(); private readonly brain: UtilityBrain; private readonly walkAstar: AStar;
-  private readonly agentWorkers: AgentWorkerPool;
+  private readonly agentWorkers: AgentWorkerPool; private readonly poiWorkers: POISearchWorkerPool;
   private walkPaths: Int32Array[]; private rng = makeRng(999);
   driveThreshold = 180; private decideCursor = 0;
   private pedBlock: Uint8Array; private vehBlock!: Uint8Array;
@@ -32,6 +33,7 @@ export class World {
     this.store = new AgentStore(agentCapacity); this.vehicles = new VehicleStore(vehicleCapacity);
     this.agentWorkers = new AgentWorkerPool(this.store);
     this.city = new CityGenerator(cityCfg); this.city.generate();
+    this.poiWorkers = new POISearchWorkerPool(this.city.poi);
     this.brain = new UtilityBrain(this.city.poi);
     this.signals = new SignalSystem(this.city.net, cityCfg.seed ^ 0x51ed);
     this.traffic = new TrafficSystem(this.city.net, this.vehicles, this.signals);
@@ -45,7 +47,9 @@ export class World {
     this.traffic.pedBlockedFn = (node: number) => this.pedBlock[node] === 1;
   }
 
-  get simulationWorkerCount(): number { return this.agentWorkers.workerCount; }
+  get simulationWorkerCount(): number { return this.agentWorkers.workerCount + this.poiWorkers.workerCount; }
+  get agentWorkerCount(): number { return this.agentWorkers.workerCount; }
+  get poiWorkerCount(): number { return this.poiWorkers.workerCount; }
   get sharedAgentMemory(): boolean { return this.store.sharedMemory; }
 
   private assignOccupation(): { occ: Occupation; start: number; end: number } {
@@ -106,38 +110,26 @@ export class World {
     }
   }
 
-  /** 従来互換の同期step。Workerが使えない環境でも動作する。 */
-  step(dtSec: number): void { this.stepCore(dtSec, true, true); }
+  /** 従来互換の同期step。 */
+  step(dtSec: number): void { this.stepCore(dtSec, true, true, true); }
 
-  /**
-   * 1描画フレーム内の複数固定stepをまとめる。
-   * Needs + 既存Engaged活動回復はWorker Poolへ一括し、残りの依存系システムは順序保証のためCoordinatorで実行する。
-   */
+  /** AgentのNeed/ActivityとPOI検索を並列化し、依存系システムはCoordinatorで順序実行する。 */
   async stepBatchAsync(dtSec: number, steps: number): Promise<void> {
     if (steps <= 0) return;
-    if (!this.agentWorkers.active) {
-      for (let i = 0; i < steps; i++) this.stepCore(dtSec, true, true);
-      return;
-    }
-
+    const agentParallel = this.agentWorkers.active, poiParallel = this.poiWorkers.active;
     const totalDt = dtSec * steps, now = this.clock.totalSeconds;
-    await this.agentWorkers.updateAgentBatch(totalDt, now, this.store.count);
-    for (let i = 0; i < steps; i++) this.stepCore(dtSec, false, false);
-    this.processParallelActivityExits(now);
+    if (agentParallel) await this.agentWorkers.updateAgentBatch(totalDt, now, this.store.count);
+    for (let i = 0; i < steps; i++) {
+      if (poiParallel) await this.decideAgentsAsync();
+      this.stepCore(dtSec, !agentParallel, !agentParallel, !poiParallel);
+    }
+    if (agentParallel) this.processParallelActivityExits(now);
   }
 
-  private stepCore(dtSec: number, updateNeeds: boolean, updateActivities: boolean): void {
+  private stepCore(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): void {
     const s = this.store; const now = this.clock.totalSeconds;
     this.signals.update(dtSec); if (updateNeeds) this.needs.update(s, dtSec);
-    const budget = Math.min(s.count, 512);
-    for (let k = 0; k < budget; k++) {
-      const i = (this.decideCursor + k) % s.count;
-      if (s.state[i] === AgentState.Idle && now >= s.nextDecideAt[i]) {
-        this.brain.decide(s, i, this.clock);
-        if (s.state[i] === AgentState.Idle) s.nextDecideAt[i] = now + 600 + this.rng() * 1200;
-      }
-    }
-    this.decideCursor = (this.decideCursor + budget) % Math.max(1, s.count);
+    if (updateDecisions) this.decideAgentsSync();
     for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Routing) this.beginTrip(i);
     this.computePedBlocks(); this.traffic.update(dtSec);
     this.bus.update(dtSec, (agent: number, stop: { x: number; z: number }) => this.onBusAlight(agent, stop), (stop: { id: number }, routeId: number, freeSeats: number) => this.collectBoarders(stop, routeId, freeSeats));
@@ -149,6 +141,43 @@ export class World {
     }
     this.handleArrivedVehicles();
     if (updateActivities) for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Engaged) this.activity(i, now, dtSec);
+  }
+
+  private decideAgentsSync(): void {
+    const s = this.store, now = this.clock.totalSeconds, budget = Math.min(s.count, 512);
+    for (let k = 0; k < budget; k++) {
+      const i = (this.decideCursor + k) % s.count;
+      if (s.state[i] === AgentState.Idle && now >= s.nextDecideAt[i]) {
+        this.brain.decide(s, i, this.clock);
+        if (s.state[i] === AgentState.Idle) this.deferDecision(i, now);
+      }
+    }
+    this.decideCursor = (this.decideCursor + budget) % Math.max(1, s.count);
+  }
+
+  private async decideAgentsAsync(): Promise<void> {
+    const s = this.store, now = this.clock.totalSeconds, budget = Math.min(s.count, 512);
+    const agents: number[] = [], queries: POIBestQuery[] = [];
+    for (let k = 0; k < budget; k++) {
+      const i = (this.decideCursor + k) % s.count;
+      if (s.state[i] !== AgentState.Idle || now < s.nextDecideAt[i]) continue;
+      const plan = this.brain.plan(s, i, this.clock);
+      if (!plan) { this.deferDecision(i, now); continue; }
+      if (plan.directTarget >= 0) {
+        if (!this.brain.applyTarget(s, i, plan.directTarget)) this.deferDecision(i, now);
+        continue;
+      }
+      agents.push(i); queries.push({ category: plan.category, x: s.posX[i], z: s.posZ[i], wealth: s.wealth[i] });
+    }
+    if (queries.length > 0) {
+      const results = await this.poiWorkers.findBestBatch(queries);
+      for (let q = 0; q < results.length; q++) if (!this.brain.applyTarget(s, agents[q], results[q])) this.deferDecision(agents[q], now);
+    }
+    this.decideCursor = (this.decideCursor + budget) % Math.max(1, s.count);
+  }
+
+  private deferDecision(i: number, now: number): void {
+    this.store.state[i] = AgentState.Idle; this.store.nextDecideAt[i] = now + 600 + this.rng() * 1200;
   }
 
   private processParallelActivityExits(now: number): void {
