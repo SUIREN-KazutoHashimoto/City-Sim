@@ -5,6 +5,7 @@ import { FirstPersonController } from './rendering/FirstPersonController';
 import { Inspector } from './rendering/Inspector';
 import { Dashboard } from './rendering/Dashboard';
 import { PerformanceMonitor, type RenderProfileSample } from './rendering/PerformanceMonitor';
+import { buildAlignedBusStops } from './rendering/BusStopRenderer';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
 
 async function bootstrap(): Promise<void> {
@@ -59,7 +60,8 @@ async function bootstrap(): Promise<void> {
   gfx.buildSignals(world.city.net, world.signals);
   gfx.buildCrosswalks(world.city.net, world.signals);
   gfx.buildStopLines(world.city.net, world.signals);
-  gfx.buildBusStops(world.bus.stops);
+  // EnhancedRendererの旧固定方向バス停は使わず、道路heading/side対応Rendererを使用する。
+  buildAlignedBusStops(scene, world.bus.stops);
   gfx.buildGates(world.city.gateNodes.map((n) => ({ x: world.city.net.nodes[n].x, z: world.city.net.nodes[n].z })));
   gfx.updateLod(camera.position, true);
 
@@ -77,7 +79,11 @@ async function bootstrap(): Promise<void> {
   const dashboard = new Dashboard(world, world.clock);
   const performanceMonitor = new PerformanceMonitor(world, renderer);
   let paused = false;
-  window.addEventListener('keydown', (e) => { if (e.code === 'Tab') { e.preventDefault(); paused = !paused; } if (e.code === 'Space') e.preventDefault(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Tab') { e.preventDefault(); paused = !paused; }
+    if (e.code === 'Space') e.preventDefault();
+    if (e.code === 'KeyV') controller.toggleVehicleView();
+  });
 
   const hud = document.getElementById('hud')!; const clockEl = document.getElementById('clock')!;
   let fps = 60, lastStats = 0; const st = world.stats();
@@ -123,7 +129,7 @@ async function bootstrap(): Promise<void> {
     const dt = (now - prev) / 1000; prev = now; fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
     if (!paused) { pendingReal = Math.min(0.5, pendingReal + Math.min(dt, 0.1)); void runSimulationBatch(); }
 
-    controller.setFollowTarget(inspector.getFollowPosition()); controller.update(dt); inspector.update(); dashboard.draw();
+    controller.setFollowTarget(inspector.getFollowTarget()); controller.update(dt); inspector.update(); dashboard.draw();
 
     const renderStarted = performance.now();
     let mark = renderStarted;
@@ -142,7 +148,8 @@ async function bootstrap(): Promise<void> {
     if (now - lastStats > 250) {
       lastStats = now; const dv = world.stats();
       const threadText = world.simulationWorkerCount > 0 ? `${world.simulationWorkerCount} workers/SAB` : 'single-thread fallback';
-      hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${controller.isFollowing ? `追跡中 dist ${controller.followDistance.toFixed(0)}m` : `speed ${controller.moveSpeed.toFixed(0)} m/s`}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  release LMB=inspect  MMB=人/車を追跡]`;
+      const followText = controller.isFollowing ? (controller.isVehicleFirstPerson ? `追跡中 車両固定一人称` : `追跡中 dist ${controller.followDistance.toFixed(0)}m`) : `speed ${controller.moveSpeed.toFixed(0)} m/s`;
+      hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=vehicle view  MMB=人/車を追跡]`;
     }
     requestAnimationFrame(frame);
   }
