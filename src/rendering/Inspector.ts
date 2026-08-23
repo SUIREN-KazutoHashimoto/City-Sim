@@ -77,7 +77,7 @@ export class Inspector {
     if (this.followKind === 'train') {
       const snap = this.rail.trainStatus(this.followId);
       if (!snap) { this.followKind = 'none'; this.followId = -1; return null; }
-      this.followPos.set(snap.x, RailRenderer.TRACK_Y, snap.z);
+      this.followPos.set(snap.x, snap.y, snap.z);
       this.followTarget.kind = 'train'; this.followTarget.id = snap.id; this.followTarget.heading = snap.heading;
       this.followTarget.length = snap.consistLength; this.followTarget.firstPersonHeight = 2.45; this.followTarget.firstPersonForwardOffset = snap.firstPersonForwardOffset;
       return this.followTarget;
