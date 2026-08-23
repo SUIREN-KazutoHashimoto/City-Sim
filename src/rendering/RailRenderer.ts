@@ -24,10 +24,8 @@ interface TrainRun {
   speed: number;
   /** 運行上の編成中心距離。 */
   distance: number;
-  /** 描画専用距離。SIM batchとは独立してフレーム間を連続移動する。 */
+  /** 表示用の編成中心距離。全車両はこの1値から台車poseを再計算する。 */
   visualDistance: number;
-  /** 描画専用の実時間速度(m / real-sec)。 */
-  visualVelocity: number;
   currentStationIndex: number;
   originStationIndex: number;
   nextStationIndex: number;
@@ -75,7 +73,7 @@ export interface TrainStatusSnapshot {
  * City Generator v2 Phase 4.6 railway renderer + lightweight operations.
  *
  * - short articulated cars: every car uses front/rear bogie points on the actual track;
- * - render prediction hides asynchronous SIM batch jumps without the old catch-up pulse;
+ * - one first-order filter is applied to consist progress, then every car is rebuilt from that progress;
  * - local trains use passing loops, rapid trains keep the through track and overtake at stations;
  * - railway block signals are rendered and updated from occupancy;
  * - station platforms follow curves and station access lands outside the roadway.
@@ -103,8 +101,6 @@ export class RailRenderer {
   private trainStripe: THREE.InstancedMesh | null = null;
   private signalLamp: THREE.InstancedMesh | null = null;
   private lastSimSeconds = Number.NaN;
-  private wallSinceSimAdvance = 0;
-  private simRateEstimate = 1;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -144,35 +140,27 @@ export class RailRenderer {
   }
 
   /**
-   * WorldのSIMは非同期batchで進むためsimSeconds自体は階段状になる。
-   * 正のSIM更新から倍率を推定し、次batchまで現在速度で予測走行する。
-   * snapshot到着時はPD補正で誤差だけを吸収するので、旧式の「止まる→追い付く」周期を作らない。
+   * 運行状態はWorldのSIM時刻で進める。
+   * 表示はVehicleVisualSmootherと同じ一次指数補間を線路上距離へ1回だけ適用する。
+   * 速度項やPD制御を持たないためオーバーシュートせず、全車両の連結間隔も維持される。
    */
   update(simSeconds: number, realDt = 1 / 60): void {
     if (!this.trainBody || !this.trainCabin || !this.trainStripe || this.trainRuns.length === 0) return;
-    const renderDt = THREE.MathUtils.clamp(realDt, 1 / 240, 0.1);
+    const renderDt = THREE.MathUtils.clamp(realDt, 0, 0.1);
 
     if (!Number.isFinite(this.lastSimSeconds)) {
       this.lastSimSeconds = simSeconds;
-      this.wallSinceSimAdvance = 0;
+      for (const run of this.trainRuns) run.visualDistance = run.distance;
       this.updateTrainMeshes(); this.updateSignals();
       return;
     }
 
-    this.wallSinceSimAdvance += renderDt;
     let simAdvance = simSeconds - this.lastSimSeconds;
     this.lastSimSeconds = simSeconds;
     if (simAdvance < 0) simAdvance = 0;
     simAdvance = Math.min(simAdvance, 300);
 
     if (simAdvance > 1e-5) {
-      const observedRate = simAdvance / Math.max(renderDt, this.wallSinceSimAdvance);
-      if (Number.isFinite(observedRate) && observedRate > 0.01) {
-        const ratio = observedRate / Math.max(0.01, this.simRateEstimate);
-        if (ratio > 3.0 || ratio < 0.34) this.simRateEstimate = observedRate;
-        else this.simRateEstimate += (observedRate - this.simRateEstimate) * 0.34;
-      }
-      this.wallSinceSimAdvance = 0;
       let remaining = simAdvance;
       while (remaining > 1e-4) {
         const dt = Math.min(0.35, remaining);
@@ -181,33 +169,13 @@ export class RailRenderer {
       }
     }
 
+    const alpha = 1 - Math.exp(-renderDt * 9);
     for (const run of this.trainRuns) {
       const smooth = this.smoothLines.get(run.lineId); if (!smooth) continue;
-      const moving = run.state === 'running' && run.speed > 0.01;
-      const desiredVelocity = moving ? run.direction * run.speed * this.simRateEstimate : 0;
-      // 最新snapshotから少し先を予測。次batch到着前でも毎frame前進できる。
-      const predictionLead = Math.min(this.wallSinceSimAdvance, 0.36);
-      const predictedDistance = THREE.MathUtils.clamp(
-        run.distance + desiredVelocity * predictionLead,
-        0,
-        smooth.length,
-      );
-
-      // moving targetに対する臨界減衰に近いPD制御。位置だけdampするより速度脈動が出にくい。
-      const omega = 8.5;
-      const error = predictedDistance - run.visualDistance;
-      const accel = error * omega * omega + (desiredVelocity - run.visualVelocity) * (2 * omega);
-      run.visualVelocity += accel * renderDt;
-      const velocityLimit = Math.max(90, Math.abs(desiredVelocity) * 1.65 + 60);
-      run.visualVelocity = THREE.MathUtils.clamp(run.visualVelocity, -velocityLimit, velocityLimit);
-      run.visualDistance += run.visualVelocity * renderDt;
-
-      // タブ復帰等の巨大な不連続だけは補間せず復帰する。
-      const hardError = Math.abs(run.distance - run.visualDistance);
-      if (hardError > Math.max(1200, smooth.length * 0.55)) {
-        run.visualDistance = run.distance;
-        run.visualVelocity = desiredVelocity;
-      }
+      const error = run.distance - run.visualDistance;
+      const snapDistance = Math.max(900, smooth.length * 0.45);
+      if (Math.abs(error) > snapDistance) run.visualDistance = run.distance;
+      else run.visualDistance += error * alpha;
       run.visualDistance = THREE.MathUtils.clamp(run.visualDistance, 0, smooth.length);
     }
 
@@ -652,7 +620,7 @@ export class RailRenderer {
         const run: TrainRun = {
           id, lineId: line.id, service, carCount,
           cruiseSpeed: service === 'rapid' ? 27.0 : line.kind === 'trunk' ? 21.5 : 17.0,
-          direction, speed: 0, distance: 0, visualDistance: 0, visualVelocity: 0,
+          direction, speed: 0, distance: 0, visualDistance: 0,
           currentStationIndex: stationIndex, originStationIndex: -1, nextStationIndex: -1,
           dwellRemaining: 5 + i * 3, state: 'dwell', x: 0, z: 0, heading: 0,
         };
