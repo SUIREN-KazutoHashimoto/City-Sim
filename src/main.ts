@@ -8,6 +8,7 @@ import { PerformanceMonitor, type RenderProfileSample } from './rendering/Perfor
 import { buildAlignedBusStops } from './rendering/BusStopRenderer';
 import { buildSpecialFacilityVisuals } from './rendering/SpecialFacilityRenderer';
 import { RailRenderer } from './rendering/RailRenderer';
+import { TrainLiveryOverlay } from './rendering/TrainLiveryOverlay';
 import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
 import { reserveRailStationClearance } from './generation/RailStationClearance';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
@@ -65,6 +66,7 @@ async function bootstrap(): Promise<void> {
   gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
   buildSpecialFacilityVisuals(scene, world.city.facilities, world.city.parks);
   const railRenderer = new RailRenderer(scene, rail, world.city.net); railRenderer.build();
+  const trainLivery = new TrainLiveryOverlay(scene, railRenderer);
   gfx.buildAgents(world.store.capacity);
   // Inspectorは透明proxyへraycastする。visible=falseでもRaycasterは拾えるが、
   // 動的InstancedMeshの自動boundingSphereが初回未配置状態で固定されないよう都市全体のSphereを明示する。
@@ -105,6 +107,9 @@ async function bootstrap(): Promise<void> {
   const hud = document.getElementById('hud')!; const clockEl = document.getElementById('clock')!;
   let fps = 60, lastStats = 0; const st = world.stats();
   let simBusy = false, pendingReal = 0, simMs = 0;
+  // 鉄道はWorldの非同期batch完了時刻ではなく、同じtimeScaleの連続描画時刻で進める。
+  // これにより倍速時も「止まる→追い付く」のbatch脈動を列車へ持ち込まない。
+  let railVisualSimSeconds = world.clock.totalSeconds;
 
   function clockIcon(h: number): string { if (h >= 5 && h < 7) return '🌅'; if (h >= 7 && h < 17) return '☀️'; if (h >= 17 && h < 19) return '🌇'; if (h >= 19 && h < 22) return '🌆'; return '🌙'; }
 
@@ -149,8 +154,10 @@ async function bootstrap(): Promise<void> {
     // SIM値とは別の実時間補間poseを、camera/Inspector/render/lightの間だけVehicleStoreへ適用する。
     vehicleVisuals.update(world.vehicles, dt); vehicleVisuals.apply(world.vehicles);
     try {
-      // 列車運行はSIM時刻へ追従し、描画距離だけ実時間補間する。
-      railRenderer.update(world.clock.totalSeconds, dt);
+      const renderDt = Math.min(dt, 0.1);
+      if (!paused) railVisualSimSeconds += renderDt * world.clock.timeScale;
+      railRenderer.update(railVisualSimSeconds, renderDt);
+      trainLivery.sync();
       controller.setFollowTarget(inspector.getFollowTarget()); controller.update(dt); dashboard.draw();
 
       const renderStarted = performance.now();
