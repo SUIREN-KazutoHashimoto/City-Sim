@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RailRenderer, TrainService } from './RailRenderer';
 import '../generation/RailPlanningEnhancements';
 import './RailRendererEnhancements';
+import './RailDepotPlacement';
 import './RailRightHandOperation';
 
 /**
