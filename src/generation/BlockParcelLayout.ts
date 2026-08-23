@@ -36,6 +36,14 @@ export interface LandParcel {
 }
 
 const NONE = 255;
+function roadRank(cls: number): number {
+  if (cls === RoadClass.Highway) return 0;
+  if (cls === RoadClass.Arterial) return 1;
+  if (cls === RoadClass.Collector) return 2;
+  if (cls === RoadClass.Local) return 3;
+  if (cls === RoadClass.Path) return 4;
+  return 99;
+}
 
 /**
  * Axis-aligned road network -> road-bounded blocks -> frontage parcels.
@@ -213,7 +221,7 @@ export class BlockParcelLayout {
       for (const [cls, lane] of values) {
         if (cls === NONE) continue;
         roadSegments++;
-        if (strongest === NONE || cls < strongest) strongest = cls;
+        if (strongest === NONE || roadRank(cls) < roadRank(strongest)) strongest = cls;
         lanes = Math.max(lanes, lane);
       }
       if (roadSegments > 0) frontages.push({
@@ -263,13 +271,13 @@ export class BlockParcelLayout {
   private markVertical(i: number, j: number, cls: RoadClass, lanes: number): void {
     if (j < 0 || j >= this.cols) return;
     const idx = i * this.cols + j, current = this.verticalClass[idx];
-    if (current === NONE || cls < current) this.verticalClass[idx] = cls;
+    if (current === NONE || roadRank(cls) < roadRank(current)) this.verticalClass[idx] = cls;
     this.verticalLanes[idx] = Math.max(this.verticalLanes[idx], lanes);
   }
   private markHorizontal(i: number, j: number, cls: RoadClass, lanes: number): void {
     if (i < 0 || i >= this.cols) return;
     const idx = j * this.cols + i, current = this.horizontalClass[idx];
-    if (current === NONE || cls < current) this.horizontalClass[idx] = cls;
+    if (current === NONE || roadRank(cls) < roadRank(current)) this.horizontalClass[idx] = cls;
     this.horizontalLanes[idx] = Math.max(this.horizontalLanes[idx], lanes);
   }
   private verticalRoadClass(i: number, j: number): number {
