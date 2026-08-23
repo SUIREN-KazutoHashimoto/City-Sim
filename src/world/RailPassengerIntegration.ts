@@ -1,15 +1,19 @@
+import * as THREE from 'three';
 import { AgentState, Occupation } from '../agents/AgentStore';
 import type { RailLine, RailNetworkPlan, RailStation } from '../generation/RailPlanning';
 import { VehicleState } from '../traffic/VehicleStore';
 import { POICategory } from './POI';
 import { World } from './World';
 import '../rendering/RailPassengerBridge';
+import '../rendering/RailPassengerStationAccess';
 import { EnhancedRenderer } from '../rendering/EnhancedRenderer';
 import type { RailBoardingTrainSnapshot, RailPassengerTrainPosition } from '../rendering/RailPassengerBridge';
+import type { RailPassengerPoint3D, RailPassengerStationAccess } from '../rendering/RailPassengerStationAccess';
 
 export interface RailTransitProvider {
   boardingTrains(): RailBoardingTrainSnapshot[];
   passengerTrainPosition(id: number): RailPassengerTrainPosition | null;
+  passengerStationAccesses(stationId: number, lineId: number, direction: 1 | -1): RailPassengerStationAccess[];
 }
 
 declare module './World' {
@@ -20,6 +24,9 @@ declare module './World' {
 }
 
 type AnyWorld = any;
+type RouteFinish = 'wait' | 'exit';
+type RailWalkRoute = { points: RailPassengerPoint3D[]; cursor: number; finish: RouteFinish };
+type PassengerVisual = { active: Uint8Array; y: Float32Array };
 type PassengerData = {
   provider: RailTransitProvider | null;
   boardStation: Int32Array;
@@ -28,6 +35,9 @@ type PassengerData = {
   nextLine: Int32Array;
   finalStation: Int32Array;
   train: Int32Array;
+  access: Map<number, RailPassengerStationAccess>;
+  routes: Map<number, RailWalkRoute>;
+  visual: PassengerVisual;
 };
 type RailTripPlan = {
   boardStation: number;
@@ -39,6 +49,7 @@ type RailTripPlan = {
 };
 
 const dataByWorld = new WeakMap<object, PassengerData>();
+const visualByStore = new WeakMap<object, PassengerVisual>();
 const EMPTY_PATH = new Int32Array(0);
 
 function i32(size: number): Int32Array {
@@ -49,17 +60,27 @@ function dataFor(world: AnyWorld): PassengerData {
   let data = dataByWorld.get(world);
   if (data) return data;
   const size = world.store.capacity as number;
+  const visual = { active: new Uint8Array(size), y: new Float32Array(size) };
   data = {
     provider: null,
     boardStation: i32(size), alightStation: i32(size), line: i32(size),
     nextLine: i32(size), finalStation: i32(size), train: i32(size),
+    access: new Map<number, RailPassengerStationAccess>(),
+    routes: new Map<number, RailWalkRoute>(),
+    visual,
   };
   dataByWorld.set(world, data);
+  visualByStore.set(world.store, visual);
   return data;
 }
 
 function railOf(world: AnyWorld): RailNetworkPlan { return world.city.planning.rail as RailNetworkPlan; }
 function lineById(rail: RailNetworkPlan, id: number): RailLine | undefined { return rail.lines.find((line) => line.id === id); }
+function stationById(rail: RailNetworkPlan, id: number): RailStation | null {
+  const direct = rail.stations[id];
+  if (direct?.id === id) return direct;
+  return rail.stations.find((station) => station?.id === id) ?? null;
+}
 function stationDistance(a: RailStation, b: RailStation): number { return Math.hypot(a.x - b.x, a.z - b.z); }
 
 function lineDistance(rail: RailNetworkPlan, lineId: number, aStation: number, bStation: number): number {
@@ -69,7 +90,7 @@ function lineDistance(rail: RailNetworkPlan, lineId: number, aStation: number, b
   if (a === b) return 0;
   let total = 0;
   for (let i = Math.min(a, b); i < Math.max(a, b); i++) {
-    const sa = rail.stations[line.stationIds[i]], sb = rail.stations[line.stationIds[i + 1]];
+    const sa = stationById(rail, line.stationIds[i]), sb = stationById(rail, line.stationIds[i + 1]);
     if (!sa || !sb) return Infinity;
     total += stationDistance(sa, sb);
   }
@@ -79,6 +100,7 @@ function lineDistance(rail: RailNetworkPlan, lineId: number, aStation: number, b
 function nearbyStations(rail: RailNetworkPlan, x: number, z: number): Array<{ station: RailStation; distance: number }> {
   const out: Array<{ station: RailStation; distance: number }> = [];
   for (const station of rail.stations) {
+    if (!station || !Number.isFinite(station.x) || !Number.isFinite(station.z)) continue;
     const distance = Math.hypot(station.x - x, station.z - z);
     if (distance <= 760) out.push({ station, distance });
   }
@@ -90,6 +112,13 @@ function transferStations(rail: RailNetworkPlan, firstLine: number, secondLine: 
   const a = lineById(rail, firstLine), b = lineById(rail, secondLine); if (!a || !b) return [];
   const bSet = new Set(b.stationIds);
   return a.stationIds.filter((stationId) => bSet.has(stationId));
+}
+
+function directionOnLine(rail: RailNetworkPlan, lineId: number, fromStation: number, toStation: number): 1 | -1 | null {
+  const line = lineById(rail, lineId); if (!line) return null;
+  const from = line.stationIds.indexOf(fromStation), to = line.stationIds.indexOf(toStation);
+  if (from < 0 || to < 0 || from === to) return null;
+  return to > from ? 1 : -1;
 }
 
 function chooseRailTrip(world: AnyWorld, agent: number, tripDistance: number): RailTripPlan | null {
@@ -133,26 +162,202 @@ function chooseRailTrip(world: AnyWorld, agent: number, tripDistance: number): R
   return best.seconds <= tripDistance / WALK * 0.92 ? best : null;
 }
 
+function hash01(value: number): number {
+  let x = (value ^ 0x9e3779b9) >>> 0;
+  x ^= x >>> 16; x = Math.imul(x, 0x7feb352d) >>> 0;
+  x ^= x >>> 15; x = Math.imul(x, 0x846ca68b) >>> 0;
+  x ^= x >>> 16;
+  return x / 0x100000000;
+}
+
+function individualAccess(access: RailPassengerStationAccess, agent: number): RailPassengerStationAccess {
+  const along = (hash01(agent * 1619 + access.stationId * 313 + access.lineId * 37) - 0.5) * access.waitSpan;
+  return {
+    ...access,
+    platformWait: {
+      x: access.platformWait.x + Math.cos(access.heading) * along,
+      y: access.platformWait.y,
+      z: access.platformWait.z + Math.sin(access.heading) * along,
+    },
+  };
+}
+
+function nearestAccess(
+  provider: RailTransitProvider | null,
+  stationId: number,
+  lineId: number,
+  direction: 1 | -1,
+  x: number,
+  z: number,
+  point: 'entrance' | 'concourse' | 'platformWait',
+): RailPassengerStationAccess | null {
+  if (!provider) return null;
+  const accesses = provider.passengerStationAccesses(stationId, lineId, direction);
+  let best: RailPassengerStationAccess | null = null, bestD = Infinity;
+  for (const access of accesses) {
+    const p = access[point];
+    const d = Math.hypot(p.x - x, p.z - z);
+    if (d < bestD) { bestD = d; best = access; }
+  }
+  return best;
+}
+
+function arrivalAccess(
+  provider: RailTransitProvider | null,
+  stationId: number,
+  lineId: number,
+  trainX: number,
+  trainZ: number,
+): RailPassengerStationAccess | null {
+  const a = nearestAccess(provider, stationId, lineId, 1, trainX, trainZ, 'platformWait');
+  const b = nearestAccess(provider, stationId, lineId, -1, trainX, trainZ, 'platformWait');
+  if (!a) return b;
+  if (!b) return a;
+  const da = Math.hypot(a.platformWait.x - trainX, a.platformWait.z - trainZ);
+  const db = Math.hypot(b.platformWait.x - trainX, b.platformWait.z - trainZ);
+  return da <= db ? a : b;
+}
+
 function clearPlan(data: PassengerData, agent: number): void {
   data.boardStation[agent] = -1; data.alightStation[agent] = -1; data.line[agent] = -1;
   data.nextLine[agent] = -1; data.finalStation[agent] = -1; data.train[agent] = -1;
+  data.access.delete(agent); data.routes.delete(agent);
+  data.visual.active[agent] = 0; data.visual.y[agent] = 0;
+}
+
+function beginRoute(world: AnyWorld, agent: number, points: RailPassengerPoint3D[], finish: RouteFinish): void {
+  if (points.length < 2) return;
+  const data = dataFor(world), s = world.store;
+  data.routes.set(agent, { points, cursor: 0, finish });
+  data.visual.active[agent] = 1; data.visual.y[agent] = points[0].y;
+  s.posX[agent] = points[0].x; s.posZ[agent] = points[0].z;
+  s.velX[agent] = 0; s.velZ[agent] = 0; s.pathHandle[agent] = -1; world.walkPaths[agent] = EMPTY_PATH;
+  s.state[agent] = AgentState.ToRailStation; s.waiting[agent] = 0;
+}
+
+function completeRoute(world: AnyWorld, agent: number, finish: RouteFinish): void {
+  const data = dataFor(world), s = world.store;
+  data.routes.delete(agent); s.velX[agent] = 0; s.velZ[agent] = 0;
+  if (finish === 'wait') {
+    s.state[agent] = AgentState.WaitingTrain; s.waiting[agent] = 1; data.visual.active[agent] = 1;
+    return;
+  }
+  data.visual.active[agent] = 0; data.visual.y[agent] = 0;
+  clearPlan(data, agent);
+  world.assignWalkPath(agent, s.goalX[agent], s.goalZ[agent]);
+  s.state[agent] = AgentState.Traveling; s.waiting[agent] = 0;
+}
+
+function stepRoute(world: AnyWorld, agent: number, dt: number): void {
+  const data = dataFor(world), route = data.routes.get(agent); if (!route) return;
+  const s = world.store;
+  let budget = Math.max(0, dt) * Math.max(0.9, Math.min(1.55, s.maxSpeed[agent] || 1.25));
+  while (budget > 1e-6 && route.cursor < route.points.length - 1) {
+    const target = route.points[route.cursor + 1];
+    const dx = target.x - s.posX[agent], dz = target.z - s.posZ[agent], dy = target.y - data.visual.y[agent];
+    const distance = Math.hypot(dx, dy, dz);
+    if (distance <= 0.03) {
+      s.posX[agent] = target.x; s.posZ[agent] = target.z; data.visual.y[agent] = target.y; route.cursor++; continue;
+    }
+    if (distance <= budget) {
+      s.posX[agent] = target.x; s.posZ[agent] = target.z; data.visual.y[agent] = target.y;
+      if (Math.hypot(dx, dz) > 0.01) s.heading[agent] = Math.atan2(dz, dx);
+      budget -= distance; route.cursor++; continue;
+    }
+    const t = budget / distance;
+    s.posX[agent] += dx * t; s.posZ[agent] += dz * t; data.visual.y[agent] += dy * t;
+    const horizontal = Math.hypot(dx, dz);
+    if (horizontal > 0.01) {
+      s.heading[agent] = Math.atan2(dz, dx);
+      s.velX[agent] = dx / horizontal * Math.max(0.9, s.maxSpeed[agent]);
+      s.velZ[agent] = dz / horizontal * Math.max(0.9, s.maxSpeed[agent]);
+    }
+    budget = 0;
+  }
+  if (route.cursor >= route.points.length - 1) completeRoute(world, agent, route.finish);
 }
 
 function startRailTrip(world: AnyWorld, agent: number, plan: RailTripPlan): void {
-  const data = dataFor(world), station = railOf(world).stations[plan.boardStation]; if (!station) return;
+  const data = dataFor(world), rail = railOf(world), station = stationById(rail, plan.boardStation); if (!station) return;
   data.boardStation[agent] = plan.boardStation;
   data.alightStation[agent] = plan.firstAlightStation;
   data.line[agent] = plan.firstLine;
   data.nextLine[agent] = plan.transferLine;
   data.finalStation[agent] = plan.finalStation;
   data.train[agent] = -1;
-  world.assignWalkPath(agent, station.x, station.z);
+  data.visual.active[agent] = 0; data.visual.y[agent] = 0;
+
+  const direction = directionOnLine(rail, plan.firstLine, plan.boardStation, plan.firstAlightStation);
+  const rawAccess = direction == null ? null : nearestAccess(data.provider, plan.boardStation, plan.firstLine, direction, world.store.posX[agent], world.store.posZ[agent], 'entrance');
+  if (rawAccess) {
+    const access = individualAccess(rawAccess, agent);
+    data.access.set(agent, access);
+    world.assignWalkPath(agent, access.entrance.x, access.entrance.z);
+  } else {
+    data.access.delete(agent);
+    world.assignWalkPath(agent, station.x, station.z);
+  }
   world.store.state[agent] = AgentState.ToRailStation;
+}
+
+function startExitFromPlatform(world: AnyWorld, agent: number, stop: RailBoardingTrainSnapshot): void {
+  const data = dataFor(world);
+  const raw = arrivalAccess(data.provider, stop.stationId, stop.lineId, stop.x, stop.z);
+  if (!raw) {
+    clearPlan(data, agent);
+    world.assignWalkPath(agent, world.store.goalX[agent], world.store.goalZ[agent]);
+    world.store.state[agent] = AgentState.Traveling; world.store.waiting[agent] = 0;
+    return;
+  }
+  const access = individualAccess(raw, agent);
+  data.access.set(agent, access);
+  beginRoute(world, agent, [access.platformWait, access.platformLanding, access.concourse, access.stairTop, access.entrance], 'exit');
+}
+
+function startTransferAcrossStation(world: AnyWorld, agent: number, stop: RailBoardingTrainSnapshot): void {
+  const data = dataFor(world), rail = railOf(world), nextLine = data.nextLine[agent], finalStation = data.finalStation[agent];
+  if (nextLine < 0 || finalStation < 0) { startExitFromPlatform(world, agent, stop); return; }
+  const arrivalRaw = arrivalAccess(data.provider, stop.stationId, stop.lineId, stop.x, stop.z);
+  const nextDirection = directionOnLine(rail, nextLine, stop.stationId, finalStation);
+  const departureRaw = nextDirection == null ? null : nearestAccess(
+    data.provider, stop.stationId, nextLine, nextDirection,
+    arrivalRaw?.concourse.x ?? stop.x, arrivalRaw?.concourse.z ?? stop.z, 'concourse',
+  );
+
+  data.boardStation[agent] = stop.stationId;
+  data.line[agent] = nextLine;
+  data.alightStation[agent] = finalStation;
+  data.nextLine[agent] = -1;
+
+  if (!arrivalRaw || !departureRaw) {
+    const fallback = departureRaw ? individualAccess(departureRaw, agent) : null;
+    if (fallback) {
+      data.access.set(agent, fallback);
+      world.store.posX[agent] = fallback.platformWait.x; world.store.posZ[agent] = fallback.platformWait.z;
+      data.visual.active[agent] = 1; data.visual.y[agent] = fallback.platformWait.y;
+    } else {
+      data.visual.active[agent] = 0; data.visual.y[agent] = 0;
+    }
+    world.store.state[agent] = AgentState.WaitingTrain; world.store.waiting[agent] = 1;
+    return;
+  }
+
+  const arrival = individualAccess(arrivalRaw, agent);
+  const departure = individualAccess(departureRaw, agent);
+  data.access.set(agent, departure);
+  beginRoute(world, agent, [
+    arrival.platformWait,
+    arrival.platformLanding,
+    arrival.concourse,
+    departure.concourse,
+    departure.platformLanding,
+    departure.platformWait,
+  ], 'wait');
 }
 
 function processRailPassengers(world: AnyWorld): void {
   const data = dataFor(world), provider = data.provider; if (!provider) return;
-  const rail = railOf(world), s = world.store;
+  const s = world.store;
   const docked = provider.boardingTrains();
   const byTrain = new Map<number, RailBoardingTrainSnapshot>();
   for (const train of docked) byTrain.set(train.trainId, train);
@@ -164,20 +369,9 @@ function processRailPassengers(world: AnyWorld): void {
     if (pos) { s.posX[i] = pos.x; s.posZ[i] = pos.z; s.heading[i] = pos.heading; }
     const stop = trainId >= 0 ? byTrain.get(trainId) : undefined;
     if (!stop || stop.stationId !== data.alightStation[i]) continue;
-    const station = rail.stations[stop.stationId];
-    if (station) { s.posX[i] = station.x; s.posZ[i] = station.z; }
     data.train[i] = -1;
-    if (data.nextLine[i] >= 0) {
-      data.boardStation[i] = stop.stationId;
-      data.line[i] = data.nextLine[i];
-      data.alightStation[i] = data.finalStation[i];
-      data.nextLine[i] = -1;
-      s.state[i] = AgentState.WaitingTrain; s.waiting[i] = 1;
-    } else {
-      clearPlan(data, i);
-      world.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
-      s.state[i] = AgentState.Traveling; s.waiting[i] = 0;
-    }
+    if (data.nextLine[i] >= 0) startTransferAcrossStation(world, i, stop);
+    else startExitFromPlatform(world, i, stop);
   }
 
   const occupancy = new Map<number, number>();
@@ -196,6 +390,8 @@ function processRailPassengers(world: AnyWorld): void {
       if (onboard >= train.capacity) break;
       if (s.state[agent] !== AgentState.WaitingTrain || !train.stopsAhead.includes(data.alightStation[agent])) continue;
       data.train[agent] = train.trainId;
+      data.routes.delete(agent); data.access.delete(agent);
+      data.visual.active[agent] = 0; data.visual.y[agent] = 0;
       s.state[agent] = AgentState.OnTrain; s.waiting[agent] = 0; s.velX[agent] = 0; s.velZ[agent] = 0;
       s.pathHandle[agent] = -1; world.walkPaths[agent] = EMPTY_PATH; s.posX[agent] = train.x; s.posZ[agent] = train.z;
       onboard++;
@@ -274,14 +470,25 @@ proto.beginTrip = function beginTripWithRail(this: AnyWorld, i: number): void {
 };
 
 function walkRailAgent(world: AnyWorld, i: number, dt: number): void {
-  const s = world.store, data = dataFor(world), station = railOf(world).stations[data.boardStation[i]];
-  if (!station) { clearPlan(data, i); world.assignWalkPath(i, s.goalX[i], s.goalZ[i]); s.state[i] = AgentState.Traveling; return; }
+  const data = dataFor(world), s = world.store;
+  if (data.routes.has(i)) { stepRoute(world, i, dt); return; }
+  const access = data.access.get(i);
+  const station = stationById(railOf(world), data.boardStation[i]);
+  if (!access && !station) {
+    clearPlan(data, i); world.assignWalkPath(i, s.goalX[i], s.goalZ[i]); s.state[i] = AgentState.Traveling; return;
+  }
+  const targetX = access?.entrance.x ?? station!.x, targetZ = access?.entrance.z ?? station!.z;
   const gx = s.goalX[i], gz = s.goalZ[i];
-  s.goalX[i] = station.x; s.goalZ[i] = station.z; s.state[i] = AgentState.Traveling;
+  s.goalX[i] = targetX; s.goalZ[i] = targetZ; s.state[i] = AgentState.Traveling;
   originalWalkStep.call(world, i, dt, false);
   s.goalX[i] = gx; s.goalZ[i] = gz;
   if (s.state[i] === AgentState.Engaged) {
-    s.state[i] = AgentState.WaitingTrain; s.dwellUntil[i] = 0; s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0;
+    s.dwellUntil[i] = 0; s.velX[i] = 0; s.velZ[i] = 0;
+    if (access) {
+      beginRoute(world, i, [access.entrance, access.stairTop, access.concourse, access.platformLanding, access.platformWait], 'wait');
+    } else {
+      s.state[i] = AgentState.WaitingTrain; s.waiting[i] = 1;
+    }
   } else if (s.state[i] === AgentState.Traveling) s.state[i] = AgentState.ToRailStation;
   else if (s.state[i] === AgentState.Idle) clearPlan(data, i);
 }
@@ -307,14 +514,73 @@ proto.activitySnapshot = function activitySnapshotWithRail(this: AnyWorld): Reco
   return snapshot;
 };
 
+function ensureRailPassengerMeshes(renderer: AnyWorld, capacity: number): void {
+  if (renderer.__railPassengerBody && renderer.__railPassengerCapacity >= capacity) return;
+  const scene = renderer.sceneRef as THREE.Scene | undefined; if (!scene) return;
+  if (renderer.__railPassengerBody) scene.remove(renderer.__railPassengerBody);
+  if (renderer.__railPassengerHead) scene.remove(renderer.__railPassengerHead);
+  const cap = Math.max(64, Math.pow(2, Math.ceil(Math.log2(Math.max(1, capacity)))));
+  const body = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshStandardMaterial({ color: 0x657f9d, roughness: 0.86 }),
+    cap,
+  );
+  const head = new THREE.InstancedMesh(
+    new THREE.SphereGeometry(0.23, 7, 5),
+    new THREE.MeshStandardMaterial({ color: 0xd9b08c, roughness: 0.9 }),
+    cap,
+  );
+  for (const mesh of [body, head]) {
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); mesh.frustumCulled = false; mesh.castShadow = true; scene.add(mesh);
+  }
+  renderer.__railPassengerBody = body; renderer.__railPassengerHead = head; renderer.__railPassengerCapacity = cap;
+  renderer.__railPassengerDummy = renderer.__railPassengerDummy ?? new THREE.Object3D();
+}
+
+function syncRailPassengerMeshes(renderer: AnyWorld, store: AnyWorld, visual: PassengerVisual | undefined, camera?: THREE.Vector3): void {
+  const existingBody = renderer.__railPassengerBody as THREE.InstancedMesh | undefined;
+  const existingHead = renderer.__railPassengerHead as THREE.InstancedMesh | undefined;
+  if (!visual) {
+    if (existingBody) existingBody.count = 0;
+    if (existingHead) existingHead.count = 0;
+    return;
+  }
+  let needed = 0;
+  for (let i = 0; i < store.count; i++) if (visual.active[i] && store.state[i] !== AgentState.OnTrain) needed++;
+  if (needed <= 0) {
+    if (existingBody) existingBody.count = 0;
+    if (existingHead) existingHead.count = 0;
+    return;
+  }
+  ensureRailPassengerMeshes(renderer, needed);
+  const body = renderer.__railPassengerBody as THREE.InstancedMesh | undefined;
+  const head = renderer.__railPassengerHead as THREE.InstancedMesh | undefined;
+  const d = renderer.__railPassengerDummy as THREE.Object3D | undefined;
+  if (!body || !head || !d) return;
+  let count = 0;
+  for (let i = 0; i < store.count; i++) {
+    if (!visual.active[i] || store.state[i] === AgentState.OnTrain) continue;
+    const x = store.posX[i], z = store.posZ[i], y = visual.y[i];
+    if (camera && (x - camera.x) ** 2 + (z - camera.z) ** 2 > 3_000 ** 2) continue;
+    d.position.set(x, y + 0.74, z); d.rotation.set(0, -store.heading[i], 0); d.scale.set(0.42, 1.45, 0.28); d.updateMatrix();
+    body.setMatrixAt(count, d.matrix);
+    d.position.set(x, y + 1.62, z); d.scale.set(1, 1, 1); d.updateMatrix(); head.setMatrixAt(count, d.matrix);
+    count++;
+  }
+  body.count = count; head.count = count; body.instanceMatrix.needsUpdate = true; head.instanceMatrix.needsUpdate = true;
+}
+
 const rendererProto: AnyWorld = EnhancedRenderer.prototype as any;
 const originalSyncAgents = rendererProto.syncAgents;
-rendererProto.syncAgents = function syncAgentsWithoutRailPassengers(this: EnhancedRenderer, store: any, ...args: any[]): void {
+rendererProto.syncAgents = function syncAgentsWithoutRailPassengers(this: EnhancedRenderer, store: AnyWorld, ...args: AnyWorld[]): void {
+  const visual = visualByStore.get(store);
   const moved: Array<[number, number, number]> = [];
   for (let i = 0; i < store.count; i++) {
-    if (store.state[i] !== AgentState.OnTrain) continue;
+    if (store.state[i] !== AgentState.OnTrain && !visual?.active[i]) continue;
     moved.push([i, store.posX[i], store.posZ[i]]); store.posX[i] = 1e9; store.posZ[i] = 1e9;
   }
   try { originalSyncAgents.call(this, store, ...args); }
   finally { for (const [i, x, z] of moved) { store.posX[i] = x; store.posZ[i] = z; } }
+  const camera = args[1] instanceof THREE.Vector3 ? args[1] : undefined;
+  syncRailPassengerMeshes(this as unknown as AnyWorld, store, visual, camera);
 };
