@@ -199,6 +199,7 @@ function facilityScore(city: FacilityCity, b: FacilityBuilding, type: FacilityTy
 function convertBuilding(poi: POIRegistry, b: FacilityBuilding, type: FacilityType, id: number): FacilityRecord {
   poi.disableBuildingPOIs(b.id);
   const area = Math.max(1, b.siteArea);
+  b.floors = normalizedFacilityFloors(type, b.floors, area);
   const add = (category: POICategory, capacity: number, priceTier: number, stock = 0): number => poi.add({
     category, x: b.x, z: b.z, priceTier, capacity: Math.max(1, Math.round(capacity)), buildingId: b.id,
     stock, maxStock: stock,
@@ -231,6 +232,23 @@ function convertBuilding(poi: POIRegistry, b: FacilityBuilding, type: FacilityTy
   }
   b.category = primary;
   return { id, type, buildingId: b.id, x: b.x, z: b.z, width: b.width, depth: b.depth, floors: b.floors, siteArea: b.siteArea, capacity: Math.round(capacity), frontage: b.frontage, district: b.district };
+}
+
+function normalizedFacilityFloors(type: FacilityType, current: number, siteArea: number): number {
+  const large = siteArea >= 2200;
+  switch (type) {
+    case FacilityType.School: return clamp(Math.round(current * 0.32 + (large ? 4 : 3)), 3, 5);
+    case FacilityType.Hospital: return clamp(Math.round(current * 0.45 + (large ? 7 : 5)), 6, 12);
+    case FacilityType.University: return clamp(Math.round(current * 0.32 + (large ? 5 : 4)), 4, 8);
+    case FacilityType.CityHall: return clamp(Math.round(current * 0.55 + 4), 5, 14);
+    case FacilityType.PoliceStation: return clamp(Math.round(current * 0.20 + 2), 2, 4);
+    case FacilityType.FireStation: return clamp(Math.round(current * 0.16 + 2), 2, 4);
+    case FacilityType.Mall: return clamp(Math.round(current * 0.25 + 3), 2, 6);
+    case FacilityType.Supermarket: return clamp(Math.round(current * 0.12 + 1), 1, 3);
+    case FacilityType.Hotel: return clamp(Math.round(current * 0.78 + 4), 6, 22);
+    case FacilityType.GasStation: return clamp(Math.round(current * 0.06 + 1), 1, 2);
+    case FacilityType.Stadium: return clamp(Math.round(current * 0.16 + 3), 2, 5);
+  }
 }
 
 function distSq(ax: number, az: number, bx: number, bz: number): number {
