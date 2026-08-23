@@ -7,18 +7,33 @@ type Buffers = {
   activeIds: SharedArrayBuffer; moveIds: SharedArrayBuffer;
   snapshotX: SharedArrayBuffer; snapshotZ: SharedArrayBuffer;
   cellHead: SharedArrayBuffer; nextInCell: SharedArrayBuffer;
+  usedCells: SharedArrayBuffer; control: SharedArrayBuffer; metrics: SharedArrayBuffer;
 };
-type InitMessage = { type: 'init'; cellSize: number; gridOrigin: number; gridWidth: number; buffers: Buffers };
-type IndexMessage = { type: 'index'; jobId: number; activeCount: number };
-type MoveMessage = { type: 'move'; jobId: number; begin: number; end: number; dt: number };
-type Message = InitMessage | IndexMessage | MoveMessage;
+type InitMessage = {
+  type: 'init'; workerId: number; workerCount: number;
+  cellSize: number; gridOrigin: number; gridWidth: number; buffers: Buffers;
+};
+type StepMessage = { type: 'step'; jobId: number; activeCount: number; moveCount: number; dt: number };
+type Message = InitMessage | StepMessage;
+
+const BARRIER_COUNT = 0;
+const BARRIER_EPOCH = 1;
+const USED_CELL_COUNT = 2;
+const DONE_COUNT = 3;
+const METRIC_STRIDE = 5;
+const M_PREP = 0;
+const M_INDEX = 1;
+const M_AVOID_MOVE = 2;
+const M_BARRIER = 3;
+const M_TOTAL = 4;
 
 let posX!: Float32Array, posZ!: Float32Array, velX!: Float32Array, velZ!: Float32Array;
 let heading!: Float32Array, maxSpeed!: Float32Array, energy!: Float32Array;
 let desiredX!: Float32Array, desiredZ!: Float32Array, snapshotX!: Float32Array, snapshotZ!: Float32Array;
-let activeIds!: Int32Array, moveIds!: Int32Array, cellHead!: Int32Array, nextInCell!: Int32Array;
+let activeIds!: Int32Array, moveIds!: Int32Array, cellHead!: Int32Array, nextInCell!: Int32Array, usedCells!: Int32Array;
+let control!: Int32Array, metrics!: Float32Array;
 let cellSize = 8, invCell = 1 / 8, gridOrigin = -32, gridWidth = 8;
-let usedCells = new Int32Array(0), usedCellCount = 0;
+let workerId = 0, workerCount = 1;
 
 const cellOf = (x: number, z: number): number => {
   const cx = Math.floor((x - gridOrigin) * invCell), cz = Math.floor((z - gridOrigin) * invCell);
@@ -26,18 +41,46 @@ const cellOf = (x: number, z: number): number => {
   return cz * gridWidth + cx;
 };
 
-function rebuildIndex(activeCount: number): void {
-  // Sparse clear: only reset cells that were populated in the previous step.
-  for (let i = 0; i < usedCellCount; i++) cellHead[usedCells[i]] = -1;
-  usedCellCount = 0;
+/** Worker-only barrier. Atomics.wait never blocks the browser main thread. */
+function barrier(resetUsedCellCount: boolean): void {
+  const epoch = Atomics.load(control, BARRIER_EPOCH);
+  const arrived = Atomics.add(control, BARRIER_COUNT, 1) + 1;
+  if (arrived === workerCount) {
+    if (resetUsedCellCount) Atomics.store(control, USED_CELL_COUNT, 0);
+    Atomics.store(control, BARRIER_COUNT, 0);
+    Atomics.add(control, BARRIER_EPOCH, 1);
+    Atomics.notify(control, BARRIER_EPOCH, workerCount - 1);
+    return;
+  }
+  while (Atomics.load(control, BARRIER_EPOCH) === epoch) Atomics.wait(control, BARRIER_EPOCH, epoch);
+}
 
-  for (let n = 0; n < activeCount; n++) {
-    const agent = activeIds[n], x = posX[agent], z = posZ[agent];
-    snapshotX[agent] = x; snapshotZ[agent] = z;
-    const cell = cellOf(x, z);
+function clearAndSnapshot(activeCount: number): void {
+  const previousUsed = Atomics.load(control, USED_CELL_COUNT);
+  const clearBegin = Math.floor((previousUsed * workerId) / workerCount);
+  const clearEnd = Math.floor((previousUsed * (workerId + 1)) / workerCount);
+  for (let n = clearBegin; n < clearEnd; n++) cellHead[usedCells[n]] = -1;
+
+  const begin = Math.floor((activeCount * workerId) / workerCount);
+  const end = Math.floor((activeCount * (workerId + 1)) / workerCount);
+  for (let n = begin; n < end; n++) {
+    const agent = activeIds[n];
+    snapshotX[agent] = posX[agent]; snapshotZ[agent] = posZ[agent];
+  }
+}
+
+function buildIndex(activeCount: number): void {
+  const begin = Math.floor((activeCount * workerId) / workerCount);
+  const end = Math.floor((activeCount * (workerId + 1)) / workerCount);
+  for (let n = begin; n < end; n++) {
+    const agent = activeIds[n], cell = cellOf(snapshotX[agent], snapshotZ[agent]);
     if (cell < 0) { nextInCell[agent] = -1; continue; }
-    if (cellHead[cell] === -1) usedCells[usedCellCount++] = cell;
-    nextInCell[agent] = cellHead[cell]; cellHead[cell] = agent;
+    const previous = Atomics.exchange(cellHead, cell, agent);
+    nextInCell[agent] = previous;
+    if (previous === -1) {
+      const slot = Atomics.add(control, USED_CELL_COUNT, 1);
+      if (slot < usedCells.length) usedCells[slot] = cell;
+    }
   }
 }
 
@@ -74,9 +117,59 @@ function moveRange(begin: number, end: number, dt: number): void {
   }
 }
 
+function finishStep(jobId: number, prepMs: number, indexMs: number, avoidMoveMs: number, barrierMs: number, totalMs: number): void {
+  const base = workerId * METRIC_STRIDE;
+  metrics[base + M_PREP] = prepMs;
+  metrics[base + M_INDEX] = indexMs;
+  metrics[base + M_AVOID_MOVE] = avoidMoveMs;
+  metrics[base + M_BARRIER] = barrierMs;
+  metrics[base + M_TOTAL] = totalMs;
+
+  const done = Atomics.add(control, DONE_COUNT, 1) + 1;
+  if (done !== workerCount) return;
+  Atomics.store(control, DONE_COUNT, 0);
+
+  let maxPrep = 0, maxIndex = 0, maxAvoidMove = 0, maxBarrier = 0, maxTotal = 0;
+  for (let w = 0; w < workerCount; w++) {
+    const p = w * METRIC_STRIDE;
+    maxPrep = Math.max(maxPrep, metrics[p + M_PREP]);
+    maxIndex = Math.max(maxIndex, metrics[p + M_INDEX]);
+    maxAvoidMove = Math.max(maxAvoidMove, metrics[p + M_AVOID_MOVE]);
+    maxBarrier = Math.max(maxBarrier, metrics[p + M_BARRIER]);
+    maxTotal = Math.max(maxTotal, metrics[p + M_TOTAL]);
+  }
+  postMessage({ type: 'done', jobId, timing: { prepMs: maxPrep, indexMs: maxIndex, avoidMoveMs: maxAvoidMove, barrierMs: maxBarrier, totalMs: maxTotal } });
+}
+
+function runStep(msg: StepMessage): void {
+  const totalStart = performance.now();
+
+  const prepStart = performance.now();
+  clearAndSnapshot(msg.activeCount);
+  const prepMs = performance.now() - prepStart;
+
+  let barrierMs = 0;
+  let waitStart = performance.now(); barrier(true); barrierMs += performance.now() - waitStart;
+
+  const indexStart = performance.now();
+  buildIndex(msg.activeCount);
+  const indexMs = performance.now() - indexStart;
+
+  waitStart = performance.now(); barrier(false); barrierMs += performance.now() - waitStart;
+
+  const moveBegin = Math.floor((msg.moveCount * workerId) / workerCount);
+  const moveEnd = Math.floor((msg.moveCount * (workerId + 1)) / workerCount);
+  const moveStart = performance.now();
+  moveRange(moveBegin, moveEnd, msg.dt);
+  const avoidMoveMs = performance.now() - moveStart;
+
+  finishStep(msg.jobId, prepMs, indexMs, avoidMoveMs, barrierMs, performance.now() - totalStart);
+}
+
 self.onmessage = (ev: MessageEvent<Message>) => {
   const msg = ev.data;
   if (msg.type === 'init') {
+    workerId = msg.workerId; workerCount = msg.workerCount;
     cellSize = msg.cellSize; invCell = 1 / cellSize; gridOrigin = msg.gridOrigin; gridWidth = msg.gridWidth;
     posX = new Float32Array(msg.buffers.posX); posZ = new Float32Array(msg.buffers.posZ);
     velX = new Float32Array(msg.buffers.velX); velZ = new Float32Array(msg.buffers.velZ);
@@ -85,8 +178,8 @@ self.onmessage = (ev: MessageEvent<Message>) => {
     activeIds = new Int32Array(msg.buffers.activeIds); moveIds = new Int32Array(msg.buffers.moveIds);
     snapshotX = new Float32Array(msg.buffers.snapshotX); snapshotZ = new Float32Array(msg.buffers.snapshotZ);
     cellHead = new Int32Array(msg.buffers.cellHead); nextInCell = new Int32Array(msg.buffers.nextInCell);
-    usedCells = new Int32Array(nextInCell.length); return;
+    usedCells = new Int32Array(msg.buffers.usedCells); control = new Int32Array(msg.buffers.control); metrics = new Float32Array(msg.buffers.metrics);
+    return;
   }
-  if (msg.type === 'index') { rebuildIndex(msg.activeCount); postMessage({ type: 'done', jobId: msg.jobId }); return; }
-  moveRange(msg.begin, msg.end, msg.dt); postMessage({ type: 'done', jobId: msg.jobId });
+  runStep(msg);
 };
