@@ -33,7 +33,6 @@ export class FirstPersonController {
       if (!this.dragging) return;
       if (this.followTarget && this.followFirstPerson) return;
       if (this.followTarget?.kind === 'vehicle' || this.followTarget?.kind === 'train') {
-        // heading追従orbitは通常視点と同じドラッグ感にする。
         this.followYawOffset += e.movementX * this.lookSensitivity;
         this.followPitch -= e.movementY * this.lookSensitivity;
         this.followPitch = THREE.MathUtils.clamp(this.followPitch, -0.12, 1.25);
@@ -51,11 +50,17 @@ export class FirstPersonController {
   private syncFreeAnglesFromCamera(): void {
     const e = new THREE.Euler().setFromQuaternion(this.camera.quaternion, 'YXZ'); this.pitch = e.x; this.yaw = e.y;
   }
+  private validTarget(t: CameraFollowTarget | null): t is CameraFollowTarget {
+    if (!t) return false;
+    if (!Number.isFinite(t.position.x) || !Number.isFinite(t.position.y) || !Number.isFinite(t.position.z)) return false;
+    return t.heading == null || Number.isFinite(t.heading);
+  }
 
   setPosition(x: number, y: number, z: number): void { this.camera.position.set(x, y, z); }
   get isDragging(): boolean { return this.dragging; }
 
   setFollowTarget(t: CameraFollowTarget | null): void {
+    if (t && !this.validTarget(t)) t = null;
     const wasFollowing = this.followTarget !== null;
     const key = t ? `${t.kind}:${t.id}` : '';
     if (t && key !== this.followKey) {
@@ -70,7 +75,6 @@ export class FirstPersonController {
   get isFollowingTrain(): boolean { return this.followTarget?.kind === 'train'; }
   get isFollowingAgent(): boolean { return this.followTarget?.kind === 'agent'; }
   get isFirstPerson(): boolean { return this.isFollowing && this.followFirstPerson; }
-  /** 旧HUD/API互換。 */
   get isVehicleFirstPerson(): boolean { return this.isFollowingVehicle && this.followFirstPerson; }
 
   toggleFollowView(): boolean {
@@ -79,11 +83,11 @@ export class FirstPersonController {
     return true;
   }
 
-  /** 旧API互換。現在は人・車・列車すべてを切替可能。 */
   toggleVehicleView(): boolean { return this.toggleFollowView(); }
 
   update(dt: number): void {
     if (this.followTarget) {
+      if (!this.validTarget(this.followTarget)) { this.setFollowTarget(null); return; }
       const t = this.followTarget;
       const h = t.heading ?? 0;
       if (this.followFirstPerson && t.heading != null) {
@@ -95,7 +99,6 @@ export class FirstPersonController {
           t.position.y + (t.firstPersonHeight ?? defaultHeight),
           t.position.z + Math.sin(h) * forwardOffset,
         );
-        // THREEのcamera forward(-Z)をTraffic/Rail heading(+X基準)へ合わせる。
         const cameraYaw = -h - Math.PI / 2;
         this.camera.quaternion.setFromEuler(new THREE.Euler(0, cameraYaw, 0, 'YXZ'));
         return;
