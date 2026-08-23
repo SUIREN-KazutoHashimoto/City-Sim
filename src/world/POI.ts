@@ -19,6 +19,7 @@ export class POIRegistry {
   private list: POI[] = [];
   private grids = new Map<POICategory, SpatialHashGrid>();
   private occupancyMirror: Int32Array | null = null;
+  private capacityMirror: Int32Array | null = null;
   constructor(private readonly cellSize = 200) {}
   add(p: Omit<POI, 'id' | 'occupancy' | 'stock' | 'maxStock'> & Partial<Pick<POI, 'stock' | 'maxStock'>>): number {
     const id = this.list.length;
@@ -32,16 +33,19 @@ export class POIRegistry {
   all(): POI[] { return this.list; }
   poisInBuilding(buildingId: number): POI[] { return this.list.filter((p) => p.buildingId === buildingId && p.capacity > 0); }
 
+  /** POI IDを維持したまま無効化し、Worker共有capacityにも即時反映する。 */
+  disable(id: number): void {
+    if (id < 0 || id >= this.list.length) return;
+    const p = this.list[id]; p.capacity = 0; p.occupancy = 0; p.stock = 0; p.maxStock = 0;
+    this.syncCapacity(id, 0); this.syncOccupancy(id, 0);
+  }
+
   /**
    * 建物用途を特殊施設へ差し替える際、既存POI IDを詰め直さず無効化する。
    * Parking/Agent等が保持する既存IDを壊さないため、配列から削除はしない。
    */
   disableBuildingPOIs(buildingId: number): void {
-    for (const p of this.list) {
-      if (p.buildingId !== buildingId || p.capacity <= 0) continue;
-      p.capacity = 0; p.occupancy = 0; p.stock = 0; p.maxStock = 0;
-      this.syncOccupancy(p.id, 0);
-    }
+    for (const p of this.list) if (p.buildingId === buildingId && p.capacity > 0) this.disable(p.id);
   }
 
   reserve(id: number): boolean {
@@ -76,23 +80,29 @@ export class POIRegistry {
     return bestId;
   }
 
-  /** POI Worker用の静的検索データ＋共有occupancyを作る。生成完了後に1度だけ呼ぶ。 */
+  /** POI Worker用の静的検索データ＋共有capacity/occupancyを作る。 */
   createSearchSnapshot(): POISearchSnapshot {
     const n = this.list.length;
     const shared = typeof SharedArrayBuffer !== 'undefined' && globalThis.crossOriginIsolated === true;
     const occBuffer: ArrayBufferLike = shared ? new SharedArrayBuffer(n * Int32Array.BYTES_PER_ELEMENT) : new ArrayBuffer(n * Int32Array.BYTES_PER_ELEMENT);
-    const occupancy = new Int32Array(occBuffer);
-    const x = new Float32Array(n), z = new Float32Array(n), priceTier = new Float32Array(n);
-    const capacity = new Int32Array(n), category = new Uint8Array(n);
+    const capBuffer: ArrayBufferLike = shared ? new SharedArrayBuffer(n * Int32Array.BYTES_PER_ELEMENT) : new ArrayBuffer(n * Int32Array.BYTES_PER_ELEMENT);
+    const occupancy = new Int32Array(occBuffer), capacity = new Int32Array(capBuffer);
+    const x = new Float32Array(n), z = new Float32Array(n), priceTier = new Float32Array(n), category = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
       const p = this.list[i]; x[i] = p.x; z[i] = p.z; priceTier[i] = p.priceTier; capacity[i] = p.capacity; category[i] = p.category; occupancy[i] = p.occupancy;
     }
-    this.occupancyMirror = occupancy;
+    this.occupancyMirror = occupancy; this.capacityMirror = capacity;
     return { cellSize: this.cellSize, x, z, priceTier, capacity, category, occupancy };
   }
 
   private syncOccupancy(id: number, value: number): void {
     const mirror = this.occupancyMirror; if (!mirror) return;
+    if (typeof SharedArrayBuffer !== 'undefined' && mirror.buffer instanceof SharedArrayBuffer) Atomics.store(mirror, id, value);
+    else mirror[id] = value;
+  }
+
+  private syncCapacity(id: number, value: number): void {
+    const mirror = this.capacityMirror; if (!mirror) return;
     if (typeof SharedArrayBuffer !== 'undefined' && mirror.buffer instanceof SharedArrayBuffer) Atomics.store(mirror, id, value);
     else mirror[id] = value;
   }
