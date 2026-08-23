@@ -19,16 +19,7 @@ declare module './World' {
   }
 }
 
-type AnyWorld = World & Record<string, any>;
-type RailTripPlan = {
-  boardStation: number;
-  firstAlightStation: number;
-  firstLine: number;
-  transferLine: number;
-  finalStation: number;
-  generalizedSeconds: number;
-};
-
+type AnyWorld = any;
 type PassengerData = {
   provider: RailTransitProvider | null;
   boardStation: Int32Array;
@@ -38,151 +29,117 @@ type PassengerData = {
   finalStation: Int32Array;
   train: Int32Array;
 };
+type RailTripPlan = {
+  boardStation: number;
+  firstAlightStation: number;
+  firstLine: number;
+  transferLine: number;
+  finalStation: number;
+  seconds: number;
+};
 
-const dataByWorld = new WeakMap<World, PassengerData>();
+const dataByWorld = new WeakMap<object, PassengerData>();
+const EMPTY_PATH = new Int32Array(0);
 
-function filledI32(size: number): Int32Array {
-  const out = new Int32Array(size);
-  out.fill(-1);
-  return out;
+function i32(size: number): Int32Array {
+  const out = new Int32Array(size); out.fill(-1); return out;
 }
 
-function dataFor(world: World): PassengerData {
+function dataFor(world: AnyWorld): PassengerData {
   let data = dataByWorld.get(world);
   if (data) return data;
-  const size = world.store.capacity;
+  const size = world.store.capacity as number;
   data = {
     provider: null,
-    boardStation: filledI32(size),
-    alightStation: filledI32(size),
-    line: filledI32(size),
-    nextLine: filledI32(size),
-    finalStation: filledI32(size),
-    train: filledI32(size),
+    boardStation: i32(size), alightStation: i32(size), line: i32(size),
+    nextLine: i32(size), finalStation: i32(size), train: i32(size),
   };
   dataByWorld.set(world, data);
   return data;
 }
 
-function railOf(world: AnyWorld): RailNetworkPlan {
-  return world.city.planning.rail as RailNetworkPlan;
-}
+function railOf(world: AnyWorld): RailNetworkPlan { return world.city.planning.rail as RailNetworkPlan; }
+function lineById(rail: RailNetworkPlan, id: number): RailLine | undefined { return rail.lines.find((line) => line.id === id); }
+function stationDistance(a: RailStation, b: RailStation): number { return Math.hypot(a.x - b.x, a.z - b.z); }
 
-function lineById(rail: RailNetworkPlan, id: number): RailLine | undefined {
-  return rail.lines.find((line) => line.id === id);
-}
-
-function stationDistance(a: RailStation, b: RailStation): number {
-  return Math.hypot(a.x - b.x, a.z - b.z);
-}
-
-function lineDistance(rail: RailNetworkPlan, lineId: number, fromStation: number, toStation: number): number {
-  const line = lineById(rail, lineId);
-  if (!line) return Infinity;
-  const a = line.stationIds.indexOf(fromStation), b = line.stationIds.indexOf(toStation);
-  if (a < 0 || b < 0 || a === b) return a === b ? 0 : Infinity;
-  const lo = Math.min(a, b), hi = Math.max(a, b);
-  let distance = 0;
-  for (let i = lo; i < hi; i++) {
+function lineDistance(rail: RailNetworkPlan, lineId: number, aStation: number, bStation: number): number {
+  const line = lineById(rail, lineId); if (!line) return Infinity;
+  const a = line.stationIds.indexOf(aStation), b = line.stationIds.indexOf(bStation);
+  if (a < 0 || b < 0) return Infinity;
+  if (a === b) return 0;
+  let total = 0;
+  for (let i = Math.min(a, b); i < Math.max(a, b); i++) {
     const sa = rail.stations[line.stationIds[i]], sb = rail.stations[line.stationIds[i + 1]];
     if (!sa || !sb) return Infinity;
-    distance += stationDistance(sa, sb);
+    total += stationDistance(sa, sb);
   }
-  return distance;
+  return total;
 }
 
-function nearbyStations(rail: RailNetworkPlan, x: number, z: number, radius = 760, maxCount = 6): Array<{ station: RailStation; distance: number }> {
-  const found: Array<{ station: RailStation; distance: number }> = [];
+function nearbyStations(rail: RailNetworkPlan, x: number, z: number): Array<{ station: RailStation; distance: number }> {
+  const out: Array<{ station: RailStation; distance: number }> = [];
   for (const station of rail.stations) {
     const distance = Math.hypot(station.x - x, station.z - z);
-    if (distance <= radius) found.push({ station, distance });
+    if (distance <= 760) out.push({ station, distance });
   }
-  found.sort((a, b) => a.distance - b.distance);
-  return found.slice(0, maxCount);
+  out.sort((a, b) => a.distance - b.distance);
+  return out.slice(0, 6);
 }
 
-function sharedTransfer(rail: RailNetworkPlan, firstLineId: number, secondLineId: number): number[] {
-  const first = lineById(rail, firstLineId), second = lineById(rail, secondLineId);
-  if (!first || !second) return [];
-  const secondStations = new Set(second.stationIds);
-  return first.stationIds.filter((stationId) => secondStations.has(stationId));
+function transferStations(rail: RailNetworkPlan, firstLine: number, secondLine: number): number[] {
+  const a = lineById(rail, firstLine), b = lineById(rail, secondLine); if (!a || !b) return [];
+  const bSet = new Set(b.stationIds);
+  return a.stationIds.filter((stationId) => bSet.has(stationId));
 }
 
 function chooseRailTrip(world: AnyWorld, agent: number, tripDistance: number): RailTripPlan | null {
   if (tripDistance < 520) return null;
-  const rail = railOf(world);
-  if (!rail?.stations.length || !rail.lines.length) return null;
-  const s = world.store;
+  const rail = railOf(world), s = world.store;
+  if (!rail?.stations.length) return null;
   const origins = nearbyStations(rail, s.posX[agent], s.posZ[agent]);
   const destinations = nearbyStations(rail, s.goalX[agent], s.goalZ[agent]);
   if (!origins.length || !destinations.length) return null;
 
-  const WALK_SPEED = 1.45;
-  const RAIL_SPEED = 19.0;
-  const BASE_WAIT = 105;
-  const TRANSFER_WAIT = 145;
+  const WALK = 1.45, TRAIN = 19.0, WAIT = 105, TRANSFER = 145;
   let best: RailTripPlan | null = null;
-
   for (const origin of origins) for (const destination of destinations) {
     if (origin.station.id === destination.station.id) continue;
-    const common = origin.station.lineIds.filter((id) => destination.station.lineIds.includes(id));
-    for (const lineId of common) {
-      const railDistance = lineDistance(rail, lineId, origin.station.id, destination.station.id);
-      if (!Number.isFinite(railDistance) || railDistance < 1) continue;
-      const seconds = origin.distance / WALK_SPEED + destination.distance / WALK_SPEED + railDistance / RAIL_SPEED + BASE_WAIT;
-      if (!best || seconds < best.generalizedSeconds) {
-        best = {
-          boardStation: origin.station.id,
-          firstAlightStation: destination.station.id,
-          firstLine: lineId,
-          transferLine: -1,
-          finalStation: destination.station.id,
-          generalizedSeconds: seconds,
+    for (const lineId of origin.station.lineIds) {
+      if (!destination.station.lineIds.includes(lineId)) continue;
+      const distance = lineDistance(rail, lineId, origin.station.id, destination.station.id);
+      if (!Number.isFinite(distance) || distance <= 0) continue;
+      const seconds = origin.distance / WALK + destination.distance / WALK + distance / TRAIN + WAIT;
+      if (!best || seconds < best.seconds) best = {
+        boardStation: origin.station.id, firstAlightStation: destination.station.id,
+        firstLine: lineId, transferLine: -1, finalStation: destination.station.id, seconds,
+      };
+    }
+    for (const firstLine of origin.station.lineIds) for (const secondLine of destination.station.lineIds) {
+      if (firstLine === secondLine) continue;
+      for (const transfer of transferStations(rail, firstLine, secondLine)) {
+        if (transfer === origin.station.id || transfer === destination.station.id) continue;
+        const d1 = lineDistance(rail, firstLine, origin.station.id, transfer);
+        const d2 = lineDistance(rail, secondLine, transfer, destination.station.id);
+        if (!Number.isFinite(d1) || !Number.isFinite(d2)) continue;
+        const seconds = origin.distance / WALK + destination.distance / WALK + (d1 + d2) / TRAIN + WAIT + TRANSFER;
+        if (!best || seconds < best.seconds) best = {
+          boardStation: origin.station.id, firstAlightStation: transfer,
+          firstLine, transferLine: secondLine, finalStation: destination.station.id, seconds,
         };
       }
     }
-
-    for (const firstLine of origin.station.lineIds) for (const secondLine of destination.station.lineIds) {
-      if (firstLine === secondLine) continue;
-      for (const transferStation of sharedTransfer(rail, firstLine, secondLine)) {
-        if (transferStation === origin.station.id || transferStation === destination.station.id) continue;
-        const firstDistance = lineDistance(rail, firstLine, origin.station.id, transferStation);
-        const secondDistance = lineDistance(rail, secondLine, transferStation, destination.station.id);
-        if (!Number.isFinite(firstDistance) || !Number.isFinite(secondDistance)) continue;
-        const seconds = origin.distance / WALK_SPEED + destination.distance / WALK_SPEED
-          + (firstDistance + secondDistance) / RAIL_SPEED + BASE_WAIT + TRANSFER_WAIT;
-        if (!best || seconds < best.generalizedSeconds) {
-          best = {
-            boardStation: origin.station.id,
-            firstAlightStation: transferStation,
-            firstLine,
-            transferLine: secondLine,
-            finalStation: destination.station.id,
-            generalizedSeconds: seconds,
-          };
-        }
-      }
-    }
   }
-
   if (!best) return null;
-  const walkSeconds = tripDistance / 1.45;
-  return best.generalizedSeconds <= walkSeconds * 0.92 ? best : null;
+  return best.seconds <= tripDistance / WALK * 0.92 ? best : null;
 }
 
-function clearRailPlan(data: PassengerData, agent: number): void {
-  data.boardStation[agent] = -1;
-  data.alightStation[agent] = -1;
-  data.line[agent] = -1;
-  data.nextLine[agent] = -1;
-  data.finalStation[agent] = -1;
-  data.train[agent] = -1;
+function clearPlan(data: PassengerData, agent: number): void {
+  data.boardStation[agent] = -1; data.alightStation[agent] = -1; data.line[agent] = -1;
+  data.nextLine[agent] = -1; data.finalStation[agent] = -1; data.train[agent] = -1;
 }
 
 function startRailTrip(world: AnyWorld, agent: number, plan: RailTripPlan): void {
-  const data = dataFor(world);
-  const station = railOf(world).stations[plan.boardStation];
-  if (!station) return;
+  const data = dataFor(world), station = railOf(world).stations[plan.boardStation]; if (!station) return;
   data.boardStation[agent] = plan.boardStation;
   data.alightStation[agent] = plan.firstAlightStation;
   data.line[agent] = plan.firstLine;
@@ -194,28 +151,19 @@ function startRailTrip(world: AnyWorld, agent: number, plan: RailTripPlan): void
 }
 
 function processRailPassengers(world: AnyWorld): void {
-  const data = dataFor(world);
-  const provider = data.provider;
-  if (!provider) return;
-  const rail = railOf(world);
-  const s = world.store;
+  const data = dataFor(world), provider = data.provider; if (!provider) return;
+  const rail = railOf(world), s = world.store;
   const docked = provider.boardingTrains();
-  const dockedByTrain = new Map<number, RailBoardingTrainSnapshot>();
-  for (const train of docked) dockedByTrain.set(train.trainId, train);
+  const byTrain = new Map<number, RailBoardingTrainSnapshot>();
+  for (const train of docked) byTrain.set(train.trainId, train);
 
-  // 先に降車させて席を空ける。乗換駅ではそのまま次路線のホーム待ちへ移行する。
   for (let i = 0; i < s.count; i++) {
     if (s.state[i] !== AgentState.OnTrain) continue;
     const trainId = data.train[i];
-    const position = trainId >= 0 ? provider.passengerTrainPosition(trainId) : null;
-    if (position) {
-      s.posX[i] = position.x;
-      s.posZ[i] = position.z;
-      s.heading[i] = position.heading;
-    }
-    const stop = trainId >= 0 ? dockedByTrain.get(trainId) : undefined;
+    const pos = trainId >= 0 ? provider.passengerTrainPosition(trainId) : null;
+    if (pos) { s.posX[i] = pos.x; s.posZ[i] = pos.z; s.heading[i] = pos.heading; }
+    const stop = trainId >= 0 ? byTrain.get(trainId) : undefined;
     if (!stop || stop.stationId !== data.alightStation[i]) continue;
-
     const station = rail.stations[stop.stationId];
     if (station) { s.posX[i] = station.x; s.posZ[i] = station.z; }
     data.train[i] = -1;
@@ -224,95 +172,62 @@ function processRailPassengers(world: AnyWorld): void {
       data.line[i] = data.nextLine[i];
       data.alightStation[i] = data.finalStation[i];
       data.nextLine[i] = -1;
-      s.state[i] = AgentState.WaitingTrain;
-      s.waiting[i] = 1;
-      continue;
+      s.state[i] = AgentState.WaitingTrain; s.waiting[i] = 1;
+    } else {
+      clearPlan(data, i);
+      world.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
+      s.state[i] = AgentState.Traveling; s.waiting[i] = 0;
     }
-
-    clearRailPlan(data, i);
-    world.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
-    s.state[i] = AgentState.Traveling;
-    s.waiting[i] = 0;
   }
 
   const occupancy = new Map<number, number>();
   const waiting = new Map<string, number[]>();
   for (let i = 0; i < s.count; i++) {
-    if (s.state[i] === AgentState.OnTrain && data.train[i] >= 0) {
-      occupancy.set(data.train[i], (occupancy.get(data.train[i]) ?? 0) + 1);
-    } else if (s.state[i] === AgentState.WaitingTrain && data.boardStation[i] >= 0 && data.line[i] >= 0) {
-      const key = `${data.boardStation[i]}:${data.line[i]}`;
-      const list = waiting.get(key);
-      if (list) list.push(i); else waiting.set(key, [i]);
-    }
+    if (s.state[i] === AgentState.OnTrain && data.train[i] >= 0) occupancy.set(data.train[i], (occupancy.get(data.train[i]) ?? 0) + 1);
+    if (s.state[i] !== AgentState.WaitingTrain || data.boardStation[i] < 0 || data.line[i] < 0) continue;
+    const key = `${data.boardStation[i]}:${data.line[i]}`;
+    const list = waiting.get(key); if (list) list.push(i); else waiting.set(key, [i]);
   }
 
   for (const train of docked) {
-    const list = waiting.get(`${train.stationId}:${train.lineId}`);
-    if (!list?.length) continue;
+    const list = waiting.get(`${train.stationId}:${train.lineId}`); if (!list) continue;
     let onboard = occupancy.get(train.trainId) ?? 0;
     for (const agent of list) {
       if (onboard >= train.capacity) break;
-      if (s.state[agent] !== AgentState.WaitingTrain) continue;
-      if (!train.stopsAhead.includes(data.alightStation[agent])) continue;
+      if (s.state[agent] !== AgentState.WaitingTrain || !train.stopsAhead.includes(data.alightStation[agent])) continue;
       data.train[agent] = train.trainId;
-      s.state[agent] = AgentState.OnTrain;
-      s.waiting[agent] = 0;
-      s.velX[agent] = 0;
-      s.velZ[agent] = 0;
-      s.pathHandle[agent] = -1;
-      world.walkPaths[agent] = new Int32Array(0);
-      s.posX[agent] = train.x;
-      s.posZ[agent] = train.z;
+      s.state[agent] = AgentState.OnTrain; s.waiting[agent] = 0; s.velX[agent] = 0; s.velZ[agent] = 0;
+      s.pathHandle[agent] = -1; world.walkPaths[agent] = EMPTY_PATH; s.posX[agent] = train.x; s.posZ[agent] = train.z;
       onboard++;
     }
     occupancy.set(train.trainId, onboard);
   }
 }
 
-const proto = World.prototype as unknown as AnyWorld;
-const originalPopulate = proto.populate as (count: number) => void;
-const originalBeginTrip = proto.beginTrip as (agent: number) => void;
-const originalStepBeforePed = proto.stepBeforePed as (dt: number, needs: boolean, decisions: boolean) => number;
-const originalStepCore = proto.stepCore as (dt: number, needs: boolean, activities: boolean, decisions: boolean) => void;
-const originalStepCoreAsync = proto.stepCoreAsync as (dt: number, needs: boolean, activities: boolean, decisions: boolean) => Promise<void>;
-const originalWalkStep = proto.walkStep as (agent: number, dt: number, deferMovement: boolean) => void;
-const originalComputePedBlocks = proto.computePedBlocks as () => void;
-const originalBuildTravelerIndex = proto.buildTravelerIndex as () => void;
-const originalActivitySnapshot = proto.activitySnapshot as () => Record<string, number>;
+const proto: AnyWorld = World.prototype as any;
+const originalPopulate = proto.populate;
+const originalStepBeforePed = proto.stepBeforePed;
+const originalWalkStep = proto.walkStep;
+const originalActivitySnapshot = proto.activitySnapshot;
 
-proto.attachRailTransit = function attachRailTransit(this: World, provider: RailTransitProvider): void {
-  dataFor(this).provider = provider;
-};
-
-proto.railPassengerCount = function railPassengerCount(this: World): number {
-  const s = this.store;
-  let count = 0;
-  for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.OnTrain) count++;
-  return count;
+proto.attachRailTransit = function attachRailTransit(this: AnyWorld, provider: RailTransitProvider): void { dataFor(this).provider = provider; };
+proto.railPassengerCount = function railPassengerCount(this: AnyWorld): number {
+  let count = 0; for (let i = 0; i < this.store.count; i++) if (this.store.state[i] === AgentState.OnTrain) count++; return count;
 };
 
 proto.populate = function populateWithTransitJobs(this: AnyWorld, count: number): void {
   originalPopulate.call(this, count);
-  // 旧仕様では非自動車世帯の勤務先を700m以内に制限していた。
-  // 鉄道開通後は、勤務先未割当の非自動車就業者にも遠距離勤務先を与えて公共交通需要を作る。
   const s = this.store;
   for (let i = 0; i < s.count; i++) {
     if (s.ownsCar[i] || s.workPOI[i] >= 0) continue;
     const occupation = s.occupation[i] as Occupation;
-    if (occupation === Occupation.Unemployed || occupation === Occupation.Retiree) continue;
-    const homeId = s.homePOI[i];
-    if (homeId < 0) continue;
-    const home = this.city.poi.get(homeId);
+    if (occupation === Occupation.Unemployed || occupation === Occupation.Retiree || s.homePOI[i] < 0) continue;
+    const home = this.city.poi.get(s.homePOI[i]);
     for (let attempt = 0; attempt < 6; attempt++) {
-      const x = this.rng() * this.city.sizeMeters;
-      const z = this.rng() * this.city.sizeMeters;
-      const candidate = this.city.poi.findBest(POICategory.Work, x, z, s.wealth[i]);
+      const candidate = this.city.poi.findBest(POICategory.Work, this.rng() * this.city.sizeMeters, this.rng() * this.city.sizeMeters, s.wealth[i]);
       if (candidate < 0) continue;
-      const work = this.city.poi.get(candidate);
-      if (Math.hypot(work.x - home.x, work.z - home.z) < 650) continue;
-      s.workPOI[i] = candidate;
-      break;
+      const work = this.city.poi.get(candidate); if (Math.hypot(work.x - home.x, work.z - home.z) < 650) continue;
+      s.workPOI[i] = candidate; break;
     }
   }
 };
@@ -321,145 +236,85 @@ proto.beginTrip = function beginTripWithRail(this: AnyWorld, i: number): void {
   const s = this.store;
   if (!this.reserveGoal(i)) {
     s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle;
-    s.nextDecideAt[i] = this.clock.totalSeconds + 120 + this.rng() * 300;
-    return;
+    s.nextDecideAt[i] = this.clock.totalSeconds + 120 + this.rng() * 300; return;
   }
-
   const tripDist = Math.hypot(s.goalX[i] - s.posX[i], s.goalZ[i] - s.posZ[i]);
   const far = tripDist >= this.driveThreshold || (tripDist >= 90 && s.energy[i] < 0.4);
+
   if (far && s.ownsCar[i] && s.car[i] >= 0) {
     const v = s.car[i];
     if (this.vehicles.state[v] === VehicleState.Parked) {
       const destLot = this.city.poi.findNearestFree(POICategory.Parking, s.goalX[i], s.goalZ[i]);
       if (destLot >= 0 && this.city.poi.reserve(destLot)) {
-        s.destParkPOI[i] = destLot;
-        s.destParkSlot[i] = this.city.takeSlot(destLot);
+        s.destParkPOI[i] = destLot; s.destParkSlot[i] = this.city.takeSlot(destLot);
         const dCar = Math.hypot(s.posX[i] - this.vehicles.posX[v], s.posZ[i] - this.vehicles.posZ[v]);
-        if (dCar < 25) this.startDriving(i);
-        else { this.assignWalkPath(i, this.vehicles.posX[v], this.vehicles.posZ[v]); s.state[i] = AgentState.ToVehicle; }
+        if (dCar < 25) this.startDriving(i); else { this.assignWalkPath(i, this.vehicles.posX[v], this.vehicles.posZ[v]); s.state[i] = AgentState.ToVehicle; }
         return;
       }
     }
   }
 
   if (far && dataFor(this).provider) {
-    const plan = chooseRailTrip(this, i, tripDist);
-    if (plan) { startRailTrip(this, i, plan); return; }
+    const plan = chooseRailTrip(this, i, tripDist); if (plan) { startRailTrip(this, i, plan); return; }
   }
-
   if (far) {
-    const board = this.bus.nearestStop(s.posX[i], s.posZ[i], 350);
-    const alight = this.bus.nearestStop(s.goalX[i], s.goalZ[i], 350);
+    const board = this.bus.nearestStop(s.posX[i], s.posZ[i], 350), alight = this.bus.nearestStop(s.goalX[i], s.goalZ[i], 350);
     const route = this.bus.sharedRoute(board, alight);
     if (route >= 0) {
       s.boardStop[i] = board; s.alightStop[i] = alight; s.busRoute[i] = route;
-      const bs = this.bus.stopById(board);
-      this.assignWalkPath(i, bs.x, bs.z); s.state[i] = AgentState.ToBusStop; return;
+      const bs = this.bus.stopById(board); this.assignWalkPath(i, bs.x, bs.z); s.state[i] = AgentState.ToBusStop; return;
     }
   }
-
   this.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
   if (s.pathHandle[i] <= 0 && tripDist > 300) {
-    this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255;
-    s.state[i] = AgentState.Idle; s.nextDecideAt[i] = this.clock.totalSeconds + 300 + this.rng() * 600; return;
+    this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle;
+    s.nextDecideAt[i] = this.clock.totalSeconds + 300 + this.rng() * 600; return;
   }
   s.state[i] = AgentState.Traveling;
 };
 
+function walkRailAgent(world: AnyWorld, i: number, dt: number): void {
+  const s = world.store, data = dataFor(world), station = railOf(world).stations[data.boardStation[i]];
+  if (!station) { clearPlan(data, i); world.assignWalkPath(i, s.goalX[i], s.goalZ[i]); s.state[i] = AgentState.Traveling; return; }
+  const gx = s.goalX[i], gz = s.goalZ[i];
+  s.goalX[i] = station.x; s.goalZ[i] = station.z; s.state[i] = AgentState.Traveling;
+  originalWalkStep.call(world, i, dt, false);
+  s.goalX[i] = gx; s.goalZ[i] = gz;
+  if (s.state[i] === AgentState.Engaged) {
+    s.state[i] = AgentState.WaitingTrain; s.dwellUntil[i] = 0; s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0;
+  } else if (s.state[i] === AgentState.Traveling) s.state[i] = AgentState.ToRailStation;
+  else if (s.state[i] === AgentState.Idle) clearPlan(data, i);
+}
+
 proto.stepBeforePed = function stepBeforePedWithRail(this: AnyWorld, dt: number, needs: boolean, decisions: boolean): number {
   const now = originalStepBeforePed.call(this, dt, needs, decisions);
   processRailPassengers(this);
+  for (let i = 0; i < this.store.count; i++) if (this.store.state[i] === AgentState.ToRailStation) walkRailAgent(this, i, dt);
   return now;
 };
 
-proto.stepCore = function stepCoreWithRail(this: AnyWorld, dt: number, needs: boolean, activities: boolean, decisions: boolean): void {
-  originalStepCore.call(this, dt, needs, activities, decisions);
-  const s = this.store;
-  for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.ToRailStation) this.walkStep(i, dt, false);
-};
-
-proto.stepCoreAsync = async function stepCoreAsyncWithRail(this: AnyWorld, dt: number, needs: boolean, activities: boolean, decisions: boolean): Promise<void> {
-  await originalStepCoreAsync.call(this, dt, needs, activities, decisions);
-  const s = this.store;
-  for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.ToRailStation) this.walkStep(i, dt, false);
-};
-
-proto.walkStep = function walkStepWithRail(this: AnyWorld, i: number, dt: number, deferMovement: boolean): void {
-  const s = this.store;
-  if (s.state[i] !== AgentState.ToRailStation) { originalWalkStep.call(this, i, dt, deferMovement); return; }
-  const data = dataFor(this);
-  const station = railOf(this).stations[data.boardStation[i]];
-  if (!station) {
-    clearRailPlan(data, i);
-    this.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
-    s.state[i] = AgentState.Traveling;
-    return;
-  }
-
-  const goalX = s.goalX[i], goalZ = s.goalZ[i];
-  s.goalX[i] = station.x; s.goalZ[i] = station.z; s.state[i] = AgentState.Traveling;
-  originalWalkStep.call(this, i, dt, deferMovement);
-  s.goalX[i] = goalX; s.goalZ[i] = goalZ;
-
-  if (s.state[i] === AgentState.Engaged) {
-    s.state[i] = AgentState.WaitingTrain;
-    s.dwellUntil[i] = 0;
-    s.waiting[i] = 1;
-    s.velX[i] = 0; s.velZ[i] = 0;
-  } else if (s.state[i] === AgentState.Traveling) {
-    s.state[i] = AgentState.ToRailStation;
-  } else if (s.state[i] === AgentState.Idle) {
-    clearRailPlan(data, i);
-  }
-};
-
-proto.computePedBlocks = function computePedBlocksWithRail(this: AnyWorld): void {
-  originalComputePedBlocks.call(this);
-  const s = this.store;
-  for (let i = 0; i < s.count; i++) {
-    if (s.state[i] !== AgentState.ToRailStation) continue;
-    const roadNode = this.pedCrossingRoadNode[i];
-    if (roadNode < 0) continue;
-    const rn = this.city.net.nodes[roadNode];
-    if (rn && (s.posX[i] - rn.x) ** 2 + (s.posZ[i] - rn.z) ** 2 < 16 * 16) this.pedBlock[roadNode] = 1;
-  }
-};
-
-proto.buildTravelerIndex = function buildTravelerIndexWithRail(this: AnyWorld): void {
-  originalBuildTravelerIndex.call(this);
-  if (this.workerPedStep) return;
-  const s = this.store;
-  for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.ToRailStation) this.grid.insert(i, s.posX[i], s.posZ[i]);
-};
-
 proto.activitySnapshot = function activitySnapshotWithRail(this: AnyWorld): Record<string, number> {
-  const snapshot = originalActivitySnapshot.call(this);
-  let approaching = 0, waiting = 0, onboard = 0;
-  const s = this.store;
-  for (let i = 0; i < s.count; i++) {
-    if (s.state[i] === AgentState.ToRailStation) approaching++;
-    else if (s.state[i] === AgentState.WaitingTrain) waiting++;
-    else if (s.state[i] === AgentState.OnTrain) onboard++;
+  const snapshot = originalActivitySnapshot.call(this) as Record<string, number>;
+  let moving = 0, onboard = 0;
+  for (let i = 0; i < this.store.count; i++) {
+    const state = this.store.state[i];
+    if (state === AgentState.ToRailStation || state === AgentState.WaitingTrain) moving++;
+    else if (state === AgentState.OnTrain) onboard++;
   }
-  const railMoving = approaching + waiting;
-  snapshot.idle = Math.max(0, (snapshot.idle ?? 0) - railMoving - onboard);
-  snapshot.traveling = (snapshot.traveling ?? 0) + railMoving;
+  snapshot.idle = Math.max(0, (snapshot.idle ?? 0) - moving - onboard);
+  snapshot.traveling = (snapshot.traveling ?? 0) + moving;
   snapshot.ontrain = onboard;
   return snapshot;
 };
 
-// 列車乗車中のAgent本体は地上へ描画しない。追跡用の論理座標はWorld側に保持する。
-const rendererProto = EnhancedRenderer.prototype as unknown as Record<string, any>;
-const originalSyncAgents = rendererProto.syncAgents as (...args: any[]) => void;
+const rendererProto: AnyWorld = EnhancedRenderer.prototype as any;
+const originalSyncAgents = rendererProto.syncAgents;
 rendererProto.syncAgents = function syncAgentsWithoutRailPassengers(this: EnhancedRenderer, store: any, ...args: any[]): void {
   const moved: Array<[number, number, number]> = [];
   for (let i = 0; i < store.count; i++) {
     if (store.state[i] !== AgentState.OnTrain) continue;
-    moved.push([i, store.posX[i], store.posZ[i]]);
-    store.posX[i] = 1e9; store.posZ[i] = 1e9;
+    moved.push([i, store.posX[i], store.posZ[i]]); store.posX[i] = 1e9; store.posZ[i] = 1e9;
   }
   try { originalSyncAgents.call(this, store, ...args); }
   finally { for (const [i, x, z] of moved) { store.posX[i] = x; store.posZ[i] = z; } }
 };
-
-void originalBeginTrip;
