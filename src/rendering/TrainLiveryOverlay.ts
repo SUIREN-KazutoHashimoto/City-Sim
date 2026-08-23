@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { RailRenderer, TrainService } from './RailRenderer';
+import '../generation/RailPlanningEnhancements';
 import './RailRendererEnhancements';
+import './RailRightHandOperation';
 
 /**
  * 列車の外装レイヤー。
