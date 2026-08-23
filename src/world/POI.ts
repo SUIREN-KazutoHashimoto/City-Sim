@@ -34,11 +34,11 @@ export class POIRegistry {
   reserve(id: number): boolean {
     if (id < 0 || id >= this.list.length) return false;
     const p = this.list[id]; if (p.occupancy >= p.capacity) return false;
-    p.occupancy++; if (this.occupancyMirror) this.occupancyMirror[id] = p.occupancy; return true;
+    p.occupancy++; this.syncOccupancy(id, p.occupancy); return true;
   }
   release(id: number): void {
     if (id < 0 || id >= this.list.length) return;
-    const p = this.list[id]; p.occupancy = Math.max(0, p.occupancy - 1); if (this.occupancyMirror) this.occupancyMirror[id] = p.occupancy;
+    const p = this.list[id]; p.occupancy = Math.max(0, p.occupancy - 1); this.syncOccupancy(id, p.occupancy);
   }
   hasRoom(id: number): boolean { return id >= 0 && id < this.list.length && this.list[id].occupancy < this.list[id].capacity; }
   findBest(category: POICategory, x: number, z: number, wealth: number): number {
@@ -76,5 +76,11 @@ export class POIRegistry {
     }
     this.occupancyMirror = occupancy;
     return { cellSize: this.cellSize, x, z, priceTier, capacity, category, occupancy };
+  }
+
+  private syncOccupancy(id: number, value: number): void {
+    const mirror = this.occupancyMirror; if (!mirror) return;
+    if (typeof SharedArrayBuffer !== 'undefined' && mirror.buffer instanceof SharedArrayBuffer) Atomics.store(mirror, id, value);
+    else mirror[id] = value;
   }
 }
