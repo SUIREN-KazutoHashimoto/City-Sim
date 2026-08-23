@@ -25,7 +25,6 @@ async function bootstrap(): Promise<void> {
     runtime.agentCapacity,
     runtime.vehicleCapacity,
   );
-  // TODは計画駅位置で生成時に反映済み。道路完成後に実駅位置を確定し、駅構内空地を人口生成前に確保する。
   const rail = world.city.planning.rail;
   rail.alignToRoadNetwork(world.city.net);
   const railClearance = reserveRailStationClearance(world.city, rail);
@@ -68,8 +67,6 @@ async function bootstrap(): Promise<void> {
   const railRenderer = new RailRenderer(scene, rail, world.city.net); railRenderer.build();
   const trainLivery = new TrainLiveryOverlay(scene, railRenderer);
   gfx.buildAgents(world.store.capacity);
-  // Inspectorは透明proxyへraycastする。visible=falseでもRaycasterは拾えるが、
-  // 動的InstancedMeshの自動boundingSphereが初回未配置状態で固定されないよう都市全体のSphereを明示する。
   gfx.buildings.visible = false; gfx.agents.visible = false;
   gfx.buildVehicles(world.vehicles.capacity);
   const hitSphere = new THREE.Sphere(new THREE.Vector3(SIZE / 2, 0, SIZE / 2), Math.max(SIZE * 2, 20_000));
@@ -78,7 +75,6 @@ async function bootstrap(): Promise<void> {
   gfx.buildSignals(world.city.net, world.signals);
   gfx.buildCrosswalks(world.city.net, world.signals);
   gfx.buildStopLines(world.city.net, world.signals);
-  // EnhancedRendererの旧固定方向バス停は使わず、道路heading/side対応Rendererを使用する。
   buildAlignedBusStops(scene, world.bus.stops);
   gfx.buildGates(world.city.gateNodes.map((n) => ({ x: world.city.net.nodes[n].x, z: world.city.net.nodes[n].z })));
   gfx.updateLod(camera.position, true);
@@ -107,6 +103,8 @@ async function bootstrap(): Promise<void> {
   const hud = document.getElementById('hud')!; const clockEl = document.getElementById('clock')!;
   let fps = 60, lastStats = 0; const st = world.stats();
   let simBusy = false, pendingReal = 0, simMs = 0;
+  let lastFollowLodMs = -Infinity;
+  let wasFollowingForLod = false;
 
   function clockIcon(h: number): string { if (h >= 5 && h < 7) return '🌅'; if (h >= 7 && h < 17) return '☀️'; if (h >= 17 && h < 19) return '🌇'; if (h >= 19 && h < 22) return '🌆'; return '🌙'; }
 
@@ -148,23 +146,29 @@ async function bootstrap(): Promise<void> {
     const dt = (now - prev) / 1000; prev = now; fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
     if (!paused) { pendingReal = Math.min(0.5, pendingReal + Math.min(dt, 0.1)); void runSimulationBatch(); }
 
-    // SIM値とは別の実時間補間poseを、camera/Inspector/render/lightの間だけVehicleStoreへ適用する。
     vehicleVisuals.update(world.vehicles, dt); vehicleVisuals.apply(world.vehicles);
     try {
       const renderDt = Math.min(dt, 0.1);
-      // 列車の編成距離はRailRenderer内で一次補間済み。外装と追跡はそのposeをそのまま使う。
-      railRenderer.update(world.clock.totalSeconds, renderDt);
+      railRenderer.update(renderDt, world.clock.timeScale, paused);
       trainLivery.sync(renderDt);
       const followTarget = inspector.getFollowTarget();
       controller.setFollowTarget(followTarget); controller.update(dt); dashboard.draw();
 
       const renderStarted = performance.now();
       let mark = renderStarted;
-      gfx.updateLod(camera.position); const lodMs = performance.now() - mark;
+      const followingNow = controller.isFollowing;
+      const followChanged = followingNow !== wasFollowingForLod;
+      const shouldUpdateLod = !followingNow || followChanged || now - lastFollowLodMs >= 500;
+      if (shouldUpdateLod) {
+        gfx.updateLod(camera.position, followChanged);
+        if (followingNow) lastFollowLodMs = now;
+      }
+      wasFollowingForLod = followingNow;
+      const lodMs = performance.now() - mark;
+
       mark = performance.now(); gfx.syncAgents(world.store, world.clock.totalSeconds, camera.position); const agentsMs = performance.now() - mark;
       mark = performance.now(); gfx.syncVehicles(world.vehicles, world.clock.hourF, now / 1000, camera.position); const vehiclesMs = performance.now() - mark;
 
-      // hover/追跡候補判定は、そのフレームで更新済みの動的proxyに対して行う。
       inspector.update();
 
       mark = performance.now(); gfx.syncSignals(world.signals); const signalsMs = performance.now() - mark;
@@ -185,6 +189,8 @@ async function bootstrap(): Promise<void> {
           : `speed ${controller.moveSpeed.toFixed(0)} m/s`;
         hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  列車${railRenderer.trainCount}編成  鉄道信号${railRenderer.signalCount}  信号待ち${railRenderer.waitingTrainCount}\n駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m  駅用除去 建物${railClearance.buildingsRemoved}/駐車${railClearance.parkingLotsRemoved}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=追跡一人称/三人称  MMB=人/車/列車を追跡]`;
       }
+    } catch (err) {
+      console.error('[City-Sim] render frame failed; continuing next frame', err);
     } finally {
       vehicleVisuals.restore(world.vehicles);
     }
