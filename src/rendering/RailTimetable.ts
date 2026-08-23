@@ -7,12 +7,12 @@ export type TimetableService = 'local' | 'rapid' | 'limited';
  * 閉塞信号・ポイント開通・進路可否には一切関与しない。
  */
 export class RailTimetable {
-  static readonly CYCLE_SECONDS = 90;
+  static readonly CYCLE_SECONDS = 180;
 
   /**
    * 終端駅の次回発車スロット。
-   * 同一路線では 特急→快速→普通 の順に発車時刻を散らす。
-   * 複線幹線では上下方向を時間帯で排他しない。
+   * 10駅あたり 普通5 / 快速3 / 特急1 程度の編成密度でも同一時刻に集中しないよう、
+   * 種別ごとに複数の発車スロットを持つ。
    */
   nextTerminalDeparture(
     earliest: number,
@@ -23,15 +23,17 @@ export class RailTimetable {
   ): number {
     const cycle = RailTimetable.CYCLE_SECONDS;
     const lineOffset = this.lineOffset(lineId);
-    const directionOffset = direction > 0 ? 0 : 7;
-    const serviceOffset = service === 'limited'
-      ? 2
+    const directionOffset = direction > 0 ? 0 : 9;
+    const slots = service === 'limited'
+      ? [5]
       : service === 'rapid'
-        ? 20
-        : 38 + (trainOrdinal % 2) * 16;
+        ? [24, 78, 132]
+        : [42, 66, 96, 120, 154];
+    const slot = slots[Math.abs(trainOrdinal) % slots.length];
+    const overflow = Math.floor(Math.abs(trainOrdinal) / slots.length) * 11;
     const shifted = earliest + lineOffset;
     const cycleStart = Math.floor(shifted / cycle) * cycle;
-    let target = cycleStart + directionOffset + serviceOffset - lineOffset;
+    let target = cycleStart + directionOffset + slot + overflow - lineOffset;
     if (target < earliest - 1e-6) target += cycle;
     return target;
   }
@@ -55,6 +57,6 @@ export class RailTimetable {
 
   private lineOffset(lineId: number): number {
     // 共有駅へ複数路線が同時刻に集中しすぎないよう、路線単位で発車位相をずらす。
-    return (Math.abs(lineId) * 13) % 24;
+    return (Math.abs(lineId) * 17) % 31;
   }
 }
