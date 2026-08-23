@@ -7,16 +7,27 @@ export type TimetableService = 'local' | 'rapid' | 'limited';
  * 終端では同一方向窓の中を 特急→快速→普通 の順で発車させる。
  */
 export class RailTimetable {
-  static readonly CYCLE_SECONDS = 120;
-  static readonly DIRECTION_WINDOW_SECONDS = 50;
-  static readonly OPPOSITE_START_SECONDS = 60;
-  static readonly MAX_STARVATION_SECONDS = 150;
+  static readonly CYCLE_SECONDS = 180;
+  static readonly DIRECTION_WINDOW_SECONDS = 75;
+  static readonly OPPOSITE_START_SECONDS = 90;
+  static readonly MAX_STARVATION_SECONDS = 240;
 
   directionWindowOpen(time: number, lineId: number, direction: 1 | -1): boolean {
     const phase = this.phase(time, lineId);
     if (direction > 0) return phase >= 0 && phase < RailTimetable.DIRECTION_WINDOW_SECONDS;
     return phase >= RailTimetable.OPPOSITE_START_SECONDS
       && phase < RailTimetable.OPPOSITE_START_SECONDS + RailTimetable.DIRECTION_WINDOW_SECONDS;
+  }
+
+  secondsUntilWindowClose(time: number, lineId: number, direction: 1 | -1): number {
+    const phase = this.phase(time, lineId);
+    if (direction > 0) {
+      if (phase < 0 || phase >= RailTimetable.DIRECTION_WINDOW_SECONDS) return 0;
+      return RailTimetable.DIRECTION_WINDOW_SECONDS - phase;
+    }
+    const end = RailTimetable.OPPOSITE_START_SECONDS + RailTimetable.DIRECTION_WINDOW_SECONDS;
+    if (phase < RailTimetable.OPPOSITE_START_SECONDS || phase >= end) return 0;
+    return end - phase;
   }
 
   /** 次にその方向の運転窓が始まる時刻。 */
@@ -45,7 +56,7 @@ export class RailTimetable {
     const cycle = RailTimetable.CYCLE_SECONDS;
     const lineOffset = this.lineOffset(lineId);
     const base = direction > 0 ? 0 : RailTimetable.OPPOSITE_START_SECONDS;
-    const serviceOffset = service === 'limited' ? 3 : service === 'rapid' ? 14 : 26 + (trainOrdinal % 2) * 12;
+    const serviceOffset = service === 'limited' ? 4 : service === 'rapid' ? 16 : 32 + (trainOrdinal % 2) * 14;
     const shifted = earliest + lineOffset;
     const cycleStart = Math.floor(shifted / cycle) * cycle;
     let target = cycleStart + base + serviceOffset - lineOffset;
@@ -66,9 +77,9 @@ export class RailTimetable {
     const waited = waitingSince >= 0 ? Math.max(0, now - waitingSince) : 0;
     // 終端から出す列車を強く優先し、長時間待ちは種別差を徐々に打ち消す。
     return scheduledDepartureAt
-      - (isTerminal ? 80 : 0)
-      - priority * 16
-      - Math.min(90, late * 0.35 + waited * 0.45);
+      - (isTerminal ? 90 : 0)
+      - priority * 18
+      - Math.min(120, late * 0.35 + waited * 0.50);
   }
 
   starved(now: number, waitingSince: number): boolean {
@@ -83,6 +94,6 @@ export class RailTimetable {
 
   private lineOffset(lineId: number): number {
     // 共有駅へ全路線が同時刻に殺到しないよう路線ごとに位相をずらす。
-    return (Math.abs(lineId) * 17) % 24;
+    return (Math.abs(lineId) * 23) % 36;
   }
 }
