@@ -63,5 +63,5 @@ self.onmessage = (ev: MessageEvent) => {
   if (m.type !== 'search') return;
   const queries = m.queries as (BestQuery | NearestQuery)[], results = new Int32Array(queries.length);
   for (let i = 0; i < queries.length; i++) results[i] = m.kind === 'best' ? findBest(queries[i] as BestQuery) : findNearest(queries[i] as NearestQuery);
-  self.postMessage({ type: 'result', jobId: m.jobId, offset: m.offset, results }, [results.buffer]);
+  postMessage({ type: 'result', jobId: m.jobId, offset: m.offset, results });
 };
