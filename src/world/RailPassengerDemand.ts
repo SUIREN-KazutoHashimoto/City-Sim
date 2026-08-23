@@ -42,8 +42,8 @@ function destinationStations(rail: RailNetworkPlan, origin: RailStation): RailSt
     const line = lineById(rail, lineId); if (!line) continue;
     const originIndex = line.stationIds.indexOf(origin.id); if (originIndex < 0) continue;
     for (let i = 0; i < line.stationIds.length; i++) {
-      // 待ち時間込みでも鉄道が明確に有利になる距離を作るため、原則3駅以上離す。
-      if (Math.abs(i - originIndex) < 3) continue;
+      // 待ち時間込みでも鉄道が明確に有利になる距離を作るため、原則4駅以上離す。
+      if (Math.abs(i - originIndex) < 4) continue;
       const station = rail.stations[line.stationIds[i]]; if (station) ids.add(station.id);
     }
   }
@@ -88,10 +88,10 @@ proto.populate = function populateWithRailCommuters(this: AnyWorld, count: numbe
     const start = Math.floor(hash01(i * 1543 + 73) * candidates.length) % candidates.length;
     for (let n = 0; n < candidates.length; n++) {
       const destination = candidates[(start + n) % candidates.length];
-      if (Math.hypot(destination.x - home.x, destination.z - home.z) < 1250) continue;
+      if (Math.hypot(destination.x - home.x, destination.z - home.z) < 1600) continue;
       const workId = workNearStation(this, destination, i + n * 100003); if (workId < 0) continue;
       const work = this.city.poi.get(workId);
-      if (Math.hypot(work.x - home.x, work.z - home.z) < 1100) continue;
+      if (Math.hypot(work.x - home.x, work.z - home.z) < 1450) continue;
       s.workPOI[i] = workId;
       break;
     }
