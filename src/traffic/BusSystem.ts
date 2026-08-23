@@ -5,9 +5,26 @@ import { TrafficSystem } from './TrafficSystem';
 export interface BusStop {
   id: number; x: number; z: number; node: number; routes: number[];
   roadX: number; roadZ: number; edgeFrom: number; edgeTo: number; edgeT: number;
+  /** 道路Edgeの向き。停留所標識・上屋を道路と平行に描画するために使う。 */
+  heading: number;
+  /** 道路中心から見て停留所がある側。+1/-1。 */
+  side: number;
 }
 export interface BusRoute { id: number; stopSeq: number[]; }
 interface BusRuntime { vehicle: number; route: number; seqIdx: number; dwell: number; onboard: number[]; capacity: number; }
+
+/** Inspector等へ公開するバス運行状態。配列はコピーを返して外部変更を防ぐ。 */
+export interface BusStatusSnapshot {
+  busId: number;
+  vehicleId: number;
+  routeId: number;
+  sequenceIndex: number;
+  targetStopId: number;
+  dwellRemaining: number;
+  capacity: number;
+  onboard: number[];
+  routeStops: number[];
+}
 
 /** 路線バス。停留所は実道路Edge上の停止点と、歩行者用の歩道側座標を分離して保持する。 */
 export class BusSystem {
@@ -79,7 +96,11 @@ export class BusSystem {
     const a = this.net.nodes[edge.from], b = this.net.nodes[edge.to]; let dx = b.x - a.x, dz = b.z - a.z; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
     const t = 0.38, roadX = a.x + (b.x - a.x) * t, roadZ = a.z + (b.z - a.z) * t;
     const px = dz, pz = -dx, off = roadWidth(edge.lanes) / 2 + 1.55;
-    return { id: -1, x: roadX + px * off * side, z: roadZ + pz * off * side, node: nodeId, routes: [routeId], roadX, roadZ, edgeFrom: edge.from, edgeTo: edge.to, edgeT: t };
+    return {
+      id: -1, x: roadX + px * off * side, z: roadZ + pz * off * side, node: nodeId, routes: [routeId],
+      roadX, roadZ, edgeFrom: edge.from, edgeTo: edge.to, edgeT: t,
+      heading: Math.atan2(dz, dx), side,
+    };
   }
 
   private spawnBusOnRoute(routeId: number, startSeq: number): void {
@@ -126,7 +147,24 @@ export class BusSystem {
   sharedRoute(boardStop: number, alightStop: number): number { if (boardStop < 0 || alightStop < 0 || boardStop === alightStop) return -1; const a = this.stops[boardStop].routes, b = this.stops[alightStop].routes; for (const r of a) if (b.includes(r)) return r; return -1; }
   stopById(id: number): BusStop { return this.stops[id]; }
   get busCount(): number { return this.buses.length; }
-  onboardCount(busId: number): number { return this.buses[busId].onboard.length; }
-  busCapacity(busId: number): number { return this.buses[busId].capacity; }
+  onboardCount(busId: number): number { return this.buses[busId]?.onboard.length ?? 0; }
+  busCapacity(busId: number): number { return this.buses[busId]?.capacity ?? 30; }
   setAlight(agent: number, stopId: number): void { this.alightMap.set(agent, stopId); }
+  alightStopFor(agent: number): number { return this.alightMap.get(agent) ?? -1; }
+
+  busStatus(busId: number): BusStatusSnapshot | null {
+    const bus = this.buses[busId]; if (!bus) return null;
+    const route = this.routes[bus.route]; if (!route) return null;
+    return {
+      busId,
+      vehicleId: bus.vehicle,
+      routeId: bus.route,
+      sequenceIndex: bus.seqIdx,
+      targetStopId: route.stopSeq[bus.seqIdx] ?? -1,
+      dwellRemaining: Math.max(0, bus.dwell),
+      capacity: bus.capacity,
+      onboard: bus.onboard.slice(),
+      routeStops: route.stopSeq.slice(),
+    };
+  }
 }
