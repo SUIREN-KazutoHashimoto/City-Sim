@@ -17,7 +17,7 @@ export class POISearchWorkerPool {
   constructor(private readonly poi: POIRegistry) {
     if (typeof Worker === 'undefined') return;
     const snapshot = poi.createSearchSnapshot();
-    if (!(snapshot.occupancy.buffer instanceof SharedArrayBuffer)) return;
+    if (typeof SharedArrayBuffer === 'undefined' || !(snapshot.occupancy.buffer instanceof SharedArrayBuffer)) return;
     const hc = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 4) : 4;
     const count = Math.max(1, Math.min(3, Math.floor(Math.max(2, hc - 2) / 3)));
     for (let i = 0; i < count; i++) this.addWorker(snapshot);
@@ -50,17 +50,13 @@ export class POISearchWorkerPool {
 
   findBestBatch(queries: readonly POIBestQuery[]): Promise<Int32Array> {
     if (queries.length === 0) return Promise.resolve(new Int32Array(0));
-    if (!this.active) {
-      return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findBest(q.category, q.x, q.z, q.wealth)));
-    }
+    if (!this.active) return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findBest(q.category, q.x, q.z, q.wealth)));
     return this.dispatch('best', queries);
   }
 
   findNearestBatch(queries: readonly POINearestQuery[]): Promise<Int32Array> {
     if (queries.length === 0) return Promise.resolve(new Int32Array(0));
-    if (!this.active) {
-      return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findNearestFree(q.category, q.x, q.z)));
-    }
+    if (!this.active) return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findNearestFree(q.category, q.x, q.z)));
     return this.dispatch('nearest', queries);
   }
 
