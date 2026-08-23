@@ -4,14 +4,14 @@ import { RailRenderer, TrainService } from './RailRenderer';
 /**
  * 列車の外装レイヤー。
  *
- * 位置・回転の平滑化はRailRendererで編成中心の線路上距離へ1回だけ適用済み。
- * ここでは各車両poseを再補間せず、そのまま外装へ転写する。
- * これによりカーブ中に連結間隔が伸縮する「ゴム/ばね」挙動を発生させない。
+ * RailRendererで確定した台車ベースposeをそのまま転写する。
+ * 側面は「路線色」と「種別色」の2本帯にして、路線と普通/快速/特急を同時に識別できるようにする。
  */
 export class TrainLiveryOverlay {
   private shell: THREE.InstancedMesh | null = null;
   private windows: THREE.InstancedMesh | null = null;
-  private stripes: THREE.InstancedMesh | null = null;
+  private routeStripes: THREE.InstancedMesh | null = null;
+  private serviceStripes: THREE.InstancedMesh | null = null;
   private capacity = 0;
   private proxyHidden = false;
 
@@ -25,9 +25,12 @@ export class TrainLiveryOverlay {
   private readonly rawScale = new THREE.Vector3();
   private readonly outScale = new THREE.Vector3();
   private readonly routeColorTmp = new THREE.Color();
-  private readonly rapidAccent = new THREE.Color(0xffb000);
   private readonly localBody = new THREE.Color(0xe8ecef);
-  private readonly rapidBody = new THREE.Color(0xf7f8fa);
+  private readonly rapidBody = new THREE.Color(0xf3f5f6);
+  private readonly limitedBody = new THREE.Color(0xf7f8fa);
+  private readonly localService = new THREE.Color(0x2dbb63);
+  private readonly rapidService = new THREE.Color(0xf39a22);
+  private readonly limitedService = new THREE.Color(0xe5484d);
 
   constructor(private readonly scene: THREE.Scene, private readonly rail: RailRenderer) {}
 
@@ -38,7 +41,7 @@ export class TrainLiveryOverlay {
     this.hideProxy(proxy);
     const required = Math.max(1, proxy.instanceMatrix.count);
     if (!this.shell || required !== this.capacity) this.rebuild(required);
-    if (!this.shell || !this.windows || !this.stripes) return;
+    if (!this.shell || !this.windows || !this.routeStripes || !this.serviceStripes) return;
 
     let shellCount = 0, panelCount = 0;
 
@@ -58,25 +61,34 @@ export class TrainLiveryOverlay {
       const runId = this.rail.trainIdFromInstance(i);
       const status = runId >= 0 ? this.rail.trainStatus(runId) : null;
       const service: TrainService = status?.service ?? 'local';
-      this.shell.setColorAt(shellCount, service === 'rapid' ? this.rapidBody : this.localBody);
+      this.shell.setColorAt(shellCount, this.bodyColor(service));
 
-      const routeColor = this.routeColor(status?.lineId ?? 0, service);
+      const routeColor = this.routeColor(status?.lineId ?? 0);
+      const serviceColor = this.serviceColor(service);
       const sideOffset = width * 0.5 + 0.035;
       for (const side of [-1, 1]) {
-        // 暗色は窓帯だけ。白/銀車体を覆わない。
+        // 窓帯。
         this.offset.set(0, 0.77, sideOffset * side).applyQuaternion(this.rawQuat);
         this.panelPos.copy(this.bodyPos).add(this.offset);
         this.outScale.set(length * 0.74, 0.72, 0.07);
         this.outMatrix.compose(this.panelPos, this.rawQuat, this.outScale);
         this.windows.setMatrixAt(panelCount, this.outMatrix);
 
-        // 路線帯は照明非依存で常に発色。
-        this.offset.set(0, -0.22, (sideOffset + 0.045) * side).applyQuaternion(this.rawQuat);
+        // 上側：路線識別帯。
+        this.offset.set(0, -0.10, (sideOffset + 0.045) * side).applyQuaternion(this.rawQuat);
         this.panelPos.copy(this.bodyPos).add(this.offset);
-        this.outScale.set(length * 0.94, service === 'rapid' ? 0.66 : 0.54, 0.075);
+        this.outScale.set(length * 0.94, 0.22, 0.075);
         this.outMatrix.compose(this.panelPos, this.rawQuat, this.outScale);
-        this.stripes.setMatrixAt(panelCount, this.outMatrix);
-        this.stripes.setColorAt(panelCount, routeColor);
+        this.routeStripes.setMatrixAt(panelCount, this.outMatrix);
+        this.routeStripes.setColorAt(panelCount, routeColor);
+
+        // 下側：種別識別帯。普通=緑、快速=橙、特急=赤。
+        this.offset.set(0, -0.43, (sideOffset + 0.047) * side).applyQuaternion(this.rawQuat);
+        this.panelPos.copy(this.bodyPos).add(this.offset);
+        this.outScale.set(length * 0.94, 0.24, 0.078);
+        this.outMatrix.compose(this.panelPos, this.rawQuat, this.outScale);
+        this.serviceStripes.setMatrixAt(panelCount, this.outMatrix);
+        this.serviceStripes.setColorAt(panelCount, serviceColor);
         panelCount++;
       }
       shellCount++;
@@ -84,12 +96,12 @@ export class TrainLiveryOverlay {
 
     this.shell.count = shellCount;
     this.windows.count = panelCount;
-    this.stripes.count = panelCount;
-    this.shell.instanceMatrix.needsUpdate = true;
-    this.windows.instanceMatrix.needsUpdate = true;
-    this.stripes.instanceMatrix.needsUpdate = true;
+    this.routeStripes.count = panelCount;
+    this.serviceStripes.count = panelCount;
+    for (const mesh of [this.shell, this.windows, this.routeStripes, this.serviceStripes]) mesh.instanceMatrix.needsUpdate = true;
     if (this.shell.instanceColor) this.shell.instanceColor.needsUpdate = true;
-    if (this.stripes.instanceColor) this.stripes.instanceColor.needsUpdate = true;
+    if (this.routeStripes.instanceColor) this.routeStripes.instanceColor.needsUpdate = true;
+    if (this.serviceStripes.instanceColor) this.serviceStripes.instanceColor.needsUpdate = true;
   }
 
   private hideProxy(proxy: THREE.InstancedMesh): void {
@@ -103,7 +115,8 @@ export class TrainLiveryOverlay {
   private rebuild(capacity: number): void {
     if (this.shell) this.scene.remove(this.shell);
     if (this.windows) this.scene.remove(this.windows);
-    if (this.stripes) this.scene.remove(this.stripes);
+    if (this.routeStripes) this.scene.remove(this.routeStripes);
+    if (this.serviceStripes) this.scene.remove(this.serviceStripes);
 
     this.capacity = capacity;
     const box = new THREE.BoxGeometry(1, 1, 1);
@@ -117,25 +130,42 @@ export class TrainLiveryOverlay {
       new THREE.MeshStandardMaterial({ color: 0x263947, roughness: 0.22, metalness: 0.16 }),
       capacity * 2,
     );
-    this.stripes = new THREE.InstancedMesh(
+    this.routeStripes = new THREE.InstancedMesh(
+      box,
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      capacity * 2,
+    );
+    this.serviceStripes = new THREE.InstancedMesh(
       box,
       new THREE.MeshBasicMaterial({ color: 0xffffff }),
       capacity * 2,
     );
 
-    for (const mesh of [this.shell, this.windows, this.stripes]) {
+    for (const mesh of [this.shell, this.windows, this.routeStripes, this.serviceStripes]) {
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       mesh.frustumCulled = false;
-      mesh.castShadow = mesh !== this.stripes;
-      mesh.receiveShadow = mesh !== this.stripes;
+      const lit = mesh === this.shell || mesh === this.windows;
+      mesh.castShadow = lit;
+      mesh.receiveShadow = lit;
       this.scene.add(mesh);
     }
   }
 
-  private routeColor(lineId: number, service: TrainService): THREE.Color {
-    const palette = [0x0788e6, 0xee4338, 0x19b46f, 0x955bd7, 0xff8a19, 0x00b9d0, 0xd83a89];
+  private bodyColor(service: TrainService): THREE.Color {
+    if (service === 'limited') return this.limitedBody;
+    if (service === 'rapid') return this.rapidBody;
+    return this.localBody;
+  }
+
+  private serviceColor(service: TrainService): THREE.Color {
+    if (service === 'limited') return this.limitedService;
+    if (service === 'rapid') return this.rapidService;
+    return this.localService;
+  }
+
+  private routeColor(lineId: number): THREE.Color {
+    const palette = [0x0788e6, 0x7f62d9, 0x00a6b8, 0xd66db0, 0x4477cc, 0x9a6bd8, 0x2d9bb3];
     this.routeColorTmp.setHex(palette[Math.abs(lineId) % palette.length]);
-    if (service === 'rapid') this.routeColorTmp.lerp(this.rapidAccent, 0.28);
     return this.routeColorTmp;
   }
 }
