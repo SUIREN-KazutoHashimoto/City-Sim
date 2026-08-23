@@ -53,28 +53,34 @@ export class Inspector {
   get isFollowing(): boolean { return this.followKind !== 'none'; }
   get isFollowingVehicle(): boolean { return this.followKind === 'vehicle'; }
   get isFollowingTrain(): boolean { return this.followKind === 'train'; }
+  get isFollowingAgent(): boolean { return this.followKind === 'agent'; }
 
   getFollowTarget(): CameraFollowTarget | null {
     if (this.followKind === 'agent') {
       if (this.followId < 0 || this.followId >= this.world.store.count) { this.followKind = 'none'; return null; }
       const s = this.world.store;
       this.followPos.set(s.posX[this.followId], 0, s.posZ[this.followId]);
-      this.followTarget.kind = 'agent'; this.followTarget.id = this.followId; this.followTarget.heading = s.heading[this.followId]; this.followTarget.length = undefined; this.followTarget.firstPersonHeight = undefined;
+      this.followTarget.kind = 'agent'; this.followTarget.id = this.followId; this.followTarget.heading = s.heading[this.followId];
+      this.followTarget.length = 0.4; this.followTarget.firstPersonHeight = 1.62; this.followTarget.firstPersonForwardOffset = 0.08;
       return this.followTarget;
     }
     if (this.followKind === 'vehicle') {
       const vs = this.world.vehicles;
       if (this.followId < 0 || this.followId >= vs.count) { this.followKind = 'none'; return null; }
+      const length = vs.length[this.followId] || 4.5;
       this.followPos.set(vs.posX[this.followId], 0, vs.posZ[this.followId]);
-      this.followTarget.kind = 'vehicle'; this.followTarget.id = this.followId; this.followTarget.heading = vs.heading[this.followId]; this.followTarget.length = vs.length[this.followId] || 4.5;
+      this.followTarget.kind = 'vehicle'; this.followTarget.id = this.followId; this.followTarget.heading = vs.heading[this.followId]; this.followTarget.length = length;
       this.followTarget.firstPersonHeight = vs.isBus[this.followId] ? 2.35 : vs.isTruck[this.followId] ? 2.0 : 1.3;
+      this.followTarget.firstPersonForwardOffset = Math.max(0.8, length * 0.36);
       return this.followTarget;
     }
     if (this.followKind === 'train') {
       const snap = this.rail.trainStatus(this.followId);
       if (!snap) { this.followKind = 'none'; this.followId = -1; return null; }
-      this.followPos.set(snap.x, RailRenderer.TRACK_Y + 1.85, snap.z);
-      this.followTarget.kind = 'train'; this.followTarget.id = snap.id; this.followTarget.heading = snap.heading; this.followTarget.length = 25; this.followTarget.firstPersonHeight = undefined;
+      // snap.x/zは先頭車中心。三人称も一人称も実際の先頭車poseに追従させる。
+      this.followPos.set(snap.x, RailRenderer.TRACK_Y, snap.z);
+      this.followTarget.kind = 'train'; this.followTarget.id = snap.id; this.followTarget.heading = snap.heading;
+      this.followTarget.length = snap.consistLength; this.followTarget.firstPersonHeight = 2.45; this.followTarget.firstPersonForwardOffset = snap.firstPersonForwardOffset;
       return this.followTarget;
     }
     return null;
@@ -162,10 +168,10 @@ export class Inspector {
   private describeTrain(id: number): string {
     const s = this.rail.trainStatus(id); if (!s) return `🚆 列車 #${id}\n運行情報なし`;
     const status = s.state === 'dwell' ? `🛑 ${s.currentStationName} 停車中 あと${s.dwellRemaining.toFixed(1)}s`
-      : s.state === 'signal' ? `🚦 ${s.currentStationName} で閉塞待ち`
+      : s.state === 'signal' ? `🚦 ${s.currentStationName} で信号待ち`
         : `🚆 走行中 → ${s.nextStationName}`;
-    const loop = s.passingLoop ? '待避線あり' : '本線';
-    return `🚆 列車 #${s.id}  ${s.lineName}\n${status}\n速度 ${(s.speed * 3.6).toFixed(0)} km/h (上限 ${(s.cruiseSpeed * 3.6).toFixed(0)})\n現在地 (${s.x.toFixed(1)}, ${s.z.toFixed(1)})\n方向 ${s.direction > 0 ? '下り' : '上り'}   ${loop}`;
+    const loop = s.passingLoop ? '待避設備あり' : '本線';
+    return `🚆 ${s.serviceLabel} #${s.id}  ${s.lineName}\n${s.carCount}両編成  ${status}\n速度 ${(s.speed * 3.6).toFixed(0)} km/h (上限 ${(s.cruiseSpeed * 3.6).toFixed(0)})\n先頭車 (${s.x.toFixed(1)}, ${s.z.toFixed(1)})\n方向 ${s.direction > 0 ? '下り' : '上り'}   ${loop}`;
   }
 
   private describeBuilding(i: number): string {
