@@ -164,13 +164,25 @@ export class Inspector {
 
   private describeTrain(id: number): string {
     const s = this.rail.trainStatus(id); if (!s) return `🚆 列車 #${id}\n運行情報なし`;
-    const icon = s.stateLabel === '信号待ち' ? '🚦' : s.stateLabel === '走行中' || s.stateLabel === '徐行中' ? '🚆' : '🛑';
-    const place = s.currentStationName !== '—' ? s.currentStationName : s.nextStationName;
-    const target = s.nextStationName !== '—' ? ` → ${s.nextStationName}` : '';
-    const status = `${icon} ${s.stateLabel}  ${place}${target}`;
+    const icon = s.stateLabel === '車両基地' ? '🏭' : s.stateLabel === '信号待ち' ? '🚦' : s.stateLabel === '走行中' || s.stateLabel === '徐行中' ? '🚆' : '🛑';
+    let route = '車両基地';
+    if (s.stateLabel !== '車両基地') {
+      if (s.currentStationName !== '—') route = s.currentStationName;
+      else if (s.originStationName !== '—' && s.nextStationName !== '—') route = `${s.originStationName} → ${s.nextStationName}`;
+      else if (s.nextStationName !== '—') route = `→ ${s.nextStationName}`;
+      else route = '駅間';
+    }
+    const status = `${icon} ${s.stateLabel}  ${route}`;
     const loop = s.passingLoop ? '待避設備あり' : '本線';
-    const delay = s.delaySeconds > 1 ? `遅れ ${Math.round(s.delaySeconds)}s` : '概ね定刻';
-    return `🚆 ${s.serviceLabel} #${s.id}  ${s.lineName}\n${s.carCount}両編成  ${status}\n速度 ${(s.speed * 3.6).toFixed(0)} km/h (上限 ${(s.cruiseSpeed * 3.6).toFixed(0)})\n編成中心 (${s.x.toFixed(1)}, ${s.z.toFixed(1)})\n方向 ${s.direction > 0 ? '下り' : '上り'}   ${loop}   ${delay}\n[T] 鉄道ダイヤ表示`;
+    const delay = s.delaySeconds > 1 ? `到着見込 遅れ${Math.round(s.delaySeconds)}s` : '到着見込 概ね定刻';
+    const arrival = s.scheduledArrivalAt > 0 ? this.formatRailTime(s.scheduledArrivalAt) : '—';
+    return `🚆 ${s.serviceLabel} #${s.id}  ${s.lineName}\n${s.carCount}両編成  ${status}\n速度 ${(s.speed * 3.6).toFixed(0)} km/h  現在制限 ${(s.currentSpeedLimit * 3.6).toFixed(0)} km/h  車両最高 ${(s.cruiseSpeed * 3.6).toFixed(0)} km/h\n編成中心 (${s.x.toFixed(1)}, ${s.z.toFixed(1)})\n方向 ${s.direction > 0 ? '下り' : '上り'}   ${loop}\n到着予定 ${arrival}   ${delay}\n[T] 鉄道ダイヤ表示`;
+  }
+
+  private formatRailTime(seconds: number): string {
+    const t = ((Math.floor(seconds) % 86400) + 86400) % 86400;
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
   private describeBuilding(i: number): string {
