@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RailRenderer, TrainService } from './RailRenderer';
+import './RailRendererEnhancements';
 
 /**
  * 列車の外装レイヤー。
@@ -67,14 +68,12 @@ export class TrainLiveryOverlay {
       const serviceColor = this.serviceColor(service);
       const sideOffset = width * 0.5 + 0.035;
       for (const side of [-1, 1]) {
-        // 窓帯。
         this.offset.set(0, 0.77, sideOffset * side).applyQuaternion(this.rawQuat);
         this.panelPos.copy(this.bodyPos).add(this.offset);
         this.outScale.set(length * 0.74, 0.72, 0.07);
         this.outMatrix.compose(this.panelPos, this.rawQuat, this.outScale);
         this.windows.setMatrixAt(panelCount, this.outMatrix);
 
-        // 上側：路線識別帯。
         this.offset.set(0, -0.10, (sideOffset + 0.045) * side).applyQuaternion(this.rawQuat);
         this.panelPos.copy(this.bodyPos).add(this.offset);
         this.outScale.set(length * 0.94, 0.22, 0.075);
@@ -82,7 +81,6 @@ export class TrainLiveryOverlay {
         this.routeStripes.setMatrixAt(panelCount, this.outMatrix);
         this.routeStripes.setColorAt(panelCount, routeColor);
 
-        // 下側：種別識別帯。普通=緑、快速=橙、特急=赤。
         this.offset.set(0, -0.43, (sideOffset + 0.047) * side).applyQuaternion(this.rawQuat);
         this.panelPos.copy(this.bodyPos).add(this.offset);
         this.outScale.set(length * 0.94, 0.24, 0.078);
