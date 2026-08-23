@@ -55,9 +55,13 @@ async function bootstrap(): Promise<void> {
   const gfx = new EnhancedRenderer(scene);
   gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
   gfx.buildAgents(world.store.capacity);
-  // Inspectorはinvisible meshにもraycastできるため、hit proxyはGPU描画から外す。
+  // Inspectorは透明proxyへraycastする。visible=falseでもRaycasterは拾えるが、
+  // 動的InstancedMeshの自動boundingSphereが初回未配置状態で固定されないよう都市全体のSphereを明示する。
   gfx.buildings.visible = false; gfx.agents.visible = false;
   gfx.buildVehicles(world.vehicles.capacity);
+  const hitSphere = new THREE.Sphere(new THREE.Vector3(SIZE / 2, 0, SIZE / 2), Math.max(SIZE * 2, 20_000));
+  gfx.agents.boundingSphere = hitSphere.clone();
+  gfx.vehicles.boundingSphere = hitSphere.clone();
   gfx.buildSignals(world.city.net, world.signals);
   gfx.buildCrosswalks(world.city.net, world.signals);
   gfx.buildStopLines(world.city.net, world.signals);
@@ -134,13 +138,17 @@ async function bootstrap(): Promise<void> {
     // SIM値とは別の実時間補間poseを、camera/Inspector/render/lightの間だけVehicleStoreへ適用する。
     vehicleVisuals.update(world.vehicles, dt); vehicleVisuals.apply(world.vehicles);
     try {
-      controller.setFollowTarget(inspector.getFollowTarget()); controller.update(dt); inspector.update(); dashboard.draw();
+      controller.setFollowTarget(inspector.getFollowTarget()); controller.update(dt); dashboard.draw();
 
       const renderStarted = performance.now();
       let mark = renderStarted;
       gfx.updateLod(camera.position); const lodMs = performance.now() - mark;
       mark = performance.now(); gfx.syncAgents(world.store, world.clock.totalSeconds, camera.position); const agentsMs = performance.now() - mark;
       mark = performance.now(); gfx.syncVehicles(world.vehicles, world.clock.hourF, now / 1000, camera.position); const vehiclesMs = performance.now() - mark;
+
+      // hover/追跡候補判定は、そのフレームで更新済みの動的proxyに対して行う。
+      inspector.update();
+
       mark = performance.now(); gfx.syncSignals(world.signals); const signalsMs = performance.now() - mark;
       mark = performance.now(); updateEnvironment(); gfx.updateNightLighting(world.clock.hourF, camera.position, world.vehicles); const lightingMs = performance.now() - mark;
       performanceMonitor.beginGpu(); mark = performance.now(); renderer.render(scene, camera); const webglMs = performance.now() - mark; performanceMonitor.endGpu();
