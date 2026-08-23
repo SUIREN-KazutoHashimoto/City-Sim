@@ -1,4 +1,4 @@
-import { RailNetworkPlan, RailStationKind, type RailPoint } from './RailPlanning';
+import { DEFAULT_RAIL_PLANNING, RailNetworkPlan, RailStationKind, type RailPoint } from './RailPlanning';
 import type { RoadNetwork } from '../traffic/RoadNetwork';
 
 declare module './RailPlanning' {
@@ -6,6 +6,9 @@ declare module './RailPlanning' {
     influenceRadius: number;
   }
 }
+
+// アプリ起動時の既定も2路線から3路線へ増やす。
+DEFAULT_RAIL_PLANNING.railTrunkLines = Math.max(3, DEFAULT_RAIL_PLANNING.railTrunkLines);
 
 type AnyRailPlan = RailNetworkPlan & Record<string, any>;
 
