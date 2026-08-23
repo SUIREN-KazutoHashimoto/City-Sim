@@ -61,7 +61,7 @@ export async function loadCityConfig(url = '/config/city.json'): Promise<Runtime
   cfg.planning.parkRatio = requireFinite('planning.parkRatio', cfg.planning.parkRatio, 0, 0.25);
   cfg.planning.railEnabled = cfg.planning.railEnabled !== false;
   cfg.planning.railTrunkLines = Math.floor(requireFinite('planning.railTrunkLines', cfg.planning.railTrunkLines, 1, 3));
-  cfg.planning.railStationSpacing = requireFinite('planning.railStationSpacing', cfg.planning.railStationSpacing, 450, 3000);
+  cfg.planning.railStationSpacing = requireFinite('planning.railStationSpacing', cfg.planning.railStationSpacing, 260, 3000);
   cfg.planning.railInfluenceRadius = requireFinite('planning.railInfluenceRadius', cfg.planning.railInfluenceRadius, 300, 1800);
   cfg.planning.railSubCenterSpurs = cfg.planning.railSubCenterSpurs !== false;
 
