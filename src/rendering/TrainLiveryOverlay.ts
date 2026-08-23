@@ -5,6 +5,7 @@ import './RailRendererEnhancements';
 import './RailDepotPlacement';
 import './RailRightHandOperation';
 import './RailLightingAndIndicators';
+import './RailSupportClearance';
 
 /**
  * 列車の外装レイヤー。
