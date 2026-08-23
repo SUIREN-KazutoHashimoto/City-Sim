@@ -7,6 +7,7 @@ import { Dashboard } from './rendering/Dashboard';
 import { PerformanceMonitor, type RenderProfileSample } from './rendering/PerformanceMonitor';
 import { buildAlignedBusStops } from './rendering/BusStopRenderer';
 import { buildSpecialFacilityVisuals } from './rendering/SpecialFacilityRenderer';
+import { RailRenderer } from './rendering/RailRenderer';
 import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
 
@@ -22,6 +23,10 @@ async function bootstrap(): Promise<void> {
     runtime.agentCapacity,
     runtime.vehicleCapacity,
   );
+  // Phase 4: TODは生成時の計画駅位置で既に反映済み。ここで実線路を道路A*へ寄せ、駅前バスを追加する。
+  const rail = world.city.planning.rail;
+  rail.alignToRoadNetwork(world.city.net);
+  world.bus.addRailStationFeeders(rail.stations);
   world.populate(runtime.population);
 
   const app = document.getElementById('app')!;
@@ -56,6 +61,7 @@ async function bootstrap(): Promise<void> {
   const gfx = new EnhancedRenderer(scene);
   gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
   buildSpecialFacilityVisuals(scene, world.city.facilities, world.city.parks);
+  const railRenderer = new RailRenderer(scene, rail); railRenderer.build();
   gfx.buildAgents(world.store.capacity);
   // Inspectorは透明proxyへraycastする。visible=falseでもRaycasterは拾えるが、
   // 動的InstancedMeshの自動boundingSphereが初回未配置状態で固定されないよう都市全体のSphereを明示する。
@@ -147,6 +153,7 @@ async function bootstrap(): Promise<void> {
       gfx.updateLod(camera.position); const lodMs = performance.now() - mark;
       mark = performance.now(); gfx.syncAgents(world.store, world.clock.totalSeconds, camera.position); const agentsMs = performance.now() - mark;
       mark = performance.now(); gfx.syncVehicles(world.vehicles, world.clock.hourF, now / 1000, camera.position); const vehiclesMs = performance.now() - mark;
+      railRenderer.update(world.clock.totalSeconds);
 
       // hover/追跡候補判定は、そのフレームで更新済みの動的proxyに対して行う。
       inspector.update();
@@ -164,7 +171,7 @@ async function bootstrap(): Promise<void> {
         lastStats = now; const dv = world.stats();
         const threadText = world.simulationWorkerCount > 0 ? `${world.simulationWorkerCount} workers/SAB` : 'single-thread fallback';
         const followText = controller.isFollowing ? (controller.isVehicleFirstPerson ? `追跡中 車両固定一人称` : `追跡中 dist ${controller.followDistance.toFixed(0)}m`) : `speed ${controller.moveSpeed.toFixed(0)} m/s`;
-        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=vehicle view  MMB=人/車を追跡]`;
+        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=vehicle view  MMB=人/車を追跡]`;
       }
     } finally {
       vehicleVisuals.restore(world.vehicles);
