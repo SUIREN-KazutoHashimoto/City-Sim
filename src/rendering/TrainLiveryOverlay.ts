@@ -10,6 +10,7 @@ import './RailSupportClearance';
 import './PedestrianSignalOrientation';
 import './RailPassengerStationAccess';
 import '../world/RailPassengerAutoAttach';
+import './RailPassengerVisualConsistency';
 import '../world/RailPassengerDemand';
 import './TrainPassengerInspector';
 
