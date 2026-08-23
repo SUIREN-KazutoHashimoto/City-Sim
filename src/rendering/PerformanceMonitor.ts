@@ -18,6 +18,7 @@ interface SimProfile {
   totalMs: number;
   workerMs: number;
   poiWorkerMs: number;
+  pedWorkerMs: number;
   agentMs: number;
   pedBlocksMs: number;
   trafficMs: number;
@@ -70,21 +71,23 @@ interface TimerExt { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number; }
 
 interface WorldInternals {
   stepCore: (dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean) => void;
+  stepCoreAsync: (dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean) => Promise<void>;
   computePedBlocks: () => void;
   buildTravelerIndex: () => void;
   handleArrivedVehicles: () => void;
   processParallelActivityExits: (now: number) => void;
   beginTrip: (agent: number) => void;
-  brain: { plan: (...args: unknown[]) => unknown; decide: (...args: unknown[]) => void };
+  brain: { plan: (...args: unknown[]) => unknown };
   walkAstar: { findPath: (start: number, goal: number) => number[] };
   agentWorkers: { updateAgentBatch: (dt: number, now: number, count?: number) => Promise<void> };
   poiWorkers: { findBestBatch: (queries: readonly unknown[]) => Promise<Int32Array> };
+  pedWorkers: { flush: (dt: number, count?: number) => Promise<void> };
 }
 
 interface TrafficInternals { astar: { findPath: (start: number, goal: number) => number[] }; }
 
 const emptySim = (): SimProfile => ({
-  totalMs: 0, workerMs: 0, poiWorkerMs: 0, agentMs: 0, pedBlocksMs: 0, trafficMs: 0, signalsMs: 0, busMs: 0, logisticsMs: 0,
+  totalMs: 0, workerMs: 0, poiWorkerMs: 0, pedWorkerMs: 0, agentMs: 0, pedBlocksMs: 0, trafficMs: 0, signalsMs: 0, busMs: 0, logisticsMs: 0,
   pedIndexMs: 0, pedestrianMs: 0, arrivalsMs: 0, activityMs: 0, poiFindBestMs: 0, poiParkingMs: 0, poiMutationMs: 0, otherMs: 0, steps: 0,
   decisions: 0, tripStarts: 0, poiFindBestCount: 0, poiParkingCount: 0, poiMutationCount: 0,
   astarWalkMs: 0, astarWalkCount: 0, astarWalkMaxMs: 0, astarVehicleMs: 0, astarVehicleCount: 0, astarVehicleMaxMs: 0,
@@ -129,6 +132,7 @@ class SimulationProfiler {
       try { await originalBatch(dtSec, steps); }
       finally {
         this.current.totalMs = performance.now() - started;
+        // pedWorkerMsはpedestrianMsに含まれるネスト値なのでcoveredへ重複加算しない。
         const covered = this.current.workerMs + this.current.poiWorkerMs + this.current.agentMs + this.current.pedBlocksMs + this.current.trafficMs +
           this.current.busMs + this.current.logisticsMs + this.current.pedIndexMs + this.current.pedestrianMs + this.current.arrivalsMs + this.current.activityMs + this.current.signalsMs;
         this.current.otherMs = Math.max(0, this.current.totalMs - covered);
@@ -138,9 +142,11 @@ class SimulationProfiler {
 
     const originalStepCore = w.stepCore.bind(this.world);
     w.stepCore = (dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): void => {
-      this.current.steps++; this.agentPhaseStart = 0; this.pedestrianPhaseStart = 0; this.activityPhaseStart = 0;
-      originalStepCore(dtSec, updateNeeds, updateActivities, updateDecisions);
-      const ended = performance.now(); if (this.inBatch && this.activityPhaseStart > 0) this.current.activityMs += ended - this.activityPhaseStart;
+      this.beginStep(); originalStepCore(dtSec, updateNeeds, updateActivities, updateDecisions); this.endStep();
+    };
+    const originalStepCoreAsync = w.stepCoreAsync.bind(this.world);
+    w.stepCoreAsync = async (dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): Promise<void> => {
+      this.beginStep(); await originalStepCoreAsync(dtSec, updateNeeds, updateActivities, updateDecisions); this.endStep();
     };
 
     this.wrapTimed(this.world.signals, 'update', 'signalsMs', () => { this.agentPhaseStart = performance.now(); });
@@ -172,6 +178,10 @@ class SimulationProfiler {
     w.poiWorkers.findBestBatch = async (queries: readonly unknown[]): Promise<Int32Array> => {
       const t = performance.now(); const out = await originalPoiWorker(queries); if (this.inBatch) this.current.poiWorkerMs += performance.now() - t; return out;
     };
+    const originalPedWorker = w.pedWorkers.flush.bind(w.pedWorkers);
+    w.pedWorkers.flush = async (dt: number, count?: number): Promise<void> => {
+      const t = performance.now(); await originalPedWorker(dt, count); if (this.inBatch) this.current.pedWorkerMs += performance.now() - t;
+    };
 
     const originalPlan = w.brain.plan.bind(w.brain);
     w.brain.plan = (...args: unknown[]): unknown => { if (this.inBatch) this.current.decisions++; return originalPlan(...args); };
@@ -185,6 +195,14 @@ class SimulationProfiler {
 
     this.wrapAStar(w.walkAstar, 'walk');
     const traffic = this.world.traffic as unknown as TrafficInternals; this.wrapAStar(traffic.astar, 'vehicle');
+  }
+
+  private beginStep(): void {
+    this.current.steps++; this.agentPhaseStart = 0; this.pedestrianPhaseStart = 0; this.activityPhaseStart = 0;
+  }
+
+  private endStep(): void {
+    const ended = performance.now(); if (this.inBatch && this.activityPhaseStart > 0) this.current.activityMs += ended - this.activityPhaseStart;
   }
 
   private wrapTimed(target: object, method: string, field: keyof SimProfile, after?: () => void): void {
@@ -267,12 +285,13 @@ export class PerformanceMonitor {
   private draw(activePedestrians: number, engaged: number, drivingVehicles: number): void {
     const p = this.profiler.latest, r = this.latestRender, gpuText = Number.isFinite(this.gpu.latestMs) ? `${this.gpu.latestMs.toFixed(1)}ms` : 'n/a';
     const us = (ms: number, count: number) => count > 0 ? `${((ms * 1000) / count).toFixed(2)}us/${count}` : '-';
-    const pedMs = p.pedBlocksMs + p.pedIndexMs + p.pedestrianMs, actMs = p.arrivalsMs + p.activityMs;
+    const pedMs = p.pedBlocksMs + p.pedIndexMs + p.pedestrianMs, pedPrepMs = Math.max(0, p.pedestrianMs - p.pedWorkerMs), actMs = p.arrivalsMs + p.activityMs;
     this.summary.textContent =
 `FRAME ${this.latestFrameMs.toFixed(1)}ms  FPS ${this.latestFps.toFixed(0)}  GPU ${gpuText}  backlog ${(this.latestBacklog * 1000).toFixed(0)}ms ${this.latestSimBusy ? 'BUSY' : ''}
 RENDER ${r.totalMs.toFixed(1)}ms  LOD ${r.lodMs.toFixed(1)}  Agent ${r.agentsMs.toFixed(1)}  Vehicle ${r.vehiclesMs.toFixed(1)}  Signal ${r.signalsMs.toFixed(1)}  Light ${r.lightingMs.toFixed(1)}  WebGL ${r.webglMs.toFixed(1)}
 SIM ${p.totalMs.toFixed(1)}ms/${p.steps}step  AgentW ${p.workerMs.toFixed(1)}  POIW ${p.poiWorkerMs.toFixed(1)}  Agent ${p.agentMs.toFixed(1)}  Traffic ${p.trafficMs.toFixed(1)}
-PED total ${pedMs.toFixed(1)}  Block ${p.pedBlocksMs.toFixed(1)}  Index ${p.pedIndexMs.toFixed(1)}  Walk/Avoid ${p.pedestrianMs.toFixed(1)}  ${us(pedMs, activePedestrians)}
+PED total ${pedMs.toFixed(1)}  Block ${p.pedBlocksMs.toFixed(1)}  Index ${p.pedIndexMs.toFixed(1)}  Walk/AvoidPrep ${pedPrepMs.toFixed(1)}  WorkerMove ${p.pedWorkerMs.toFixed(1)}
+    ${us(pedMs, activePedestrians)}
 POI WorkerSearch ${p.poiWorkerMs.toFixed(1)}  MainSearch ${p.poiFindBestMs.toFixed(1)}/${p.poiFindBestCount}  Parking ${p.poiParkingMs.toFixed(1)}/${p.poiParkingCount}
     Reserve/Release ${p.poiMutationMs.toFixed(1)}/${p.poiMutationCount}  Activity+Arrival ${actMs.toFixed(1)}
 SYS Bus ${p.busMs.toFixed(1)}  Logistics ${p.logisticsMs.toFixed(1)}  Signals ${p.signalsMs.toFixed(1)}  Other ${p.otherMs.toFixed(1)}
