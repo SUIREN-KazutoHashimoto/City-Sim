@@ -77,7 +77,6 @@ export class Inspector {
     if (this.followKind === 'train') {
       const snap = this.rail.trainStatus(this.followId);
       if (!snap) { this.followKind = 'none'; this.followId = -1; return null; }
-      // snap.x/zは先頭車中心。三人称も一人称も実際の先頭車poseに追従させる。
       this.followPos.set(snap.x, RailRenderer.TRACK_Y, snap.z);
       this.followTarget.kind = 'train'; this.followTarget.id = snap.id; this.followTarget.heading = snap.heading;
       this.followTarget.length = snap.consistLength; this.followTarget.firstPersonHeight = 2.45; this.followTarget.firstPersonForwardOffset = snap.firstPersonForwardOffset;
@@ -86,9 +85,7 @@ export class Inspector {
     return null;
   }
 
-  /** 従来API互換。 */
   getFollowPosition(): THREE.Vector3 | null { return this.getFollowTarget()?.position ?? null; }
-
   private hide(): void { this.el.style.display = 'none'; }
 
   update(): void {
@@ -167,11 +164,13 @@ export class Inspector {
 
   private describeTrain(id: number): string {
     const s = this.rail.trainStatus(id); if (!s) return `🚆 列車 #${id}\n運行情報なし`;
-    const status = s.state === 'dwell' ? `🛑 ${s.currentStationName} 停車中 あと${s.dwellRemaining.toFixed(1)}s`
-      : s.state === 'signal' ? `🚦 ${s.currentStationName} で信号待ち`
-        : `🚆 走行中 → ${s.nextStationName}`;
+    const icon = s.stateLabel === '信号待ち' ? '🚦' : s.stateLabel === '走行中' || s.stateLabel === '徐行中' ? '🚆' : '🛑';
+    const place = s.currentStationName !== '—' ? s.currentStationName : s.nextStationName;
+    const target = s.nextStationName !== '—' ? ` → ${s.nextStationName}` : '';
+    const status = `${icon} ${s.stateLabel}  ${place}${target}`;
     const loop = s.passingLoop ? '待避設備あり' : '本線';
-    return `🚆 ${s.serviceLabel} #${s.id}  ${s.lineName}\n${s.carCount}両編成  ${status}\n速度 ${(s.speed * 3.6).toFixed(0)} km/h (上限 ${(s.cruiseSpeed * 3.6).toFixed(0)})\n先頭車 (${s.x.toFixed(1)}, ${s.z.toFixed(1)})\n方向 ${s.direction > 0 ? '下り' : '上り'}   ${loop}`;
+    const delay = s.delaySeconds > 1 ? `遅れ ${Math.round(s.delaySeconds)}s` : '概ね定刻';
+    return `🚆 ${s.serviceLabel} #${s.id}  ${s.lineName}\n${s.carCount}両編成  ${status}\n速度 ${(s.speed * 3.6).toFixed(0)} km/h (上限 ${(s.cruiseSpeed * 3.6).toFixed(0)})\n編成中心 (${s.x.toFixed(1)}, ${s.z.toFixed(1)})\n方向 ${s.direction > 0 ? '下り' : '上り'}   ${loop}   ${delay}\n[T] 鉄道ダイヤ表示`;
   }
 
   private describeBuilding(i: number): string {
