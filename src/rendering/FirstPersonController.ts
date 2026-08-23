@@ -31,7 +31,8 @@ export class FirstPersonController {
       if (!this.dragging) return;
       if (this.followTarget?.kind === 'vehicle') {
         if (this.vehicleFirstPerson) return;
-        this.followYawOffset -= e.movementX * this.lookSensitivity;
+        // 通常視点と同じドラッグ感になるよう、vehicle orbitではX移動を正方向へ反映する。
+        this.followYawOffset += e.movementX * this.lookSensitivity;
         this.followPitch -= e.movementY * this.lookSensitivity;
         this.followPitch = THREE.MathUtils.clamp(this.followPitch, -0.12, 1.25);
         return;
