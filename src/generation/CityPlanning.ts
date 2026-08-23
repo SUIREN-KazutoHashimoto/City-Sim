@@ -127,10 +127,12 @@ export class CityPlanning {
     );
 
     const parkCandidate = detail > 0.72 && centerInfluence < 0.74 && indInf < 0.35 && logInf < 0.35;
+    const civicCandidate = centerInfluence > 0.30 && centerInfluence < 0.74 && detail < 0.22 && indInf < 0.25 && logInf < 0.25;
     let district: DistrictType;
     if (logInf > 0.68) district = DistrictType.Logistics;
     else if (indInf > 0.55) district = DistrictType.Industrial;
     else if (parkCandidate && detail > 0.78 - this.options.parkRatio) district = DistrictType.Park;
+    else if (civicCandidate) district = DistrictType.Civic;
     else if (cbdInf > 0.66) district = DistrictType.CBD;
     else if (cbdInf > 0.42 || subInf > 0.62) district = DistrictType.Commercial;
     else if (subInf > 0.38 || cbdInf > 0.28) district = DistrictType.MixedUse;
