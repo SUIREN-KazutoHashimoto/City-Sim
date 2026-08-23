@@ -143,15 +143,37 @@ export class TrafficSystem {
   }
 
   private idm(v: number, gap: number, leadSpeed: number): number {
-    const vs = this.vs; const sp = vs.speed[v], v0 = Math.max(0.1, vs.maxSpeed[v]), a = vs.aMax[v], b = vs.bComf[v]; const dv = sp - leadSpeed;
+    const vs = this.vs, sp = vs.speed[v], v0 = Math.max(0.1, vs.maxSpeed[v]), a = vs.aMax[v], b = vs.bComf[v]; const dv = sp - leadSpeed;
     const sStar = vs.s0[v] + Math.max(0, sp * vs.t0[v] + (sp * dv) / (2 * Math.sqrt(a * b)));
     return a * (1 - Math.pow(sp / v0, 4) - (sStar / gap) * (sStar / gap));
   }
 
   private advanceEdge(v: number): void {
-    const vs = this.vs; const path = vs.paths[v], next = vs.pathCursor[v] + 1;
+    const vs = this.vs, path = vs.paths[v], next = vs.pathCursor[v] + 1;
     if (next >= path.length) { this.arrive(v, 1); return; }
     const from = path[vs.pathCursor[v]], to = path[next]; vs.pathCursor[v] = next; const carry = vs.speed[v]; this.enterEdge(v, from, to); vs.speed[v] = carry;
+  }
+
+  /** -PI..PIの最短角度差。Uターンでも連続回転させる。 */
+  private angleDelta(from: number, to: number): number {
+    let d = to - from; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2; return d;
+  }
+
+  /**
+   * Edge切替直後のheadingを前Edge→現Edgeへ距離ベースで補間する。
+   * 車体位置は道路Edge上のままなので交通判定を変えず、見た目と追跡カメラだけ滑らかに旋回する。
+   */
+  private visualHeading(v: number, targetHeading: number): number {
+    const vs = this.vs, path = vs.paths[v], cursor = vs.pathCursor[v];
+    if (cursor < 2 || cursor >= path.length) return targetHeading;
+    const pa = this.net.nodes[path[cursor - 2]], pb = this.net.nodes[path[cursor - 1]];
+    if (!pa || !pb) return targetHeading;
+    const prevHeading = Math.atan2(pb.z - pa.z, pb.x - pa.x);
+    const turnDistance = vs.isBus[v] ? 18 : vs.isTruck[v] ? 15 : 10;
+    const distanceIntoEdge = Math.max(0, vs.segT[v] * vs.segLen[v]);
+    let u = Math.min(1, distanceIntoEdge / Math.max(1, turnDistance));
+    u = u * u * (3 - 2 * u); // smoothstep
+    return prevHeading + this.angleDelta(prevHeading, targetHeading) * u;
   }
 
   private updateWorldPos(v: number): void {
@@ -159,7 +181,8 @@ export class TrafficSystem {
     const t = vs.segT[v]; let dx = nt.x - nf.x, dz = nt.z - nf.z; const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
     const rx = dz, rz = -dx; const edge = vs.edge[v] >= 0 ? this.net.edges[vs.edge[v]] : null; const off = laneOffset(edge ? edge.lanes : 1);
     const cx = nf.x + (nt.x - nf.x) * t, cz = nf.z + (nt.z - nf.z) * t;
-    vs.posX[v] = cx + rx * off; vs.posZ[v] = cz + rz * off; vs.heading[v] = Math.atan2(dz, dx);
+    vs.posX[v] = cx + rx * off; vs.posZ[v] = cz + rz * off;
+    const targetHeading = Math.atan2(dz, dx); vs.heading[v] = this.visualHeading(v, targetHeading);
   }
 
   private rebuildOccupants(): void {
