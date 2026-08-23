@@ -16,6 +16,7 @@ type TrainState = 'dwell' | 'running' | 'signal' | 'schedule';
 export type TrainService = 'local' | 'rapid' | 'limited';
 type SignalAspect = 'red' | 'yellow' | 'green';
 type RouteMode = 'main' | 'siding';
+type TrackLane = -1 | 0 | 1;
 
 interface TrainRun {
   id: number;
@@ -34,6 +35,9 @@ interface TrainRun {
   waitingSince: number;
   trainOrdinal: number;
   state: TrainState;
+  lane: TrackLane;
+  previousLane: TrackLane;
+  laneChangeStationIndex: number;
   x: number;
   z: number;
   heading: number;
@@ -48,11 +52,14 @@ interface RailSignal {
   z: number;
 }
 
-interface PhysicalBlock {
+/** 1 block = one station-to-station interval on one physical track. */
+interface StationBlock {
   id: number;
   lineId: number;
   segmentIndex: number;
-  direction: -1 | 0 | 1;
+  lane: TrackLane;
+  fromStationId: number;
+  toStationId: number;
   keys: Set<string>;
   conflicts: Set<number>;
 }
@@ -63,11 +70,23 @@ interface RouteReservation {
   route: string;
 }
 
+interface PlannedRoute {
+  trainId: number;
+  lineId: number;
+  fromIndex: number;
+  toIndex: number;
+  blockId: number;
+  lane: TrackLane;
+  routeKeys: string[];
+}
+
+type TurnoutKind = 'junction' | 'main' | 'siding' | 'crossover-normal' | 'crossover-reverse';
 interface TurnoutIndicator {
   stationId: number;
   lineId: number;
   direction: 1 | -1;
-  mode: 'junction' | RouteMode;
+  kind: TurnoutKind;
+  lane: TrackLane;
   instanceIndex: number;
   matrix: THREE.Matrix4;
 }
@@ -126,19 +145,22 @@ export class RailRenderer {
   private static readonly PLATFORM_CLEARANCE = 0.48;
   private static readonly SWITCH_CLEARANCE = 16;
   private static readonly SWITCH_APPROACH = 52;
-  private static readonly BLOCK_SAMPLE = 14;
-  private static readonly BLOCK_QUANTIZE = 9;
+  private static readonly CROSSOVER_EXTRA = 18;
+  private static readonly CROSSOVER_LENGTH = 46;
+  private static readonly BLOCK_SAMPLE = 12;
+  private static readonly BLOCK_QUANTIZE = 7;
   private static readonly DEADLOCK_WATCH_SECONDS = 70;
 
   private readonly smoothLines = new Map<number, SmoothLine>();
   private readonly trainRuns: TrainRun[] = [];
   private readonly trainInstanceToRun: number[] = [];
   private readonly railSignals: RailSignal[] = [];
-  private readonly physicalBlocks: PhysicalBlock[] = [];
+  private readonly stationBlocks: StationBlock[] = [];
   private readonly blockIdByKey = new Map<string, number>();
   private readonly blockOccupancy = new Map<number, number>();
   private readonly blockReservations = new Map<number, number>();
   private readonly routeReservations = new Map<string, RouteReservation>();
+  private readonly plannedRoutes = new Map<number, PlannedRoute>();
   private readonly turnoutIndicators: TurnoutIndicator[] = [];
   private readonly timetable = new RailTimetable();
   private readonly d = new THREE.Object3D();
@@ -174,8 +196,7 @@ export class RailRenderer {
     if (this.rail.lines.length === 0) return;
     for (const line of this.rail.lines.filter((l) => l.kind === 'trunk')) this.smoothLines.set(line.id, this.makeSmoothLine(line));
     for (const line of this.rail.lines.filter((l) => l.kind !== 'trunk')) this.smoothLines.set(line.id, this.makeSmoothLine(line));
-
-    this.buildPhysicalBlocks();
+    this.buildStationBlocks();
     this.buildTrackGeometry();
     this.buildStations();
     this.buildTrains();
@@ -222,13 +243,12 @@ export class RailRenderer {
     const nextStationId = run.nextStationIndex >= 0 ? line.stationIds[run.nextStationIndex] ?? -1 : -1;
     const currentStation = currentStationId >= 0 ? this.rail.stations[currentStationId] : null;
     const nextStation = nextStationId >= 0 ? this.rail.stations[nextStationId] : null;
-    const stateLabel = this.actualStateLabel(run);
-    const loopIndex = run.currentStationIndex >= 0 ? run.currentStationIndex : run.nextStationIndex;
     const consistLength = this.consistLength(run);
+    const loopIndex = run.currentStationIndex >= 0 ? run.currentStationIndex : run.nextStationIndex;
     return {
       id: run.id, lineId: run.lineId, lineName: line.name,
       service: run.service, serviceLabel: this.serviceLabel(run.service), carCount: run.carCount, consistLength,
-      state: run.state, stateLabel, x: run.x, z: run.z, heading: run.heading,
+      state: run.state, stateLabel: this.actualStateLabel(run), x: run.x, z: run.z, heading: run.heading,
       speed: run.speed, cruiseSpeed: run.cruiseSpeed, direction: run.direction,
       currentStationId, currentStationName: currentStation?.name ?? '—',
       nextStationId, nextStationName: nextStation?.name ?? '—',
@@ -250,7 +270,7 @@ export class RailRenderer {
         lineName: line?.name ?? `L${run.lineId}`,
         serviceLabel: this.serviceLabel(run.service),
         directionLabel: run.direction > 0 ? '下り' : '上り',
-        currentStationName: currentId >= 0 ? this.rail.stations[currentId]?.name ?? '—' : '走行中',
+        currentStationName: currentId >= 0 ? this.rail.stations[currentId]?.name ?? '—' : '駅間',
         nextStationName: nextId >= 0 ? this.rail.stations[nextId]?.name ?? '—' : '—',
         stateLabel: this.actualStateLabel(run),
         scheduledDepartureAt: run.scheduledDepartureAt,
@@ -335,7 +355,6 @@ export class RailRenderer {
         run.state = 'dwell';
         return;
       }
-
       let reversed = false;
       if ((run.direction > 0 && run.currentStationIndex >= lastStation) || (run.direction < 0 && run.currentStationIndex <= 0)) {
         run.direction = run.direction > 0 ? -1 : 1;
@@ -346,7 +365,6 @@ export class RailRenderer {
           Math.max(this.railTime, run.scheduledDepartureAt), run.lineId, run.direction, run.service, run.trainOrdinal,
         );
       }
-
       const next = run.currentStationIndex + run.direction;
       if (next < 0 || next > lastStation) return;
       if (this.railTime + 1e-6 < run.scheduledDepartureAt) {
@@ -354,17 +372,13 @@ export class RailRenderer {
         run.state = 'schedule';
         return;
       }
-      if (!this.canEnterBlock(run, run.currentStationIndex, next)) {
+      const plan = this.plannedRouteFor(run, run.currentStationIndex, next);
+      if (!plan) {
         if (run.waitingSince < 0) run.waitingSince = this.railTime;
         run.state = 'signal';
         return;
       }
-
-      run.originStationIndex = run.currentStationIndex;
-      run.nextStationIndex = next;
-      run.currentStationIndex = -1;
-      run.waitingSince = -1;
-      run.state = 'running';
+      this.enterPlannedRoute(run, plan);
     }
 
     if (run.state !== 'running' || run.nextStationIndex < 0) return;
@@ -373,17 +387,16 @@ export class RailRenderer {
     const boundaryRemaining = Math.abs(boundaryDistance - run.distance);
     const following = boundaryIndex + run.direction;
     const scheduledStop = this.shouldStop(run, boundaryIndex);
-    const signalStop = !scheduledStop && following >= 0 && following <= lastStation
-      && !this.canEnterBlock(run, boundaryIndex, following);
+    const nextPlan = !scheduledStop && following >= 0 && following <= lastStation
+      ? this.plannedRouteFor(run, boundaryIndex, following)
+      : null;
+    const signalStop = !scheduledStop && following >= 0 && following <= lastStation && !nextPlan;
 
     let brakeDistance = boundaryRemaining;
     if (!scheduledStop && !signalStop) {
       const stopIndex = this.nextScheduledStopIndex(run, boundaryIndex);
-      brakeDistance = stopIndex >= 0
-        ? Math.abs(this.stationDistanceForRun(run, smooth, stopIndex) - run.distance)
-        : Infinity;
+      brakeDistance = stopIndex >= 0 ? Math.abs(this.stationDistanceForRun(run, smooth, stopIndex) - run.distance) : Infinity;
     }
-
     const brakingTarget = Number.isFinite(brakeDistance)
       ? Math.sqrt(Math.max(0, 2 * RailRenderer.BRAKE * Math.max(0, brakeDistance - 0.30)))
       : run.cruiseSpeed;
@@ -397,15 +410,11 @@ export class RailRenderer {
 
     run.distance = boundaryDistance;
     const stationId = smooth.line.stationIds[boundaryIndex];
-    if (scheduledStop) {
+    if (scheduledStop || following < 0 || following > lastStation) {
       this.stopAtStation(run, boundaryIndex, stationId);
       return;
     }
-    if (following < 0 || following > lastStation) {
-      this.stopAtStation(run, boundaryIndex, stationId);
-      return;
-    }
-    if (!this.canEnterBlock(run, boundaryIndex, following)) {
+    if (!nextPlan) {
       run.speed = 0;
       run.currentStationIndex = boundaryIndex;
       run.originStationIndex = -1;
@@ -415,8 +424,7 @@ export class RailRenderer {
       if (run.waitingSince < 0) run.waitingSince = this.railTime;
       return;
     }
-    run.originStationIndex = boundaryIndex;
-    run.nextStationIndex = following;
+    this.enterPlannedRoute(run, nextPlan);
   }
 
   private stopAtStation(run: TrainRun, stationIndex: number, stationId: number): void {
@@ -429,88 +437,130 @@ export class RailRenderer {
     run.dwellRemaining = dwell;
     run.scheduledDepartureAt = this.railTime + dwell;
     run.waitingSince = -1;
-  }
-
-  private canEnterBlock(run: TrainRun, fromIndex: number, toIndex: number): boolean {
-    const blockId = this.blockIdFor(run.lineId, fromIndex, toIndex);
-    if (blockId < 0 || !this.blockAvailableFor(run.id, blockId)) return false;
-    const reserved = this.blockReservations.get(blockId);
-    if (reserved != null && reserved !== run.id) return false;
-    if (!this.terminalAvailable(run, toIndex)) return false;
-    if (!this.routesAvailableFor(run, fromIndex, toIndex)) return false;
-    if (!this.stationTrackAvailable(run, toIndex)) return false;
-    return true;
-  }
-
-  private stationTrackAvailable(run: TrainRun, toIndex: number): boolean {
-    const line = this.rail.lines[run.lineId]; if (!line) return false;
-    const stationId = line.stationIds[toIndex];
-    const targetTrack = this.trackMode(run, toIndex);
-    for (const other of this.trainRuns) {
-      if (other.id === run.id || other.currentStationIndex < 0) continue;
-      const otherLine = this.rail.lines[other.lineId]; if (!otherLine) continue;
-      const otherStationId = otherLine.stationIds[other.currentStationIndex];
-      if (otherStationId !== stationId) continue;
-      if (other.lineId !== run.lineId) {
-        if (this.rail.stations[stationId]?.lineIds.length > 1) return false;
-        continue;
-      }
-      if (line.kind !== 'trunk') return false;
-      const otherTrack = this.trackMode(other, other.currentStationIndex);
-      if (targetTrack === otherTrack && run.direction === other.direction) return false;
+    if (!this.laneTransitionActive(run)) {
+      run.previousLane = run.lane;
+      run.laneChangeStationIndex = -1;
     }
-    return true;
   }
 
-  private terminalAvailable(run: TrainRun, toIndex: number): boolean {
-    const line = this.rail.lines[run.lineId]; if (!line) return false;
-    const stationId = line.stationIds[toIndex], station = this.rail.stations[stationId];
-    if (!station || station.kind !== RailStationKind.Terminal) return true;
-    return !this.trainRuns.some((other) => {
-      if (other.id === run.id || other.currentStationIndex < 0) return false;
-      const otherLine = this.rail.lines[other.lineId]; if (!otherLine) return false;
-      return otherLine.stationIds[other.currentStationIndex] === stationId;
-    });
+  private enterPlannedRoute(run: TrainRun, plan: PlannedRoute): void {
+    if (plan.lane !== run.lane) {
+      run.previousLane = run.lane;
+      run.lane = plan.lane;
+      run.laneChangeStationIndex = plan.fromIndex;
+    } else if (!this.laneTransitionActive(run)) {
+      run.previousLane = run.lane;
+      run.laneChangeStationIndex = -1;
+    }
+    run.originStationIndex = plan.fromIndex;
+    run.nextStationIndex = plan.toIndex;
+    run.currentStationIndex = -1;
+    run.waitingSince = -1;
+    run.state = 'running';
+  }
+
+  private plannedRouteFor(run: TrainRun, fromIndex: number, toIndex: number): PlannedRoute | null {
+    const p = this.plannedRoutes.get(run.id);
+    return p && p.fromIndex === fromIndex && p.toIndex === toIndex ? p : null;
   }
 
   private rebuildDispatchReservations(): void {
     this.blockOccupancy.clear();
     this.blockReservations.clear();
     this.routeReservations.clear();
+    this.plannedRoutes.clear();
 
     for (const run of this.trainRuns) {
       if (run.state !== 'running' || run.originStationIndex < 0 || run.nextStationIndex < 0) continue;
-      const blockId = this.blockIdFor(run.lineId, run.originStationIndex, run.nextStationIndex);
-      if (blockId >= 0) this.blockOccupancy.set(blockId, run.id);
-      this.reserveRoutes(run, this.routeKeysForSegment(run, run.originStationIndex, run.nextStationIndex));
+      const occupied = this.blockIdForLane(run.lineId, run.originStationIndex, run.nextStationIndex, run.lane);
+      if (occupied >= 0) this.blockOccupancy.set(occupied, run.id);
+      if (this.laneTransitionActive(run) && run.previousLane !== run.lane) {
+        const oldBlock = this.blockIdForLane(run.lineId, run.originStationIndex, run.nextStationIndex, run.previousLane);
+        if (oldBlock >= 0) this.blockOccupancy.set(oldBlock, run.id);
+      }
+      this.reserveRoutes(run, this.routeKeysForSegment(run, run.originStationIndex, run.nextStationIndex, run.lane));
     }
 
     for (const run of this.dispatchOrder()) {
-      const seg = this.upcomingSegment(run); if (!seg) continue;
+      const seg = this.upcomingSegmentForReservation(run); if (!seg) continue;
       if (run.currentStationIndex >= 0 && this.railTime + 1e-6 < run.scheduledDepartureAt) continue;
-      const blockId = this.blockIdFor(run.lineId, seg.from, seg.to);
-      if (blockId < 0 || !this.blockAvailableFor(run.id, blockId)) continue;
-      if (!this.terminalAvailable(run, seg.to) || !this.stationTrackAvailable(run, seg.to)) continue;
-      const routeKeys = this.routeKeysForSegment(run, seg.from, seg.to);
-      if (!this.reserveRoutes(run, routeKeys)) continue;
-      this.blockReservations.set(blockId, run.id);
+      const plan = this.chooseRoutePlan(run, seg.from, seg.to); if (!plan) continue;
+      if (!this.reserveRoutes(run, plan.routeKeys)) continue;
+      this.blockReservations.set(plan.blockId, run.id);
+      this.plannedRoutes.set(run.id, plan);
     }
   }
 
-  private upcomingSegment(run: TrainRun): { from: number; to: number } | null {
+  private upcomingSegmentForReservation(run: TrainRun): { from: number; to: number } | null {
     const line = this.rail.lines[run.lineId]; if (!line || line.stationIds.length < 2) return null;
-    let from = run.currentStationIndex >= 0 ? run.currentStationIndex : run.nextStationIndex;
-    if (from < 0) return null;
-    let dir = run.direction;
-    const last = line.stationIds.length - 1;
-    if (from === last && dir > 0) dir = -1;
-    else if (from === 0 && dir < 0) dir = 1;
-    const to = from + dir;
-    return to >= 0 && to <= last ? { from, to } : null;
+    if (run.currentStationIndex >= 0) {
+      let dir = run.direction;
+      const last = line.stationIds.length - 1;
+      if (run.currentStationIndex === last && dir > 0) dir = -1;
+      else if (run.currentStationIndex === 0 && dir < 0) dir = 1;
+      const to = run.currentStationIndex + dir;
+      return to >= 0 && to <= last ? { from: run.currentStationIndex, to } : null;
+    }
+    if (run.nextStationIndex < 0 || this.shouldStop(run, run.nextStationIndex)) return null;
+    const to = run.nextStationIndex + run.direction;
+    return to >= 0 && to < line.stationIds.length ? { from: run.nextStationIndex, to } : null;
+  }
+
+  private chooseRoutePlan(run: TrainRun, fromIndex: number, toIndex: number): PlannedRoute | null {
+    const line = this.rail.lines[run.lineId]; if (!line) return null;
+    const normal: TrackLane = line.kind === 'trunk' ? run.direction : 0;
+    const candidates: TrackLane[] = [normal];
+    if (line.kind === 'trunk' && this.canUseCrossover(run, fromIndex, toIndex)) candidates.push((normal * -1) as TrackLane);
+
+    for (const lane of candidates) {
+      const blockId = this.blockIdForLane(run.lineId, fromIndex, toIndex, lane); if (blockId < 0) continue;
+      if (!this.blockAvailableFor(run.id, blockId)) continue;
+      const reserved = this.blockReservations.get(blockId); if (reserved != null && reserved !== run.id) continue;
+      if (!this.terminalAvailable(run, toIndex, lane)) continue;
+      if (!this.stationTrackAvailable(run, toIndex, lane)) continue;
+      const routeKeys = this.routeKeysForSegment(run, fromIndex, toIndex, lane);
+      if (!this.routesAvailableFor(run, routeKeys)) continue;
+      return { trainId: run.id, lineId: run.lineId, fromIndex, toIndex, blockId, lane, routeKeys };
+    }
+    return null;
+  }
+
+  private canUseCrossover(run: TrainRun, fromIndex: number, toIndex: number): boolean {
+    if (!this.hasCrossover(run.lineId, fromIndex) || !this.hasCrossover(run.lineId, toIndex)) return false;
+    if (run.id === this.recoveryTrainId) return true;
+    if (run.service === 'limited') return true;
+    const waited = run.waitingSince >= 0 ? this.railTime - run.waitingSince : 0;
+    if (run.service === 'rapid') return waited >= 6;
+    return waited >= 24;
+  }
+
+  private stationTrackAvailable(run: TrainRun, toIndex: number, lane: TrackLane): boolean {
+    const line = this.rail.lines[run.lineId]; if (!line) return false;
+    const stationId = line.stationIds[toIndex], mode = this.trackMode(run, toIndex);
+    for (const other of this.trainRuns) {
+      if (other.id === run.id || other.currentStationIndex < 0) continue;
+      const otherLine = this.rail.lines[other.lineId]; if (!otherLine) continue;
+      if (otherLine.stationIds[other.currentStationIndex] !== stationId) continue;
+      if (other.lineId !== run.lineId) continue;
+      if (other.lane === lane && this.trackMode(other, other.currentStationIndex) === mode) return false;
+    }
+    return true;
+  }
+
+  private terminalAvailable(run: TrainRun, toIndex: number, lane: TrackLane): boolean {
+    const line = this.rail.lines[run.lineId]; if (!line) return false;
+    const stationId = line.stationIds[toIndex], station = this.rail.stations[stationId];
+    if (!station || station.kind !== RailStationKind.Terminal) return true;
+    return !this.trainRuns.some((other) => {
+      if (other.id === run.id || other.currentStationIndex < 0) return false;
+      const otherLine = this.rail.lines[other.lineId]; if (!otherLine || otherLine.stationIds[other.currentStationIndex] !== stationId) return false;
+      if (other.lineId !== run.lineId) return true;
+      return other.lane === lane;
+    });
   }
 
   private blockAvailableFor(trainId: number, blockId: number): boolean {
-    const block = this.physicalBlocks[blockId]; if (!block) return false;
+    const block = this.stationBlocks[blockId]; if (!block) return false;
     for (const conflictId of block.conflicts) {
       const occupiedBy = this.blockOccupancy.get(conflictId);
       if (occupiedBy != null && occupiedBy !== trainId) return false;
@@ -520,8 +570,8 @@ export class RailRenderer {
     return true;
   }
 
-  private routesAvailableFor(run: TrainRun, fromIndex: number, toIndex: number): boolean {
-    for (const key of this.routeKeysForSegment(run, fromIndex, toIndex)) {
+  private routesAvailableFor(run: TrainRun, keys: string[]): boolean {
+    for (const key of keys) {
       const r = this.routeReservations.get(key);
       if (r && r.ownerTrainId !== run.id) return false;
     }
@@ -529,83 +579,107 @@ export class RailRenderer {
   }
 
   private reserveRoutes(run: TrainRun, keys: string[]): boolean {
-    for (const key of keys) {
-      const current = this.routeReservations.get(key);
-      if (current && current.ownerTrainId !== run.id) return false;
-    }
-    const route = `${this.trackMode(run, run.currentStationIndex >= 0 ? run.currentStationIndex : run.nextStationIndex)}:${run.direction}`;
+    if (!this.routesAvailableFor(run, keys)) return false;
+    const route = `line:${run.lineId}:lane:${run.lane}:mode:${this.trackMode(run, run.currentStationIndex >= 0 ? run.currentStationIndex : run.nextStationIndex)}`;
     for (const key of keys) this.routeReservations.set(key, { ownerTrainId: run.id, lineId: run.lineId, route });
     return true;
   }
 
-  private routeKeysForSegment(run: TrainRun, fromIndex: number, toIndex: number): string[] {
+  private routeKeysForSegment(run: TrainRun, fromIndex: number, toIndex: number, lane: TrackLane): string[] {
     const line = this.rail.lines[run.lineId]; if (!line) return [];
     const keys: string[] = [];
-    for (const index of [fromIndex, toIndex]) {
-      const stationId = line.stationIds[index], station = this.rail.stations[stationId];
-      if (!station) continue;
-      if (station.lineIds.length > 1) keys.push(`junction:${stationId}`);
-      if (this.lineStationHasPassingLoop(run.lineId, index)) keys.push(`turnout:${run.lineId}:${stationId}:${run.direction}`);
-      if (station.kind === RailStationKind.Terminal) keys.push(`terminal:${stationId}`);
+    keys.push(this.throatKey(run.lineId, fromIndex, toIndex, lane));
+    keys.push(this.throatKey(run.lineId, toIndex, fromIndex, lane));
+    if (line.kind === 'trunk' && lane !== run.lane) keys.push(`crossover:${run.lineId}:${line.stationIds[fromIndex]}:${run.direction}`);
+    if (this.lineStationHasPassingLoop(run.lineId, toIndex)) {
+      const mode = this.trackMode(run, toIndex);
+      keys.push(`turnout:${run.lineId}:${line.stationIds[toIndex]}:${lane}:${mode}`);
     }
+    const target = this.rail.stations[line.stationIds[toIndex]];
+    if (target?.kind === RailStationKind.Terminal) keys.push(`terminal:${target.id}:${lane}`);
     return [...new Set(keys)];
   }
 
-  private buildPhysicalBlocks(): void {
-    this.physicalBlocks.length = 0;
+  private throatKey(lineId: number, stationIndex: number, neighborIndex: number, lane: TrackLane): string {
+    const line = this.rail.lines[lineId]; if (!line) return `throat:${lineId}:${stationIndex}:${lane}`;
+    const stationId = line.stationIds[stationIndex], station = this.rail.stations[stationId];
+    const smooth = this.smoothLines.get(lineId);
+    let sector = neighborIndex > stationIndex ? 0 : 4;
+    if (smooth) {
+      const base = smooth.stationDistances[stationIndex] ?? 0;
+      const sign = neighborIndex > stationIndex ? 1 : -1;
+      const probe = this.sampleSmooth(smooth, THREE.MathUtils.clamp(base + sign * 55, 0, smooth.length));
+      const origin = this.sampleSmooth(smooth, base);
+      if (probe && origin) {
+        const angle = Math.atan2(probe.z - origin.z, probe.x - origin.x);
+        sector = ((Math.round(angle / (Math.PI / 4)) % 8) + 8) % 8;
+      }
+    }
+    const hasSpur = !!station?.lineIds.some((id) => this.rail.lines[id]?.kind === 'spur');
+    const laneKey = hasSpur ? 'shared' : String(lane);
+    return `throat:${stationId}:${sector}:${laneKey}`;
+  }
+
+  private buildStationBlocks(): void {
+    this.stationBlocks.length = 0;
     this.blockIdByKey.clear();
     for (const smooth of this.smoothLines.values()) {
-      const dirs: (-1 | 0 | 1)[] = smooth.line.kind === 'trunk' ? [-1, 1] : [0];
+      const lanes: TrackLane[] = smooth.line.kind === 'trunk' ? [-1, 1] : [0];
       for (let segmentIndex = 0; segmentIndex < smooth.stationDistances.length - 1; segmentIndex++) {
-        for (const direction of dirs) {
-          const start = smooth.stationDistances[segmentIndex], end = smooth.stationDistances[segmentIndex + 1];
-          const lo = Math.min(start, end), hi = Math.max(start, end);
+        const fromStationId = smooth.line.stationIds[segmentIndex], toStationId = smooth.line.stationIds[segmentIndex + 1];
+        for (const lane of lanes) {
+          const lo = Math.min(smooth.stationDistances[segmentIndex], smooth.stationDistances[segmentIndex + 1]);
+          const hi = Math.max(smooth.stationDistances[segmentIndex], smooth.stationDistances[segmentIndex + 1]);
           const keys = new Set<string>();
-          for (let d = lo + 3; d <= hi - 3; d += RailRenderer.BLOCK_SAMPLE) {
+          for (let d = lo + 8; d <= hi - 8; d += RailRenderer.BLOCK_SAMPLE) {
             const p = this.sampleSmooth(smooth, d); if (!p) continue;
-            const offset = smooth.line.kind === 'trunk' ? RailRenderer.MAIN_OFFSET * direction : 0;
-            const x = p.x - Math.sin(p.heading) * offset;
-            const z = p.z + Math.cos(p.heading) * offset;
-            keys.add(this.trackCellKey(x, z));
+            const off = smooth.line.kind === 'trunk' ? RailRenderer.MAIN_OFFSET * lane : 0;
+            keys.add(this.trackCellKey(p.x - Math.sin(p.heading) * off, p.z + Math.cos(p.heading) * off));
           }
-          const id = this.physicalBlocks.length;
-          const block: PhysicalBlock = { id, lineId: smooth.line.id, segmentIndex, direction, keys, conflicts: new Set([id]) };
-          this.physicalBlocks.push(block);
-          this.blockIdByKey.set(this.blockKey(smooth.line.id, segmentIndex, direction), id);
+          const id = this.stationBlocks.length;
+          this.stationBlocks.push({ id, lineId: smooth.line.id, segmentIndex, lane, fromStationId, toStationId, keys, conflicts: new Set([id]) });
+          this.blockIdByKey.set(this.blockKey(smooth.line.id, segmentIndex, lane), id);
         }
       }
     }
 
-    for (let i = 0; i < this.physicalBlocks.length; i++) for (let j = i + 1; j < this.physicalBlocks.length; j++) {
-      const a = this.physicalBlocks[i], b = this.physicalBlocks[j];
+    for (let i = 0; i < this.stationBlocks.length; i++) for (let j = i + 1; j < this.stationBlocks.length; j++) {
+      const a = this.stationBlocks[i], b = this.stationBlocks[j];
       if (a.lineId === b.lineId) continue;
       const small = a.keys.size <= b.keys.size ? a.keys : b.keys;
       const large = small === a.keys ? b.keys : a.keys;
+      if (small.size === 0) continue;
       let overlap = 0;
-      for (const key of small) if (large.has(key) && ++overlap >= 2) break;
-      if (overlap >= 2) { a.conflicts.add(b.id); b.conflicts.add(a.id); }
+      for (const key of small) if (large.has(key)) overlap++;
+      const ratio = overlap / small.size;
+      if (overlap >= 4 && ratio >= 0.28) {
+        a.conflicts.add(b.id);
+        b.conflicts.add(a.id);
+      }
     }
   }
 
-  private blockIdFor(lineId: number, fromIndex: number, toIndex: number): number {
+  private blockIdForLane(lineId: number, fromIndex: number, toIndex: number, lane: TrackLane): number {
     const line = this.rail.lines[lineId]; if (!line) return -1;
-    const segment = Math.min(fromIndex, toIndex);
-    const direction: -1 | 0 | 1 = line.kind === 'trunk' ? (toIndex > fromIndex ? 1 : -1) : 0;
-    return this.blockIdByKey.get(this.blockKey(lineId, segment, direction)) ?? -1;
+    const actualLane: TrackLane = line.kind === 'trunk' ? lane : 0;
+    return this.blockIdByKey.get(this.blockKey(lineId, Math.min(fromIndex, toIndex), actualLane)) ?? -1;
   }
 
-  private blockKey(lineId: number, segment: number, direction: -1 | 0 | 1): string { return `${lineId}:${segment}:${direction}`; }
-  private trackCellKey(x: number, z: number): string { const q = RailRenderer.BLOCK_QUANTIZE; return `${Math.round(x / q)},${Math.round(z / q)}`; }
+  private blockKey(lineId: number, segment: number, lane: TrackLane): string { return `${lineId}:${segment}:${lane}`; }
+  private trackCellKey(x: number, z: number): string {
+    const q = RailRenderer.BLOCK_QUANTIZE;
+    return `${Math.round(x / q)},${Math.round(z / q)}`;
+  }
 
   private buildTrackGeometry(): void {
     const ballast: StaticPart[] = [], rails: StaticPart[] = [], sleepers: StaticPart[] = [], supports: StaticPart[] = [];
     for (const smooth of this.smoothLines.values()) {
       if (smooth.line.kind === 'trunk') {
         for (const side of [-1, 1]) this.pushOffsetTrack(smooth, side * RailRenderer.MAIN_OFFSET, ballast, rails, sleepers);
+        for (let i = 0; i < smooth.stationDistances.length; i++) this.buildCrossovers(smooth, i, ballast, rails);
       } else this.pushOffsetTrack(smooth, 0, ballast, rails, sleepers);
       for (let s = 36; s < smooth.length; s += 72) {
-        const p = this.sampleSmooth(smooth, s); if (!p) continue;
-        supports.push({ matrix: this.matrix(p.x, RailRenderer.TRACK_Y * 0.5, p.z, 0.68, RailRenderer.TRACK_Y, 0.68) });
+        const p = this.sampleSmooth(smooth, s); if (p) supports.push({ matrix: this.matrix(p.x, RailRenderer.TRACK_Y * 0.5, p.z, 0.68, RailRenderer.TRACK_Y, 0.68) });
       }
     }
     const box = new THREE.BoxGeometry(1, 1, 1);
@@ -624,9 +698,38 @@ export class RailRenderer {
       if (s >= smooth.length) break;
     }
     for (let s = 0; s <= smooth.length; s += 8.5) {
-      const p = this.offsetPoint(smooth, s, offset); if (!p) continue;
-      sleepers.push({ matrix: this.matrix(p.x, RailRenderer.TRACK_Y + 0.17, p.z, 0.18, 0.12, 3.0, -p.heading) });
+      const p = this.offsetPoint(smooth, s, offset); if (p) sleepers.push({ matrix: this.matrix(p.x, RailRenderer.TRACK_Y + 0.17, p.z, 0.18, 0.12, 3.0, -p.heading) });
     }
+  }
+
+  private buildCrossovers(smooth: SmoothLine, stationIndex: number, ballast: StaticPart[], rails: StaticPart[]): void {
+    if (!this.hasCrossover(smooth.line.id, stationIndex)) return;
+    const stationId = smooth.line.stationIds[stationIndex];
+    const center = smooth.stationDistances[stationIndex] ?? 0;
+    const startOffset = this.crossoverStartOffset(stationId);
+    for (const dir of [-1, 1] as const) {
+      const neighbor = stationIndex + dir;
+      if (neighbor < 0 || neighbor >= smooth.line.stationIds.length) continue;
+      const d0 = center + dir * startOffset;
+      const d1 = center + dir * (startOffset + RailRenderer.CROSSOVER_LENGTH);
+      if (d0 < 0 || d0 > smooth.length || d1 < 0 || d1 > smooth.length) continue;
+      const aL = this.offsetPoint(smooth, d0, -RailRenderer.MAIN_OFFSET);
+      const aR = this.offsetPoint(smooth, d0, RailRenderer.MAIN_OFFSET);
+      const bL = this.offsetPoint(smooth, d1, -RailRenderer.MAIN_OFFSET);
+      const bR = this.offsetPoint(smooth, d1, RailRenderer.MAIN_OFFSET);
+      if (!aL || !aR || !bL || !bR) continue;
+      this.pushTrackSegment(aL, bR, ballast, rails, 2.8);
+      this.pushTrackSegment(aR, bL, ballast, rails, 2.8);
+    }
+  }
+
+  private hasCrossover(lineId: number, stationIndex: number): boolean {
+    const line = this.rail.lines[lineId];
+    return !!line && line.kind === 'trunk' && stationIndex >= 0 && stationIndex < line.stationIds.length;
+  }
+
+  private crossoverStartOffset(stationId: number): number {
+    return this.platformLength(stationId) * 0.5 + RailRenderer.SWITCH_CLEARANCE + RailRenderer.SWITCH_APPROACH + RailRenderer.CROSSOVER_EXTRA;
   }
 
   private buildStations(): void {
@@ -763,6 +866,7 @@ export class RailRenderer {
         const stationIndex = Math.min(maxStation, Math.round((i * maxStation) / Math.max(1, services.length - 1)));
         let direction: 1 | -1 = (i & 1) === 0 ? 1 : -1;
         if (stationIndex <= 0) direction = 1; else if (stationIndex >= maxStation) direction = -1;
+        const lane: TrackLane = line.kind === 'trunk' ? direction : 0;
         const carCount = service === 'limited' || service === 'rapid' ? 5 : line.kind === 'trunk' ? 4 : 3;
         const initialDwell = 4 + i * 3;
         let scheduledDepartureAt = initialDwell;
@@ -773,7 +877,8 @@ export class RailRenderer {
           id: this.trainRuns.length, lineId: line.id, service, carCount,
           cruiseSpeed: service === 'limited' ? 31 : service === 'rapid' ? 27 : line.kind === 'trunk' ? 21.5 : 17,
           direction, speed: 0, distance: 0, currentStationIndex: stationIndex, originStationIndex: -1, nextStationIndex: -1,
-          dwellRemaining: initialDwell, scheduledDepartureAt, waitingSince: -1, trainOrdinal: i, state: 'dwell', x: 0, z: 0, heading: 0,
+          dwellRemaining: initialDwell, scheduledDepartureAt, waitingSince: -1, trainOrdinal: i, state: 'dwell',
+          lane, previousLane: lane, laneChangeStationIndex: -1, x: 0, z: 0, heading: 0,
         };
         run.distance = this.stationDistanceForRun(run, smooth, stationIndex);
         this.trainRuns.push(run);
@@ -844,14 +949,40 @@ export class RailRenderer {
 
   private trainTrackOffset(run: TrainRun, smooth: SmoothLine, distance: number): number {
     if (smooth.line.kind !== 'trunk') return 0;
-    const base = RailRenderer.MAIN_OFFSET * run.direction;
-    if (run.service !== 'local') return base;
+    let laneValue = this.laneValueAt(run, smooth, distance);
+    if (Math.abs(laneValue) < 0.05) laneValue = run.direction;
+    let offset = RailRenderer.MAIN_OFFSET * laneValue;
+    if (run.service !== 'local') return offset;
     let profile = 0;
     for (let i = 1; i < smooth.stationDistances.length - 1; i++) {
       if (!this.lineStationHasPassingLoop(run.lineId, i)) continue;
       profile = Math.max(profile, this.sidingProfile(Math.abs(distance - smooth.stationDistances[i]), this.platformLength(smooth.line.stationIds[i]) / 2));
     }
-    return run.direction * (RailRenderer.MAIN_OFFSET + (RailRenderer.SIDING_OFFSET - RailRenderer.MAIN_OFFSET) * profile);
+    const sign = laneValue >= 0 ? 1 : -1;
+    offset = sign * (RailRenderer.MAIN_OFFSET + (RailRenderer.SIDING_OFFSET - RailRenderer.MAIN_OFFSET) * profile);
+    return offset;
+  }
+
+  private laneValueAt(run: TrainRun, smooth: SmoothLine, distance: number): number {
+    if (run.laneChangeStationIndex < 0 || run.previousLane === run.lane) return run.lane;
+    const stationId = smooth.line.stationIds[run.laneChangeStationIndex];
+    const stationD = smooth.stationDistances[run.laneChangeStationIndex] ?? run.distance;
+    const along = (distance - stationD) * run.direction;
+    const start = this.crossoverStartOffset(stationId);
+    if (along <= start) return run.previousLane;
+    if (along >= start + RailRenderer.CROSSOVER_LENGTH) return run.lane;
+    const t0 = THREE.MathUtils.clamp((along - start) / RailRenderer.CROSSOVER_LENGTH, 0, 1);
+    const t = t0 * t0 * (3 - 2 * t0);
+    return THREE.MathUtils.lerp(run.previousLane, run.lane, t);
+  }
+
+  private laneTransitionActive(run: TrainRun): boolean {
+    if (run.laneChangeStationIndex < 0 || run.previousLane === run.lane) return false;
+    const smooth = this.smoothLines.get(run.lineId); if (!smooth) return false;
+    const stationId = smooth.line.stationIds[run.laneChangeStationIndex];
+    const stationD = smooth.stationDistances[run.laneChangeStationIndex] ?? run.distance;
+    const along = (run.distance - stationD) * run.direction;
+    return along < this.crossoverStartOffset(stationId) + RailRenderer.CROSSOVER_LENGTH + this.consistLength(run) * 0.5;
   }
 
   private trackMode(run: TrainRun, stationIndex: number): RouteMode {
@@ -898,26 +1029,36 @@ export class RailRenderer {
   }
 
   private signalAspect(signal: RailSignal): SignalAspect {
-    const to = signal.stationIndex + signal.direction;
-    const blockId = this.blockIdFor(signal.lineId, signal.stationIndex, to); if (blockId < 0) return 'red';
-    const block = this.physicalBlocks[blockId]; if (!block) return 'red';
-    for (const id of block.conflicts) if (this.blockOccupancy.has(id)) return 'red';
-    for (const id of block.conflicts) {
-      const owner = this.blockReservations.get(id); if (owner == null) continue;
-      const run = this.trainRuns[owner];
-      if (!run || run.lineId !== signal.lineId || run.direction !== signal.direction) return 'red';
-    }
     const line = this.rail.lines[signal.lineId]; if (!line) return 'red';
-    const stationId = line.stationIds[to];
-    const junction = this.routeReservations.get(`junction:${stationId}`);
-    if (junction && junction.lineId !== signal.lineId) return 'red';
+    const to = signal.stationIndex + signal.direction;
+    if (to < 0 || to >= line.stationIds.length) return 'red';
+    const normalLane: TrackLane = line.kind === 'trunk' ? signal.direction : 0;
+    const blockId = this.blockIdForLane(signal.lineId, signal.stationIndex, to, normalLane);
+    if (blockId < 0) return 'red';
+
+    const planned = [...this.plannedRoutes.values()].find((p) =>
+      p.lineId === signal.lineId && p.fromIndex === signal.stationIndex && p.toIndex === to
+    );
+    const protectedBlockId = planned?.blockId ?? blockId;
+    const owner = planned?.trainId ?? -1;
+    if (!this.blockFreeIgnoringOwnReservation(protectedBlockId, owner)) return 'red';
+
     const next = to + signal.direction;
     if (next >= 0 && next < line.stationIds.length) {
-      const nextBlock = this.blockIdFor(signal.lineId, to, next);
-      const nb = this.physicalBlocks[nextBlock];
-      if (nb && [...nb.conflicts].some((id) => this.blockOccupancy.has(id) || this.blockReservations.has(id))) return 'yellow';
+      const nextLane = planned?.lane ?? normalLane;
+      const nextId = this.blockIdForLane(signal.lineId, to, next, nextLane);
+      if (nextId >= 0 && !this.blockFreeIgnoringOwnReservation(nextId, -1)) return 'yellow';
     }
     return 'green';
+  }
+
+  private blockFreeIgnoringOwnReservation(blockId: number, trainId: number): boolean {
+    const block = this.stationBlocks[blockId]; if (!block) return false;
+    for (const id of block.conflicts) {
+      const occ = this.blockOccupancy.get(id); if (occ != null && occ !== trainId) return false;
+      const res = this.blockReservations.get(id); if (res != null && res !== trainId) return false;
+    }
+    return true;
   }
 
   private setSignalLamp(mesh: THREE.InstancedMesh, signal: RailSignal, lamp: 0 | 1 | 2, on: boolean): void {
@@ -927,38 +1068,43 @@ export class RailRenderer {
 
   private buildTurnoutIndicators(): void {
     const box = new THREE.BoxGeometry(1, 1, 1);
-    const indicators: TurnoutIndicator[] = [];
-    for (const station of this.rail.stations) {
-      if (station.lineIds.length > 1) {
-        for (const lineId of station.lineIds) {
-          const line = this.rail.lines[lineId], smooth = this.smoothLines.get(lineId); if (!line || !smooth) continue;
-          const idx = line.stationIds.indexOf(station.id); if (idx < 0) continue;
-          const dir: 1 | -1 = idx < line.stationIds.length - 1 ? 1 : -1;
-          const d = THREE.MathUtils.clamp((smooth.stationDistances[idx] ?? 0) + dir * (this.platformLength(station.id) / 2 + 28), 0, smooth.length);
-          const p = this.sampleSmooth(smooth, d); if (!p) continue;
-          const m = this.matrix(p.x, RailRenderer.TRACK_Y + 1.15, p.z, 3.2, 0.34, 0.34, -p.heading);
-          indicators.push({ stationId: station.id, lineId, direction: dir, mode: 'junction', instanceIndex: indicators.length, matrix: m });
-        }
-      }
-      for (const lineId of station.lineIds) {
-        const line = this.rail.lines[lineId]; if (!line || line.kind !== 'trunk') continue;
-        const idx = line.stationIds.indexOf(station.id); if (!this.lineStationHasPassingLoop(lineId, idx)) continue;
-        const smooth = this.smoothLines.get(lineId); if (!smooth) continue;
-        for (const dir of [-1, 1] as const) {
-          const d = THREE.MathUtils.clamp((smooth.stationDistances[idx] ?? 0) - dir * (this.platformLength(station.id) / 2 + RailRenderer.SWITCH_CLEARANCE + 20), 0, smooth.length);
-          const p = this.sampleSmooth(smooth, d); if (!p) continue;
-          for (const mode of ['main', 'siding'] as const) {
-            const off = dir * (mode === 'main' ? RailRenderer.MAIN_OFFSET : RailRenderer.SIDING_OFFSET);
-            const x = p.x - Math.sin(p.heading) * off, z = p.z + Math.cos(p.heading) * off;
-            indicators.push({ stationId: station.id, lineId, direction: dir, mode, instanceIndex: indicators.length, matrix: this.matrix(x, RailRenderer.TRACK_Y + 0.75, z, 2.2, 0.25, 0.25, -p.heading) });
+    for (const line of this.rail.lines) {
+      const smooth = this.smoothLines.get(line.id); if (!smooth) continue;
+      for (let i = 0; i < line.stationIds.length; i++) {
+        const stationId = line.stationIds[i];
+        if (this.lineStationHasPassingLoop(line.id, i)) {
+          for (const dir of [-1, 1] as const) {
+            const d = THREE.MathUtils.clamp((smooth.stationDistances[i] ?? 0) - dir * (this.platformLength(stationId) / 2 + RailRenderer.SWITCH_CLEARANCE + 20), 0, smooth.length);
+            const p = this.sampleSmooth(smooth, d); if (!p) continue;
+            for (const kind of ['main', 'siding'] as const) {
+              const off = dir * (kind === 'main' ? RailRenderer.MAIN_OFFSET : RailRenderer.SIDING_OFFSET);
+              const x = p.x - Math.sin(p.heading) * off, z = p.z + Math.cos(p.heading) * off;
+              this.turnoutIndicators.push({ stationId, lineId: line.id, direction: dir, kind, lane: dir, instanceIndex: this.turnoutIndicators.length, matrix: this.matrix(x, RailRenderer.TRACK_Y + 0.75, z, 2.2, 0.25, 0.25, -p.heading) });
+            }
           }
+        }
+        if (this.hasCrossover(line.id, i)) {
+          for (const dir of [-1, 1] as const) {
+            const neighbor = i + dir; if (neighbor < 0 || neighbor >= line.stationIds.length) continue;
+            const d = (smooth.stationDistances[i] ?? 0) + dir * (this.crossoverStartOffset(stationId) - 7);
+            const p = this.sampleSmooth(smooth, THREE.MathUtils.clamp(d, 0, smooth.length)); if (!p) continue;
+            for (const kind of ['crossover-normal', 'crossover-reverse'] as const) {
+              const lane: TrackLane = kind === 'crossover-normal' ? dir : (dir * -1) as TrackLane;
+              const off = RailRenderer.MAIN_OFFSET * lane;
+              const x = p.x - Math.sin(p.heading) * off, z = p.z + Math.cos(p.heading) * off;
+              this.turnoutIndicators.push({ stationId, lineId: line.id, direction: dir, kind, lane, instanceIndex: this.turnoutIndicators.length, matrix: this.matrix(x, RailRenderer.TRACK_Y + 1.05, z, 3.0, 0.30, 0.30, -p.heading) });
+            }
+          }
+        }
+        if (this.rail.stations[stationId]?.lineIds.length > 1) {
+          const p = this.sampleSmooth(smooth, smooth.stationDistances[i] ?? 0); if (!p) continue;
+          this.turnoutIndicators.push({ stationId, lineId: line.id, direction: 1, kind: 'junction', lane: 0, instanceIndex: this.turnoutIndicators.length, matrix: this.matrix(p.x, RailRenderer.TRACK_Y + 1.15, p.z, 3.2, 0.34, 0.34, -p.heading) });
         }
       }
     }
-    this.turnoutIndicators.push(...indicators);
-    if (!indicators.length) return;
-    this.turnoutMesh = new THREE.InstancedMesh(box, new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true }), indicators.length);
-    indicators.forEach((v, i) => { this.turnoutMesh!.setMatrixAt(i, v.matrix); this.turnoutMesh!.setColorAt(i, new THREE.Color(0xd6a83a)); });
+    if (!this.turnoutIndicators.length) return;
+    this.turnoutMesh = new THREE.InstancedMesh(box, new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true }), this.turnoutIndicators.length);
+    for (const v of this.turnoutIndicators) { this.turnoutMesh.setMatrixAt(v.instanceIndex, v.matrix); this.turnoutMesh.setColorAt(v.instanceIndex, new THREE.Color(0xd6a83a)); }
     this.turnoutMesh.instanceMatrix.needsUpdate = true; if (this.turnoutMesh.instanceColor) this.turnoutMesh.instanceColor.needsUpdate = true;
     this.turnoutMesh.frustumCulled = false; this.scene.add(this.turnoutMesh);
   }
@@ -966,13 +1112,24 @@ export class RailRenderer {
   private updateTurnoutIndicators(): void {
     if (!this.turnoutMesh) return;
     for (const v of this.turnoutIndicators) {
-      let active = false, locked = false;
-      if (v.mode === 'junction') {
-        const r = this.routeReservations.get(`junction:${v.stationId}`);
-        locked = !!r; active = !!r && r.lineId === v.lineId;
+      let locked = false, active = false;
+      if (v.kind === 'crossover-normal' || v.kind === 'crossover-reverse') {
+        const r = this.routeReservations.get(`crossover:${v.lineId}:${v.stationId}:${v.direction}`);
+        locked = !!r;
+        if (r) {
+          const plan = this.plannedRoutes.get(r.ownerTrainId);
+          active = !!plan && plan.lane === v.lane;
+        } else active = v.kind === 'crossover-normal';
+      } else if (v.kind === 'main' || v.kind === 'siding') {
+        const prefix = `turnout:${v.lineId}:${v.stationId}:${v.lane}:`;
+        const entry = [...this.routeReservations.entries()].find(([key]) => key.startsWith(prefix));
+        locked = !!entry;
+        active = !!entry && entry[0].endsWith(`:${v.kind}`);
       } else {
-        const r = this.routeReservations.get(`turnout:${v.lineId}:${v.stationId}:${v.direction}`);
-        locked = !!r; active = !!r && r.route.startsWith(v.mode);
+        const station = this.rail.stations[v.stationId];
+        const keys = [...this.routeReservations.entries()].filter(([key]) => key.startsWith(`throat:${station?.id ?? v.stationId}:`));
+        locked = keys.length > 0;
+        active = keys.some(([, r]) => r.lineId === v.lineId);
       }
       const color = !locked ? 0xd6a83a : active ? 0x35ef72 : 0xe84b4b;
       this.turnoutMesh.setColorAt(v.instanceIndex, new THREE.Color(color));
@@ -1126,6 +1283,7 @@ export class RailRenderer {
   }
 
   private sampleSmoothPosition(smooth: SmoothLine, distance: number): RailPoint | null {
+    if (smooth.path.length < 2 || smooth.length <= 0) return null;
     const d = THREE.MathUtils.clamp(distance, 0, smooth.length); let hi = 1;
     while (hi < smooth.cumulative.length && smooth.cumulative[hi] < d) hi++;
     hi = Math.min(hi, smooth.path.length - 1); const lo = Math.max(0, hi - 1), a = smooth.path[lo], b = smooth.path[hi], start = smooth.cumulative[lo], end = smooth.cumulative[hi];
