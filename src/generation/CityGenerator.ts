@@ -248,7 +248,8 @@ export class CityGenerator {
       const lateralSpare = Math.max(0, frontageAvail - localWidth);
       z += (this.rng() - 0.5) * lateralSpare * 0.55;
       x = parcel.frontage === 'west' ? minX + front + localDepth / 2 : maxX - front - localDepth / 2;
-      rotation = Math.PI / 2;
+      // Rendererは現状90°を寸法swapで表現しているため、world-space寸法へ畳み込む。
+      return { x, z, width: localDepth, depth: localWidth, rotation: 0 };
     }
     return { x, z, width: localWidth, depth: localDepth, rotation };
   }
