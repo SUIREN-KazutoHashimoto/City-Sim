@@ -1,6 +1,12 @@
 import { RailNetworkPlan, RailStationKind, type RailPoint } from './RailPlanning';
 import type { RoadNetwork } from '../traffic/RoadNetwork';
 
+declare module './RailPlanning' {
+  interface RailStation {
+    influenceRadius: number;
+  }
+}
+
 type AnyRailPlan = RailNetworkPlan & Record<string, any>;
 
 const proto = RailNetworkPlan.prototype as unknown as Record<string, any>;
@@ -26,13 +32,11 @@ proto.alignToRoadNetwork = function straightRailAlignment(this: AnyRailPlan, net
       station.x = land.x;
       station.z = land.z;
     } else {
-      // 駅本体は計画線形上に置き、道路へのアクセスだけroadNodeで持つ。
       station.x = station.plannedX;
       station.z = station.plannedZ;
     }
   }
 
-  // 複数路線を共有する駅は乗換拠点として扱う。
   for (const station of this.stations) {
     if (station.kind === RailStationKind.Central || station.kind === RailStationKind.Terminal) continue;
     if (station.lineIds.length >= 2) {
@@ -52,7 +56,6 @@ proto.alignToRoadNetwork = function straightRailAlignment(this: AnyRailPlan, net
       if (!last || !this.samePoint(last, p)) points.push(p);
     }
 
-    // 幹線は原則一直線。支線も駅間を直結し、細かな道路曲線は作らない。
     line.path = this.compressCollinear(points) as RailPoint[];
     this.rebuildMetrics(line);
   }
