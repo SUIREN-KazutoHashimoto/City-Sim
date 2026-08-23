@@ -23,7 +23,7 @@ function hash01(value: number): number {
   return x / 0x100000000;
 }
 
-function nearestStation(rail: RailNetworkPlan, x: number, z: number, maxDistance = 650): RailStation | null {
+function nearestStation(rail: RailNetworkPlan, x: number, z: number, maxDistance = 500): RailStation | null {
   let best: RailStation | null = null, bestD = maxDistance;
   for (const station of rail.stations) {
     const d = Math.hypot(station.x - x, station.z - z);
@@ -42,7 +42,8 @@ function destinationStations(rail: RailNetworkPlan, origin: RailStation): RailSt
     const line = lineById(rail, lineId); if (!line) continue;
     const originIndex = line.stationIds.indexOf(origin.id); if (originIndex < 0) continue;
     for (let i = 0; i < line.stationIds.length; i++) {
-      if (Math.abs(i - originIndex) < 2) continue;
+      // 待ち時間込みでも鉄道が明確に有利になる距離を作るため、原則3駅以上離す。
+      if (Math.abs(i - originIndex) < 3) continue;
       const station = rail.stations[line.stationIds[i]]; if (station) ids.add(station.id);
     }
   }
@@ -51,16 +52,16 @@ function destinationStations(rail: RailNetworkPlan, origin: RailStation): RailSt
 
 function workNearStation(world: AnyWorld, station: RailStation, agent: number): number {
   const s = world.store;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     const angle = hash01(agent * 31 + attempt * 997) * Math.PI * 2;
-    const radius = 70 + hash01(agent * 131 + attempt * 17) * 360;
+    const radius = 60 + hash01(agent * 131 + attempt * 17) * 300;
     const x = station.x + Math.cos(angle) * radius;
     const z = station.z + Math.sin(angle) * radius;
     const candidate = world.city.poi.findBest(POICategory.Work, x, z, s.wealth[agent]);
     if (candidate < 0) continue;
     const work = world.city.poi.get(candidate);
     if (work.capacity <= 0) continue;
-    if (Math.hypot(work.x - station.x, work.z - station.z) > 650) continue;
+    if (Math.hypot(work.x - station.x, work.z - station.z) > 500) continue;
     return candidate;
   }
   return -1;
@@ -77,21 +78,20 @@ proto.populate = function populateWithRailCommuters(this: AnyWorld, count: numbe
     const occupation = s.occupation[i] as Occupation;
     if (occupation === Occupation.Unemployed || occupation === Occupation.Retiree) continue;
     if (s.homePOI[i] < 0) continue;
-    // 約70%。同じAgentはseed生成後も同じ判定になるよう乱数ではなくID hashを使う。
-    if (hash01(i * 7919 + 41) >= 0.70) continue;
+    // 駅徒歩圏の非自動車就業者の約80%を都市内鉄道通勤候補にする。
+    if (hash01(i * 7919 + 41) >= 0.80) continue;
 
     const home = this.city.poi.get(s.homePOI[i]);
     const origin = nearestStation(rail, home.x, home.z); if (!origin) continue;
     const candidates = destinationStations(rail, origin); if (!candidates.length) continue;
 
-    // 同一路線上で十分離れた駅を分散選択する。
     const start = Math.floor(hash01(i * 1543 + 73) * candidates.length) % candidates.length;
     for (let n = 0; n < candidates.length; n++) {
       const destination = candidates[(start + n) % candidates.length];
-      if (Math.hypot(destination.x - home.x, destination.z - home.z) < 900) continue;
+      if (Math.hypot(destination.x - home.x, destination.z - home.z) < 1250) continue;
       const workId = workNearStation(this, destination, i + n * 100003); if (workId < 0) continue;
       const work = this.city.poi.get(workId);
-      if (Math.hypot(work.x - home.x, work.z - home.z) < 850) continue;
+      if (Math.hypot(work.x - home.x, work.z - home.z) < 1100) continue;
       s.workPOI[i] = workId;
       break;
     }
