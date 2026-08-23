@@ -4,10 +4,12 @@ export interface CameraFollowTarget {
   kind: 'agent' | 'vehicle' | 'train';
   id: number;
   position: THREE.Vector3;
-  /** Traffic/Railと同じ +X基準のrad。vehicle/train追跡時に使用。 */
+  /** Traffic/Railと同じ +X基準のrad。 */
   heading?: number;
   length?: number;
   firstPersonHeight?: number;
+  /** target中心から進行方向へ何m前に一人称cameraを置くか。 */
+  firstPersonForwardOffset?: number;
 }
 
 export class FirstPersonController {
@@ -17,7 +19,7 @@ export class FirstPersonController {
   private followTarget: CameraFollowTarget | null = null; followDistance = 10;
   private followYawOffset = 0;
   private followPitch = 0.28;
-  private vehicleFirstPerson = false;
+  private followFirstPerson = false;
   private followKey = '';
 
   constructor(private camera: THREE.PerspectiveCamera, private domElement: HTMLElement, startYaw = 0, startPitch = 0) {
@@ -29,8 +31,8 @@ export class FirstPersonController {
     window.addEventListener('mouseup', (e) => { if (e.button === 0) this.dragging = false; });
     document.addEventListener('mousemove', (e) => {
       if (!this.dragging) return;
+      if (this.followTarget && this.followFirstPerson) return;
       if (this.followTarget?.kind === 'vehicle' || this.followTarget?.kind === 'train') {
-        if (this.followTarget.kind === 'vehicle' && this.vehicleFirstPerson) return;
         // heading追従orbitは通常視点と同じドラッグ感にする。
         this.followYawOffset += e.movementX * this.lookSensitivity;
         this.followPitch -= e.movementY * this.lookSensitivity;
@@ -57,48 +59,56 @@ export class FirstPersonController {
     const wasFollowing = this.followTarget !== null;
     const key = t ? `${t.kind}:${t.id}` : '';
     if (t && key !== this.followKey) {
-      this.followYawOffset = 0; this.followPitch = 0.28; this.vehicleFirstPerson = false; this.followKey = key;
+      this.followYawOffset = 0; this.followPitch = 0.28; this.followFirstPerson = false; this.followKey = key;
     }
-    if (!t && wasFollowing) { this.vehicleFirstPerson = false; this.followKey = ''; this.syncFreeAnglesFromCamera(); }
-    if (t?.kind !== 'vehicle') this.vehicleFirstPerson = false;
+    if (!t && wasFollowing) { this.followFirstPerson = false; this.followKey = ''; this.syncFreeAnglesFromCamera(); }
     this.followTarget = t;
   }
 
   get isFollowing(): boolean { return this.followTarget !== null; }
   get isFollowingVehicle(): boolean { return this.followTarget?.kind === 'vehicle'; }
   get isFollowingTrain(): boolean { return this.followTarget?.kind === 'train'; }
-  get isVehicleFirstPerson(): boolean { return this.isFollowingVehicle && this.vehicleFirstPerson; }
+  get isFollowingAgent(): boolean { return this.followTarget?.kind === 'agent'; }
+  get isFirstPerson(): boolean { return this.isFollowing && this.followFirstPerson; }
+  /** 旧HUD/API互換。 */
+  get isVehicleFirstPerson(): boolean { return this.isFollowingVehicle && this.followFirstPerson; }
 
-  toggleVehicleView(): boolean {
-    if (!this.isFollowingVehicle) return false;
-    this.vehicleFirstPerson = !this.vehicleFirstPerson; return true;
+  toggleFollowView(): boolean {
+    if (!this.followTarget || this.followTarget.heading == null) return false;
+    this.followFirstPerson = !this.followFirstPerson;
+    return true;
   }
+
+  /** 旧API互換。現在は人・車・列車すべてを切替可能。 */
+  toggleVehicleView(): boolean { return this.toggleFollowView(); }
 
   update(dt: number): void {
     if (this.followTarget) {
       const t = this.followTarget;
-      if (t.kind === 'vehicle' || t.kind === 'train') {
-        const h = t.heading ?? 0;
-        if (t.kind === 'vehicle' && this.vehicleFirstPerson) {
-          const forwardOffset = Math.max(0.8, (t.length ?? 4.5) * 0.36);
-          this.camera.position.set(
-            t.position.x + Math.cos(h) * forwardOffset,
-            t.position.y + (t.firstPersonHeight ?? 1.35),
-            t.position.z + Math.sin(h) * forwardOffset,
-          );
-          // THREEのcamera forward(-Z)をTraffic heading(+X基準)へ合わせる。
-          const cameraYaw = -h - Math.PI / 2;
-          this.camera.quaternion.setFromEuler(new THREE.Euler(0, cameraYaw, 0, 'YXZ'));
-          return;
-        }
+      const h = t.heading ?? 0;
+      if (this.followFirstPerson && t.heading != null) {
+        const defaultForward = t.kind === 'agent' ? 0.08 : Math.max(0.8, (t.length ?? 4.5) * 0.36);
+        const forwardOffset = t.firstPersonForwardOffset ?? defaultForward;
+        const defaultHeight = t.kind === 'agent' ? 1.62 : 1.35;
+        this.camera.position.set(
+          t.position.x + Math.cos(h) * forwardOffset,
+          t.position.y + (t.firstPersonHeight ?? defaultHeight),
+          t.position.z + Math.sin(h) * forwardOffset,
+        );
+        // THREEのcamera forward(-Z)をTraffic/Rail heading(+X基準)へ合わせる。
+        const cameraYaw = -h - Math.PI / 2;
+        this.camera.quaternion.setFromEuler(new THREE.Euler(0, cameraYaw, 0, 'YXZ'));
+        return;
+      }
 
+      if (t.kind === 'vehicle' || t.kind === 'train') {
         const d = this.followDistance, cp = Math.cos(this.followPitch), orbitHeading = h + this.followYawOffset;
         this.camera.position.set(
           t.position.x - Math.cos(orbitHeading) * cp * d,
           t.position.y + Math.sin(this.followPitch) * d + 1.2,
           t.position.z - Math.sin(orbitHeading) * cp * d,
         );
-        this.camera.lookAt(t.position.x, t.position.y + (t.kind === 'train' ? 0.8 : 1.0), t.position.z);
+        this.camera.lookAt(t.position.x, t.position.y + (t.kind === 'train' ? 1.8 : 1.0), t.position.z);
         return;
       }
 
