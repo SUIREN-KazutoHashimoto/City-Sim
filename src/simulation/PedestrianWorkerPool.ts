@@ -1,19 +1,30 @@
 import { AgentStore } from '../agents/AgentStore';
 
-interface PendingJob { remaining: number; resolve: () => void; reject: (reason?: unknown) => void; }
-interface WorkerReply { type: 'done'; jobId: number; }
+export interface PedestrianWorkerTiming {
+  prepMs: number;
+  indexMs: number;
+  avoidMoveMs: number;
+  barrierMs: number;
+  totalMs: number;
+}
+
+interface PendingJob { resolve: () => void; reject: (reason?: unknown) => void; }
+interface WorkerReply { type: 'done'; jobId: number; timing: PedestrianWorkerTiming; }
+
+const ZERO_TIMING: PedestrianWorkerTiming = { prepMs: 0, indexMs: 0, avoidMoveMs: 0, barrierMs: 0, totalMs: 0 };
+const METRIC_STRIDE = 5;
 
 /**
  * Pedestrian spatial index / avoidance / movement integration worker pool.
  *
- * Coordinator side only resolves path cursor, signals and state transitions. The worker pool:
- * 1. snapshots active pedestrian positions,
- * 2. builds a shared linked-cell spatial index,
- * 3. calculates separation/avoidance,
- * 4. integrates velocity/position/heading/energy.
+ * One message is dispatched to each worker per simulation step. Workers synchronize with
+ * Atomics.wait/notify barriers internally, so the main thread no longer performs a separate
+ * index dispatch/await followed by a movement dispatch/await.
  *
- * The snapshot makes neighbor queries deterministic within a step even while other workers
- * write the live position arrays.
+ * Each step:
+ * 1. clears only cells used by the previous step and snapshots active pedestrian positions,
+ * 2. builds the linked-cell index in parallel using Atomics.exchange,
+ * 3. calculates separation/avoidance and integrates movement in parallel.
  */
 export class PedestrianWorkerPool {
   private readonly workers: Worker[] = [];
@@ -28,46 +39,59 @@ export class PedestrianWorkerPool {
   private readonly snapshotZ: Float32Array;
   private readonly cellHead: Int32Array;
   private readonly nextInCell: Int32Array;
+  private readonly usedCells: Int32Array;
+  private readonly control: Int32Array;
+  private readonly metrics: Float32Array;
 
   private activeCount = 0;
   private moveCount = 0;
   private readonly cellSize = 8;
   private readonly gridOrigin = -32;
   private readonly gridWidth: number;
+  private latestTimingState: PedestrianWorkerTiming = { ...ZERO_TIMING };
 
   constructor(store: AgentStore, worldSizeMeters: number) {
     const shared = store.sharedMemory && typeof SharedArrayBuffer !== 'undefined';
     const alloc = (bytes: number): ArrayBufferLike => shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
     const f32 = () => new Float32Array(alloc(store.capacity * Float32Array.BYTES_PER_ELEMENT));
     const i32 = () => new Int32Array(alloc(store.capacity * Int32Array.BYTES_PER_ELEMENT));
+    const hc = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 4) : 4;
+    const desiredWorkerCount = Math.max(1, Math.min(4, hc - 2));
 
     this.desiredX = f32(); this.desiredZ = f32();
     this.activeIds = i32(); this.moveIds = i32();
-    this.snapshotX = f32(); this.snapshotZ = f32(); this.nextInCell = i32();
+    this.snapshotX = f32(); this.snapshotZ = f32(); this.nextInCell = i32(); this.usedCells = i32();
+    this.control = new Int32Array(alloc(4 * Int32Array.BYTES_PER_ELEMENT));
+    this.metrics = new Float32Array(alloc(desiredWorkerCount * METRIC_STRIDE * Float32Array.BYTES_PER_ELEMENT));
 
-    // 32m padding on each side. At a 10km city this is about 1.58M Int32 cells (~6.3MB).
+    // 32m padding on each side. At a 10km city this is about 1.58M Int32 cells (~6.3MB),
+    // but only cells touched by pedestrians are cleared on the next step.
     this.gridWidth = Math.max(8, Math.ceil((worldSizeMeters - this.gridOrigin + 32) / this.cellSize) + 1);
     this.cellHead = new Int32Array(alloc(this.gridWidth * this.gridWidth * Int32Array.BYTES_PER_ELEMENT));
     this.cellHead.fill(-1);
 
     if (!shared || typeof Worker === 'undefined') return;
 
-    const hc = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 4) : 4;
-    const count = Math.max(1, Math.min(4, hc - 2));
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < desiredWorkerCount; i++) {
       const worker = new Worker(new URL('../workers/pedestrianWorker.ts', import.meta.url), { type: 'module' });
       worker.onmessage = (ev: MessageEvent<WorkerReply>) => {
         if (ev.data.type !== 'done') return;
         const job = this.pending.get(ev.data.jobId); if (!job) return;
-        job.remaining--;
-        if (job.remaining <= 0) { this.pending.delete(ev.data.jobId); job.resolve(); }
+        this.pending.delete(ev.data.jobId);
+        this.latestTimingState = ev.data.timing;
+        job.resolve();
       };
       worker.onerror = (ev) => {
         const err = new Error(`Pedestrian worker failed: ${ev.message}`);
-        for (const [id, job] of this.pending) { this.pending.delete(id); job.reject(err); }
+        for (const job of this.pending.values()) job.reject(err);
+        this.pending.clear();
+        for (const w of this.workers) w.terminate();
+        this.workers.length = 0;
       };
       worker.postMessage({
         type: 'init',
+        workerId: i,
+        workerCount: desiredWorkerCount,
         cellSize: this.cellSize,
         gridOrigin: this.gridOrigin,
         gridWidth: this.gridWidth,
@@ -78,6 +102,7 @@ export class PedestrianWorkerPool {
           activeIds: this.activeIds.buffer, moveIds: this.moveIds.buffer,
           snapshotX: this.snapshotX.buffer, snapshotZ: this.snapshotZ.buffer,
           cellHead: this.cellHead.buffer, nextInCell: this.nextInCell.buffer,
+          usedCells: this.usedCells.buffer, control: this.control.buffer, metrics: this.metrics.buffer,
         },
       });
       this.workers.push(worker);
@@ -88,6 +113,7 @@ export class PedestrianWorkerPool {
   get workerCount(): number { return this.workers.length; }
   get queuedPedestrians(): number { return this.activeCount; }
   get queuedMovers(): number { return this.moveCount; }
+  get latestTiming(): PedestrianWorkerTiming { return this.latestTimingState; }
 
   begin(): void { this.activeCount = 0; this.moveCount = 0; }
 
@@ -104,28 +130,25 @@ export class PedestrianWorkerPool {
     this.moveIds[this.moveCount++] = agent;
   }
 
-  /** Build snapshot/index first, then run avoidance + movement in parallel. */
-  async flush(dt: number): Promise<void> {
-    if (!this.active || this.activeCount <= 0 || this.moveCount <= 0 || dt <= 0) return;
+  /** One main-thread dispatch per worker; all index/movement phase synchronization stays inside workers. */
+  flush(dt: number): Promise<void> {
+    if (!this.active || this.activeCount <= 0 || this.moveCount <= 0 || dt <= 0) {
+      this.latestTimingState = { ...ZERO_TIMING };
+      return Promise.resolve();
+    }
 
-    const indexJobId = this.nextJobId++;
-    await new Promise<void>((resolve, reject) => {
-      this.pending.set(indexJobId, { remaining: 1, resolve, reject });
-      this.workers[0].postMessage({ type: 'index', jobId: indexJobId, activeCount: this.activeCount });
-    });
-
-    const used = Math.min(this.workers.length, this.moveCount), moveJobId = this.nextJobId++;
-    await new Promise<void>((resolve, reject) => {
-      this.pending.set(moveJobId, { remaining: used, resolve, reject });
-      for (let w = 0; w < used; w++) {
-        const begin = Math.floor((this.moveCount * w) / used), end = Math.floor((this.moveCount * (w + 1)) / used);
-        this.workers[w].postMessage({ type: 'move', jobId: moveJobId, begin, end, dt });
+    const jobId = this.nextJobId++;
+    return new Promise<void>((resolve, reject) => {
+      this.pending.set(jobId, { resolve, reject });
+      for (const worker of this.workers) {
+        worker.postMessage({ type: 'step', jobId, activeCount: this.activeCount, moveCount: this.moveCount, dt });
       }
     });
   }
 
   dispose(): void {
     for (const worker of this.workers) worker.terminate(); this.workers.length = 0;
-    for (const [id, job] of this.pending) { this.pending.delete(id); job.reject(new Error('Pedestrian worker pool disposed')); }
+    for (const job of this.pending.values()) job.reject(new Error('Pedestrian worker pool disposed'));
+    this.pending.clear();
   }
 }
