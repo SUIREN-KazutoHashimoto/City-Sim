@@ -16,7 +16,7 @@ const TURNOUT_SPEED = 11.1;
 const SIDING_SPEED = 15.0;
 const CAR_CLEARANCE = 12;
 
-const proto = RailRenderer.prototype as AnyRail;
+const proto = RailRenderer.prototype as unknown as AnyRail;
 const originalTrackSpeedLimit = proto.trackSpeedLimit as (run: AnyRun, smooth: AnySmooth, distance: number) => number;
 const originalTrainTrackOffset = proto.trainTrackOffset as (run: AnyRun, smooth: AnySmooth, distance: number) => number;
 const originalPlatformKey = proto.platformKey as (run: AnyRun, stationIndex: number, lane: number) => string;
@@ -85,8 +85,7 @@ function rawGeometryLimit(self: AnyRail, run: AnyRun, smooth: AnySmooth, distanc
   return limit;
 }
 
-proto.trackSpeedLimit = function patchedTrackSpeedLimit(run: AnyRun, smooth: AnySmooth, distance: number): number {
-  // 現地点だけでなく、制動距離内の将来制限を先読みして「制限開始地点までに」減速を完了する。
+proto.trackSpeedLimit = function patchedTrackSpeedLimit(this: AnyRail, run: AnyRun, smooth: AnySmooth, distance: number): number {
   let limit = Math.min(originalTrackSpeedLimit.call(this, run, smooth, distance), rawGeometryLimit(this, run, smooth, distance));
   const brakingDistance = run.speed * run.speed / (2 * BRAKE);
   const horizon = Math.min(420, Math.max(180, brakingDistance + 90));
@@ -102,7 +101,7 @@ proto.trackSpeedLimit = function patchedTrackSpeedLimit(run: AnyRun, smooth: Any
   return limit;
 };
 
-proto.trainTrackOffset = function patchedTrainTrackOffset(run: AnyRun, smooth: AnySmooth, distance: number): number {
+proto.trainTrackOffset = function patchedTrainTrackOffset(this: AnyRail, run: AnyRun, smooth: AnySmooth, distance: number): number {
   const base = originalTrainTrackOffset.call(this, run, smooth, distance);
   const stationIndex = terminalIndexNear(this, run, smooth, distance);
   if (stationIndex < 0) return base;
@@ -111,7 +110,7 @@ proto.trainTrackOffset = function patchedTrainTrackOffset(run: AnyRun, smooth: A
   return THREE.MathUtils.lerp(base, TERMINAL_TRACK_OFFSETS[slot], blend);
 };
 
-proto.platformKey = function patchedPlatformKey(run: AnyRun, stationIndex: number, lane: number): string {
+proto.platformKey = function patchedPlatformKey(this: AnyRail, run: AnyRun, stationIndex: number, lane: number): string {
   const line = this.rail.lines[run.lineId];
   const stationId = line?.stationIds[stationIndex] ?? -1;
   const station = stationId >= 0 ? this.rail.stations[stationId] : null;
@@ -121,7 +120,7 @@ proto.platformKey = function patchedPlatformKey(run: AnyRun, stationIndex: numbe
   return originalPlatformKey.call(this, run, stationIndex, lane);
 };
 
-proto.routeKeysForPlan = function patchedRouteKeysForPlan(run: AnyRun, fromIndex: number, toIndex: number, lane: number): string[] {
+proto.routeKeysForPlan = function patchedRouteKeysForPlan(this: AnyRail, run: AnyRun, fromIndex: number, toIndex: number, lane: number): string[] {
   const keys = originalRouteKeysForPlan.call(this, run, fromIndex, toIndex, lane);
   const line = this.rail.lines[run.lineId];
   const stationId = line?.stationIds[toIndex] ?? -1;
@@ -173,12 +172,12 @@ function buildTerminalFans(self: AnyRail): void {
   self.addStatic(box, new THREE.MeshStandardMaterial({ color: 0xaab1b8, roughness: 0.38, metalness: 0.72 }), rails);
 }
 
-proto.buildTrackGeometry = function patchedBuildTrackGeometry(): void {
+proto.buildTrackGeometry = function patchedBuildTrackGeometry(this: AnyRail): void {
   originalBuildTrackGeometry.call(this);
   buildTerminalFans(this);
 };
 
-proto.buildDepots = function patchedBuildDepots(): void {
+proto.buildDepots = function patchedBuildDepots(this: AnyRail): void {
   const ballast: { matrix: THREE.Matrix4 }[] = [], rails: { matrix: THREE.Matrix4 }[] = [];
   const sheds: { matrix: THREE.Matrix4 }[] = [], apron: { matrix: THREE.Matrix4 }[] = [];
   for (const line of this.rail.lines) {
@@ -194,7 +193,6 @@ proto.buildDepots = function patchedBuildDepots(): void {
         z: base.z + Math.sin(base.heading) * outward * along + Math.cos(base.heading) * lateral,
       });
 
-      // 終端喉部から一本の入出庫線へまとめ、その先でラダー状に留置線へ分岐する。
       const throat = makePoint(28, sideSign * 3.0);
       const ladder = makePoint(62, sideSign * 9.0);
       selfPush(this, { x: base.x, z: base.z }, throat, y, ballast, rails, 3.0);
@@ -227,7 +225,7 @@ function selfPush(self: AnyRail, a: { x: number; z: number }, b: { x: number; z:
   self.pushTrackSegment(a, b, y, ballast, rails, width);
 }
 
-proto.depotBasePose = function patchedDepotBasePose(run: AnyRun, smooth: AnySmooth): { x: number; z: number; heading: number } | null {
+proto.depotBasePose = function patchedDepotBasePose(this: AnyRail, run: AnyRun, smooth: AnySmooth): { x: number; z: number; heading: number } | null {
   const base = this.sampleSmooth(smooth, run.depotEnd === 0 ? 0 : smooth.length); if (!base) return null;
   const outward = run.depotEnd === 0 ? -1 : 1;
   const heading = this.wrapAngle(base.heading + (outward < 0 ? Math.PI : 0));
@@ -241,7 +239,7 @@ proto.depotBasePose = function patchedDepotBasePose(run: AnyRun, smooth: AnySmoo
   };
 };
 
-proto.tryReleaseDepotTrain = function patchedTryReleaseDepotTrain(run: AnyRun): void {
+proto.tryReleaseDepotTrain = function patchedTryReleaseDepotTrain(this: AnyRail, run: AnyRun): void {
   const line = this.rail.lines[run.lineId], smooth = this.smoothLines.get(run.lineId); if (!line || !smooth) return;
   const lastRelease = this.lastDepotReleaseAt.get(run.lineId) ?? -Infinity;
   if (this.railTime - lastRelease < 36) return;
@@ -262,7 +260,7 @@ proto.tryReleaseDepotTrain = function patchedTryReleaseDepotTrain(run: AnyRun): 
   this.lastDepotReleaseAt.set(run.lineId, this.railTime);
 };
 
-proto.buildRailSignals = function patchedBuildRailSignals(): void {
+proto.buildRailSignals = function patchedBuildRailSignals(this: AnyRail): void {
   const poles: { matrix: THREE.Matrix4 }[] = [], heads: { matrix: THREE.Matrix4 }[] = [];
   this.railSignals.length = 0;
   for (const block of this.blocks) {
@@ -275,7 +273,6 @@ proto.buildRailSignals = function patchedBuildRailSignals(): void {
       const off = this.trackOffsetAt(smooth, block.lane, d), side = direction > 0 ? -2.35 : 2.35;
       const x = p.x - Math.sin(p.heading) * (off + side), z = p.z + Math.cos(p.heading) * (off + side), y = this.lineTrackY(block.lineId);
       poles.push({ matrix: this.matrix(x, y + 1.65, z, 0.18, 3.3, 0.18) });
-      // 筐体は両面から確認できる厚みを持たせ、灯火を前後両面に配置する。
       heads.push({ matrix: this.matrix(x, y + 3.45, z, 0.82, 2.08, 0.68, -p.heading + Math.PI / 2) });
       const nextBlockId = this.nextBlockAfter(block.id, direction);
       this.railSignals.push({ lineId: block.lineId, lane: block.lane, direction, blockId: block.id, nextBlockId,
@@ -295,7 +292,7 @@ proto.buildRailSignals = function patchedBuildRailSignals(): void {
   }
 };
 
-proto.setSignalLamp = function patchedSetSignalLamp(mesh: THREE.InstancedMesh, signal: AnyRail, lamp: 0 | 1 | 2, on: boolean): void {
+proto.setSignalLamp = function patchedSetSignalLamp(this: AnyRail, mesh: THREE.InstancedMesh, signal: AnyRail, lamp: 0 | 1 | 2, on: boolean): void {
   const yy = signal.y + 4.02 - lamp * 0.58, size = on ? 0.30 : 0.105;
   for (let faceIndex = 0; faceIndex < 2; faceIndex++) {
     const sign = faceIndex === 0 ? -signal.direction : signal.direction;
