@@ -156,7 +156,12 @@ async function bootstrap(): Promise<void> {
       // 最終表示だけTrainLiveryOverlayで一次指数補間し、二次系のばね挙動を画面へ出さない。
       railRenderer.update(world.clock.totalSeconds, renderDt);
       trainLivery.sync(renderDt);
-      controller.setFollowTarget(inspector.getFollowTarget()); controller.update(dt); dashboard.draw();
+      const followTarget = inspector.getFollowTarget();
+      if (followTarget?.kind === 'train') {
+        const heading = trainLivery.getTrainPose(followTarget.id, followTarget.position);
+        if (heading != null) followTarget.heading = heading;
+      }
+      controller.setFollowTarget(followTarget); controller.update(dt); dashboard.draw();
 
       const renderStarted = performance.now();
       let mark = renderStarted;
