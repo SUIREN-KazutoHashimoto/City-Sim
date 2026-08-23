@@ -13,6 +13,7 @@ interface SmoothLine {
 
 type TrainState = 'dwell' | 'running' | 'signal';
 export type TrainService = 'local' | 'rapid' | 'limited';
+type SignalAspect = 'red' | 'yellow' | 'green';
 
 interface TrainRun {
   id: number;
@@ -29,7 +30,7 @@ interface TrainRun {
   nextStationIndex: number;
   dwellRemaining: number;
   state: TrainState;
-  /** 追跡は先頭車ではなく編成中心を使い、折返し時のカメラ/車両テレポートを防ぐ。 */
+  /** 追跡は編成中心を使う。 */
   x: number;
   z: number;
   heading: number;
@@ -40,6 +41,27 @@ interface RailSignal {
   stationIndex: number;
   direction: 1 | -1;
   instanceIndex: number;
+  x: number;
+  z: number;
+}
+
+interface LineBlock {
+  id: number;
+  lineId: number;
+  segmentIndex: number;
+  keys: Set<string>;
+  conflicts: Set<number>;
+}
+
+interface RouteReservation {
+  ownerTrainId: number;
+  lineId: number;
+  route: string;
+}
+
+interface UpcomingSegment {
+  fromIndex: number;
+  toIndex: number;
 }
 
 export interface TrainStatusSnapshot {
@@ -69,14 +91,13 @@ export interface TrainStatusSnapshot {
 }
 
 /**
- * City Generator v2 Phase 4 railway renderer + lightweight operations.
+ * Railway renderer + lightweight interlocking/dispatch.
  *
- * - short articulated cars: every car uses front/rear bogie points on the actual track;
- * - railway operations advance every render frame instead of following asynchronous World batches;
- * - local/rapid/limited services share one block system; locals use passing loops;
- * - turnouts and shared-line junctions are kept outside the platform zone;
- * - railway block signals are rendered and updated from occupancy;
- * - station platforms follow curves and station access lands outside the roadway.
+ * - physical blocks are shared across overlapping lines;
+ * - limited > rapid > local reservation priority;
+ * - junction/turnout routes are locked before a train may enter;
+ * - local trains use passing loops, rapid/limited use through tracks;
+ * - trains are advanced every render frame for smooth motion.
  */
 export class RailRenderer {
   static readonly TRACK_Y = 8.2;
@@ -86,22 +107,32 @@ export class RailRenderer {
   private static readonly BOGIE_HALF = 3.55;
   private static readonly ACCEL = 0.82;
   private static readonly BRAKE = 1.24;
-  /** Main-to-loop track-centre spacing. Wide enough for an island platform between them. */
   private static readonly SIDING_OFFSET = 8.0;
   private static readonly PLATFORM_CLEARANCE = 0.45;
   /** ポイントはホーム端からこの距離以上離す。 */
   private static readonly SWITCH_CLEARANCE = 14;
   private static readonly SWITCH_APPROACH = 48;
+  private static readonly BLOCK_SAMPLE = 14;
+  private static readonly BLOCK_QUANTIZE = 11;
 
   private readonly smoothLines = new Map<number, SmoothLine>();
   private readonly trainRuns: TrainRun[] = [];
   private readonly trainInstanceToRun: number[] = [];
   private readonly railSignals: RailSignal[] = [];
+  private readonly lineBlocks: LineBlock[] = [];
+  private readonly blockIdBySegment = new Map<string, number>();
+  private readonly blockOccupancy = new Map<number, number>();
+  private readonly blockReservations = new Map<number, number>();
+  private readonly routeReservations = new Map<string, RouteReservation>();
+  private readonly turnoutState = new Map<number, string>();
   private readonly d = new THREE.Object3D();
+
   private trainBody: THREE.InstancedMesh | null = null;
   private trainCabin: THREE.InstancedMesh | null = null;
   private trainStripe: THREE.InstancedMesh | null = null;
-  private signalLamp: THREE.InstancedMesh | null = null;
+  private signalRed: THREE.InstancedMesh | null = null;
+  private signalYellow: THREE.InstancedMesh | null = null;
+  private signalGreen: THREE.InstancedMesh | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -111,14 +142,14 @@ export class RailRenderer {
 
   build(): void {
     if (this.rail.lines.length === 0) return;
-    // 幹線を先に作る。支線の共有駅アプローチは幹線線形を参照してホーム外で分岐させる。
+    // 幹線を先に作る。支線の共有駅アプローチは幹線線形を参照する。
     for (const line of this.rail.lines.filter((l) => l.kind === 'trunk')) this.smoothLines.set(line.id, this.makeSmoothLine(line));
     for (const line of this.rail.lines.filter((l) => l.kind !== 'trunk')) this.smoothLines.set(line.id, this.makeSmoothLine(line));
+    this.buildPhysicalBlocks();
 
     const ballast: StaticPart[] = [], rails: StaticPart[] = [], sleepers: StaticPart[] = [], supports: StaticPart[] = [];
     for (const smooth of this.smoothLines.values()) {
       for (let i = 1; i < smooth.path.length; i++) this.pushTrackSegment(smooth.path[i - 1], smooth.path[i], ballast, rails);
-
       for (let s = 0; s <= smooth.length; s += 8.5) {
         const p = this.sampleSmooth(smooth, s); if (!p) continue;
         sleepers.push({ matrix: this.matrix(p.x, RailRenderer.TRACK_Y + 0.17, p.z, 0.18, 0.12, 3.1, -p.heading) });
@@ -138,13 +169,11 @@ export class RailRenderer {
     this.buildStations();
     this.buildTrains();
     this.buildRailSignals();
+    this.rebuildDispatchReservations();
     this.updateTrainMeshes();
     this.updateSignals();
   }
 
-  /**
-   * 鉄道は軽量なので非同期World batchを待たず、描画フレームごとに直接運行を進める。
-   */
   update(realDt = 1 / 60, timeScale = 1, paused = false): void {
     if (!this.trainBody || !this.trainCabin || !this.trainStripe || this.trainRuns.length === 0) return;
     const frameDt = THREE.MathUtils.clamp(realDt, 0, 0.05);
@@ -159,6 +188,7 @@ export class RailRenderer {
       }
     }
 
+    this.rebuildDispatchReservations();
     this.updateTrainMeshes();
     this.updateSignals();
   }
@@ -189,7 +219,6 @@ export class RailRenderer {
       nextStationId, nextStationName: nextStation?.name ?? '—',
       dwellRemaining: Math.max(0, run.dwellRemaining), waitingForBlock: run.state === 'signal',
       passingLoop: loopIndex >= 0 && this.lineStationHasPassingLoop(run.lineId, loopIndex),
-      // 編成中心を追跡基準にして、カメラだけ進行方向先頭の運転台前面へ置く。
       firstPersonForwardOffset: consistLength * 0.5 + 0.45,
     };
   }
@@ -200,8 +229,26 @@ export class RailRenderer {
     return '普通';
   }
 
+  private servicePriority(service: TrainService): number {
+    if (service === 'limited') return 3;
+    if (service === 'rapid') return 2;
+    return 1;
+  }
+
+  private reservationDepth(service: TrainService): number {
+    if (service === 'limited') return 3;
+    if (service === 'rapid') return 2;
+    return 1;
+  }
+
   private stepOperations(dt: number): void {
-    for (const run of this.trainRuns) this.stepTrain(run, dt);
+    // 先に特急、次に快速、最後に普通を評価する。
+    this.rebuildDispatchReservations();
+    const ordered = this.trainRuns.slice().sort((a, b) => {
+      const p = this.servicePriority(b.service) - this.servicePriority(a.service);
+      return p !== 0 ? p : a.id - b.id;
+    });
+    for (const run of ordered) this.stepTrain(run, dt);
   }
 
   private stepTrain(run: TrainRun, dt: number): void {
@@ -214,7 +261,6 @@ export class RailRenderer {
         run.dwellRemaining = Math.max(0, run.dwellRemaining - dt); run.state = 'dwell'; return;
       }
       if ((run.direction > 0 && run.currentStationIndex >= lastStation) || (run.direction < 0 && run.currentStationIndex <= 0)) {
-        // 車両の物理並びは変えず、停車完了後に向きだけ反転する。
         run.direction = run.direction > 0 ? -1 : 1;
       }
       const next = run.currentStationIndex + run.direction;
@@ -271,46 +317,258 @@ export class RailRenderer {
       run.state = 'signal'; run.dwellRemaining = 0; return;
     }
 
-    // 快速/特急は通過駅で速度を落とさず次閉塞へ進む。
     run.originStationIndex = boundaryIndex;
     run.nextStationIndex = following;
   }
 
-  /** One inter-station section is one block. Local uses loop; rapid/limited use the through track. */
+  /**
+   * 進路可否は、路線単位ではなく物理閉塞・他路線競合・ポイント鎖錠・駅線路容量をまとめて判定する。
+   */
   private canEnterBlock(run: TrainRun, fromIndex: number, toIndex: number): boolean {
-    const segment = Math.min(fromIndex, toIndex);
+    const blockId = this.blockIdFor(run.lineId, fromIndex, toIndex);
+    if (blockId < 0 || !this.blockAvailableFor(run.id, blockId)) return false;
+
+    const reservation = this.blockReservations.get(blockId);
+    if (reservation != null && reservation !== run.id) return false;
+
+    if (!this.terminalAvailable(run, toIndex)) return false;
+    if (!this.routesAvailableFor(run, fromIndex, toIndex)) return false;
+    if (!this.stationTrackAvailable(run, toIndex)) return false;
+    return true;
+  }
+
+  private stationTrackAvailable(run: TrainRun, toIndex: number): boolean {
+    const line = this.rail.lines[run.lineId]; if (!line) return false;
     const targetHasLoop = this.lineStationHasPassingLoop(run.lineId, toIndex);
     for (const other of this.trainRuns) {
-      if (other.id === run.id || other.lineId !== run.lineId) continue;
-      if (other.state === 'running' && other.originStationIndex >= 0 && other.nextStationIndex >= 0
-        && Math.min(other.originStationIndex, other.nextStationIndex) === segment) return false;
-      if (other.currentStationIndex !== toIndex) continue;
+      if (other.id === run.id || other.currentStationIndex !== toIndex) continue;
+      if (other.lineId !== run.lineId) {
+        // 共有駅ではjunction route lockがあるため、別路線同時進入は原則不可。
+        const stationId = line.stationIds[toIndex];
+        if (this.rail.stations[stationId]?.lineIds.length > 1) return false;
+        continue;
+      }
       if (!targetHasLoop) return false;
-
       const runLoop = run.service === 'local';
       const otherLoop = other.service === 'local';
-      // 待避線と本線は同時使用可能。
       if (runLoop !== otherLoop) continue;
-      // 普通同士でも上下方向が違えば左右別待避線なので交換可能。
       if (runLoop && otherLoop && other.direction !== run.direction) continue;
-      // 快速/特急は同じ本線を使うため同駅同時進入不可。
       return false;
     }
     return true;
   }
 
-  private segmentOccupied(lineId: number, fromIndex: number, toIndex: number): boolean {
-    const segment = Math.min(fromIndex, toIndex);
-    return this.trainRuns.some((r) => r.lineId === lineId && r.state === 'running'
-      && r.originStationIndex >= 0 && r.nextStationIndex >= 0
-      && Math.min(r.originStationIndex, r.nextStationIndex) === segment);
+  private terminalAvailable(run: TrainRun, toIndex: number): boolean {
+    const line = this.rail.lines[run.lineId]; if (!line) return false;
+    const stationId = line.stationIds[toIndex], station = this.rail.stations[stationId];
+    if (!station || station.kind !== RailStationKind.Terminal) return true;
+    // 終端ホームは1編成。既存編成が折返し発車するまで後続を閉塞外で待たせる。
+    return !this.trainRuns.some((other) => other.id !== run.id
+      && other.lineId === run.lineId && other.currentStationIndex === toIndex);
+  }
+
+  private rebuildDispatchReservations(): void {
+    this.blockOccupancy.clear();
+    this.blockReservations.clear();
+    this.routeReservations.clear();
+    this.turnoutState.clear();
+
+    // 現在走行中の列車は、その物理閉塞を最優先で占有する。
+    for (const run of this.trainRuns) {
+      if (run.state !== 'running' || run.originStationIndex < 0 || run.nextStationIndex < 0) continue;
+      const blockId = this.blockIdFor(run.lineId, run.originStationIndex, run.nextStationIndex);
+      if (blockId >= 0 && !this.blockOccupancy.has(blockId)) this.blockOccupancy.set(blockId, run.id);
+    }
+
+    const ordered = this.trainRuns.slice().sort((a, b) => {
+      const p = this.servicePriority(b.service) - this.servicePriority(a.service);
+      if (p !== 0) return p;
+      // 終端で折返し待ち中の編成を、進入列車より先に出す。
+      const aTerminal = this.isAtTerminal(a) ? 1 : 0;
+      const bTerminal = this.isAtTerminal(b) ? 1 : 0;
+      return bTerminal !== aTerminal ? bTerminal - aTerminal : a.id - b.id;
+    });
+
+    for (const run of ordered) {
+      const segments = this.upcomingSegments(run, this.reservationDepth(run.service));
+      for (const seg of segments) {
+        const blockId = this.blockIdFor(run.lineId, seg.fromIndex, seg.toIndex);
+        if (blockId < 0 || !this.blockAvailableFor(run.id, blockId)) break;
+        if (!this.terminalAvailable(run, seg.toIndex)) break;
+        const routeKeys = this.routeKeysForSegment(run, seg.fromIndex, seg.toIndex);
+        if (!this.reserveRoutes(run, routeKeys)) break;
+        this.blockReservations.set(blockId, run.id);
+      }
+    }
+  }
+
+  private isAtTerminal(run: TrainRun): boolean {
+    if (run.currentStationIndex < 0) return false;
+    const line = this.rail.lines[run.lineId]; if (!line) return false;
+    const station = this.rail.stations[line.stationIds[run.currentStationIndex]];
+    return station?.kind === RailStationKind.Terminal;
+  }
+
+  private upcomingSegments(run: TrainRun, count: number): UpcomingSegment[] {
+    const line = this.rail.lines[run.lineId]; if (!line || line.stationIds.length < 2 || count <= 0) return [];
+    const last = line.stationIds.length - 1;
+    const out: UpcomingSegment[] = [];
+    let from: number;
+    let dir: 1 | -1 = run.direction;
+
+    if (run.currentStationIndex >= 0) {
+      from = run.currentStationIndex;
+      if (from === last && dir > 0) dir = -1;
+      else if (from === 0 && dir < 0) dir = 1;
+    } else if (run.nextStationIndex >= 0) {
+      from = run.nextStationIndex;
+      // 走行中は現在閉塞の次から予約する。
+      if ((from === last && dir > 0) || (from === 0 && dir < 0)) return out;
+    } else return out;
+
+    for (let i = 0; i < count; i++) {
+      const to = from + dir;
+      if (to < 0 || to > last) break;
+      out.push({ fromIndex: from, toIndex: to });
+      const station = this.rail.stations[line.stationIds[to]];
+      if (station?.kind === RailStationKind.Terminal) break;
+      from = to;
+    }
+    return out;
+  }
+
+  private blockAvailableFor(trainId: number, blockId: number): boolean {
+    const block = this.lineBlocks[blockId]; if (!block) return false;
+    for (const conflictId of block.conflicts) {
+      const occupiedBy = this.blockOccupancy.get(conflictId);
+      if (occupiedBy != null && occupiedBy !== trainId) return false;
+      const reservedBy = this.blockReservations.get(conflictId);
+      if (reservedBy != null && reservedBy !== trainId) return false;
+    }
+    return true;
+  }
+
+  private routesAvailableFor(run: TrainRun, fromIndex: number, toIndex: number): boolean {
+    const keys = this.routeKeysForSegment(run, fromIndex, toIndex);
+    for (const key of keys) {
+      const r = this.routeReservations.get(key);
+      if (r && r.ownerTrainId !== run.id) return false;
+    }
+    return true;
+  }
+
+  private reserveRoutes(run: TrainRun, keys: string[]): boolean {
+    for (const key of keys) {
+      const current = this.routeReservations.get(key);
+      if (current && current.ownerTrainId !== run.id) return false;
+    }
+    const route = this.routeName(run);
+    for (const key of keys) {
+      this.routeReservations.set(key, { ownerTrainId: run.id, lineId: run.lineId, route });
+      if (key.startsWith('junction:')) {
+        const stationId = Number(key.slice('junction:'.length));
+        if (Number.isFinite(stationId)) this.turnoutState.set(stationId, route);
+      }
+    }
+    return true;
+  }
+
+  private routeName(run: TrainRun): string {
+    if (run.service === 'local') return `L${run.lineId}:loop:${run.direction}`;
+    return `L${run.lineId}:main:${run.service}`;
+  }
+
+  private routeKeysForSegment(run: TrainRun, fromIndex: number, toIndex: number): string[] {
+    const line = this.rail.lines[run.lineId]; if (!line) return [];
+    const keys: string[] = [];
+    for (const index of [fromIndex, toIndex]) {
+      const stationId = line.stationIds[index], station = this.rail.stations[stationId];
+      if (!station) continue;
+      if (station.lineIds.length > 1) keys.push(`junction:${stationId}`);
+      if (this.lineStationHasPassingLoop(run.lineId, index)) {
+        if (run.service === 'local') keys.push(`station:${run.lineId}:${stationId}:loop:${run.direction}`);
+        else keys.push(`station:${run.lineId}:${stationId}:main`);
+      }
+      if (station.kind === RailStationKind.Terminal) keys.push(`terminal:${run.lineId}:${stationId}`);
+    }
+    return [...new Set(keys)];
+  }
+
+  private buildPhysicalBlocks(): void {
+    this.lineBlocks.length = 0;
+    this.blockIdBySegment.clear();
+
+    for (const smooth of this.smoothLines.values()) {
+      for (let segmentIndex = 0; segmentIndex < smooth.stationDistances.length - 1; segmentIndex++) {
+        const start = smooth.stationDistances[segmentIndex], end = smooth.stationDistances[segmentIndex + 1];
+        const lo = Math.min(start, end), hi = Math.max(start, end);
+        const keys = new Set<string>();
+        for (let d = lo + 3; d <= hi - 3; d += RailRenderer.BLOCK_SAMPLE) {
+          const p = this.sampleSmooth(smooth, d); if (!p) continue;
+          keys.add(this.trackCellKey(p.x, p.z));
+        }
+        if (keys.size === 0) {
+          const p = this.sampleSmooth(smooth, (lo + hi) * 0.5);
+          if (p) keys.add(this.trackCellKey(p.x, p.z));
+        }
+        const id = this.lineBlocks.length;
+        this.lineBlocks.push({ id, lineId: smooth.line.id, segmentIndex, keys, conflicts: new Set([id]) });
+        this.blockIdBySegment.set(this.segmentKey(smooth.line.id, segmentIndex), id);
+      }
+    }
+
+    // 実際に同じ空間を走る別路線区間を共通物理閉塞として扱う。
+    for (let i = 0; i < this.lineBlocks.length; i++) for (let j = i + 1; j < this.lineBlocks.length; j++) {
+      const a = this.lineBlocks[i], b = this.lineBlocks[j];
+      if (a.lineId === b.lineId) continue;
+      const small = a.keys.size <= b.keys.size ? a.keys : b.keys;
+      const large = small === a.keys ? b.keys : a.keys;
+      let overlap = 0;
+      for (const key of small) if (large.has(key) && ++overlap >= 3) break;
+      if (overlap >= 3) this.addBlockConflict(a.id, b.id);
+    }
+
+    // 共有駅の喉部は、サンプリング長が短くても必ず別路線間で競合させる。
+    for (const station of this.rail.stations) {
+      if (station.lineIds.length < 2) continue;
+      const adjacent: number[] = [];
+      for (const lineId of station.lineIds) {
+        const line = this.rail.lines[lineId]; if (!line) continue;
+        const idx = line.stationIds.indexOf(station.id); if (idx < 0) continue;
+        if (idx > 0) {
+          const id = this.blockIdFor(lineId, idx - 1, idx); if (id >= 0) adjacent.push(id);
+        }
+        if (idx < line.stationIds.length - 1) {
+          const id = this.blockIdFor(lineId, idx, idx + 1); if (id >= 0) adjacent.push(id);
+        }
+      }
+      for (let i = 0; i < adjacent.length; i++) for (let j = i + 1; j < adjacent.length; j++) {
+        if (this.lineBlocks[adjacent[i]]?.lineId !== this.lineBlocks[adjacent[j]]?.lineId) this.addBlockConflict(adjacent[i], adjacent[j]);
+      }
+    }
+  }
+
+  private addBlockConflict(a: number, b: number): void {
+    this.lineBlocks[a]?.conflicts.add(b);
+    this.lineBlocks[b]?.conflicts.add(a);
+  }
+
+  private trackCellKey(x: number, z: number): string {
+    const q = RailRenderer.BLOCK_QUANTIZE;
+    return `${Math.round(x / q)},${Math.round(z / q)}`;
+  }
+
+  private segmentKey(lineId: number, segmentIndex: number): string { return `${lineId}:${segmentIndex}`; }
+
+  private blockIdFor(lineId: number, fromIndex: number, toIndex: number): number {
+    const segmentIndex = Math.min(fromIndex, toIndex);
+    return this.blockIdBySegment.get(this.segmentKey(lineId, segmentIndex)) ?? -1;
   }
 
   private shouldStop(run: TrainRun, stationIndex: number): boolean {
     if (run.service === 'local') return true;
     const line = this.rail.lines[run.lineId], station = this.rail.stations[line.stationIds[stationIndex]];
     if (!station) return true;
-    // 中央・副都心・終端は種別に関係なく停車。
     if (station.kind === RailStationKind.Central || station.kind === RailStationKind.SubCenter || station.kind === RailStationKind.Terminal) return true;
     const interval = run.service === 'rapid' ? 2 : 3;
     return stationIndex % interval === 0;
@@ -375,10 +633,6 @@ export class RailRenderer {
     this.trainStripe.instanceMatrix.needsUpdate = true;
   }
 
-  /**
-   * 車両の線路上の並び順はdirectionで反転させない。
-   * 終端折返しでは同じ場所にいる各車両が180度向きを変えるだけなので、車両インスタンスが反対端へテレポートしない。
-   */
   private carPose(run: TrainRun, smooth: SmoothLine, carIndex: number): { x: number; z: number; heading: number } | null {
     const spacing = RailRenderer.CAR_LENGTH + RailRenderer.CAR_GAP;
     const along = ((run.carCount - 1) * 0.5 - carIndex) * spacing;
@@ -408,7 +662,6 @@ export class RailRenderer {
   }
 
   private trainTrackOffsetAt(run: TrainRun, smooth: SmoothLine, distance: number): number {
-    // 普通のみ待避線へ。快速/特急は常に本線。
     if (smooth.line.kind !== 'trunk' || run.service !== 'local') return 0;
     let bestProfile = 0;
     for (let i = 0; i < smooth.stationDistances.length; i++) {
@@ -427,7 +680,6 @@ export class RailRenderer {
       const smooth = this.smoothLines.get(line.id); if (!smooth) continue;
       for (let stationIndex = 0; stationIndex < line.stationIds.length; stationIndex++) {
         const stationId = line.stationIds[stationIndex], station = this.rail.stations[stationId]; if (!station) continue;
-        // 幹線と共有する支線駅は幹線ホームを共用し、ホームを二重生成しない。
         if (line.kind === 'spur' && this.stationHasTrunk(stationId)) continue;
 
         const centerDistance = smooth.stationDistances[stationIndex] ?? 0;
@@ -460,7 +712,8 @@ export class RailRenderer {
 
   private buildPassingLoop(smooth: SmoothLine, centerDistance: number, platformLength: number, ballast: StaticPart[], rails: StaticPart[]): void {
     const halfPlatform = platformLength / 2;
-    const loopHalf = halfPlatform + RailRenderer.SWITCH_CLEARANCE + RailRenderer.SWITCH_APPROACH;
+    const fullUntil = halfPlatform + RailRenderer.SWITCH_CLEARANCE;
+    const loopHalf = fullUntil + RailRenderer.SWITCH_APPROACH;
     const start = Math.max(0, centerDistance - loopHalf), end = Math.min(smooth.length, centerDistance + loopHalf);
     for (const side of [-1, 1]) {
       let prev: RailPoint | null = null;
@@ -524,13 +777,7 @@ export class RailRenderer {
     this.buildPlatformAccess(smooth, end - 3, lateralOffset, 1, stairs);
   }
 
-  private buildPlatformAccess(
-    smooth: SmoothLine,
-    anchorDistance: number,
-    lateralOffset: number,
-    direction: -1 | 1,
-    stairs: StaticPart[],
-  ): void {
+  private buildPlatformAccess(smooth: SmoothLine, anchorDistance: number, lateralOffset: number, direction: -1 | 1, stairs: StaticPart[]): void {
     const anchor = this.offsetPoint(smooth, anchorDistance, lateralOffset); if (!anchor) return;
     const side = lateralOffset >= 0 ? 1 : -1;
     const roadHalf = this.roadHalfWidthAt(anchor.x, anchor.z, anchor.heading);
@@ -540,15 +787,7 @@ export class RailRenderer {
     const concourseY = 5.3;
     const platformY = RailRenderer.TRACK_Y + 0.40;
     const shaftHeight = Math.max(1.0, platformY - concourseY);
-    stairs.push({ matrix: this.matrix(
-      anchor.x,
-      concourseY + shaftHeight * 0.5,
-      anchor.z,
-      2.4,
-      shaftHeight,
-      2.4,
-      -anchor.heading,
-    ) });
+    stairs.push({ matrix: this.matrix(anchor.x, concourseY + shaftHeight * 0.5, anchor.z, 2.4, shaftHeight, 2.4, -anchor.heading) });
     this.pushRibbonSegment(anchor, outer, concourseY, 0.28, 2.6, stairs);
 
     const steps = 12, run = 15.5;
@@ -558,15 +797,7 @@ export class RailRenderer {
       const x = outer.x + Math.cos(outer.heading) * along;
       const z = outer.z + Math.sin(outer.heading) * along;
       const top = concourseY - t * (concourseY - 0.45);
-      stairs.push({ matrix: this.matrix(
-        x,
-        Math.max(0.30, top * 0.5),
-        z,
-        1.25,
-        Math.max(0.45, top),
-        2.6,
-        -outer.heading,
-      ) });
+      stairs.push({ matrix: this.matrix(x, Math.max(0.30, top * 0.5), z, 1.25, Math.max(0.45, top), 2.6, -outer.heading) });
     }
   }
 
@@ -600,16 +831,16 @@ export class RailRenderer {
     return { x: p.x - Math.sin(p.heading) * lateralOffset, z: p.z + Math.cos(p.heading) * lateralOffset, heading: p.heading };
   }
 
-  private stationHasTrunk(stationId: number): boolean {
-    const station = this.rail.stations[stationId];
-    return !!station && station.lineIds.some((id) => this.rail.lines[id]?.kind === 'trunk');
-  }
-
   private lineStationHasPassingLoop(lineId: number, stationIndex: number): boolean {
     const line = this.rail.lines[lineId]; if (!line || line.kind !== 'trunk') return false;
     if (stationIndex <= 0 || stationIndex >= line.stationIds.length - 1) return false;
     const station = this.rail.stations[line.stationIds[stationIndex]];
     return !!station && station.kind !== RailStationKind.Terminal;
+  }
+
+  private stationHasTrunk(stationId: number): boolean {
+    const station = this.rail.stations[stationId];
+    return !!station && station.lineIds.some((lineId) => this.rail.lines[lineId]?.kind === 'trunk');
   }
 
   private platformLength(stationId: number): number {
@@ -624,22 +855,25 @@ export class RailRenderer {
     for (const line of this.rail.lines) {
       const smooth = this.smoothLines.get(line.id); if (!smooth || smooth.length < 300 || line.stationIds.length < 2) continue;
       const services: TrainService[] = [];
-      const locals = line.kind === 'trunk' ? (smooth.length > 4500 ? 2 : 1) : 1;
-      for (let i = 0; i < locals; i++) services.push('local');
-      if (line.kind === 'trunk' && line.stationIds.length >= 5) services.push('rapid');
-      if (line.kind === 'trunk' && line.stationIds.length >= 7) services.push('limited');
+      if (line.kind === 'trunk') {
+        services.push('local');
+        if (smooth.length > 4500) services.push('local');
+        if (line.stationIds.length >= 5) services.push('rapid');
+        if (line.stationIds.length >= 7) services.push('limited');
+      } else services.push('local');
 
-      for (let i = 0; i < services.length; i++) {
+      const total = services.length;
+      for (let i = 0; i < total; i++) {
         const service = services[i];
         const maxStation = line.stationIds.length - 1;
-        const stationIndex = Math.min(maxStation, Math.round((i * maxStation) / Math.max(1, services.length - 1)));
+        const stationIndex = Math.min(maxStation, Math.round((i * maxStation) / Math.max(1, total - 1)));
         let direction: 1 | -1 = (i & 1) === 0 ? 1 : -1;
         if (stationIndex <= 0) direction = 1; else if (stationIndex >= maxStation) direction = -1;
-        const carCount = service === 'local' ? (line.kind === 'trunk' ? 4 : 3) : 5;
-        const cruiseSpeed = service === 'limited' ? 31.0 : service === 'rapid' ? 27.0 : line.kind === 'trunk' ? 21.5 : 17.0;
+        const carCount = service === 'limited' ? 5 : service === 'rapid' ? 5 : line.kind === 'trunk' ? 4 : 3;
         const id = this.trainRuns.length;
         const run: TrainRun = {
-          id, lineId: line.id, service, carCount, cruiseSpeed,
+          id, lineId: line.id, service, carCount,
+          cruiseSpeed: service === 'limited' ? 31.0 : service === 'rapid' ? 27.0 : line.kind === 'trunk' ? 21.5 : 17.0,
           direction, speed: 0, distance: 0,
           currentStationIndex: stationIndex, originStationIndex: -1, nextStationIndex: -1,
           dwellRemaining: 5 + i * 3, state: 'dwell', x: 0, z: 0, heading: 0,
@@ -671,7 +905,7 @@ export class RailRenderer {
     for (const run of this.trainRuns) for (let c = 0; c < run.carCount; c++) {
       this.trainInstanceToRun[idx] = run.id;
       const route = this.trainRouteColor(run.lineId);
-      const body = new THREE.Color(run.service === 'limited' ? 0xf7f8fa : run.service === 'rapid' ? 0xf2f5f7 : 0xdfe5e8);
+      const body = new THREE.Color(run.service === 'local' ? 0xdfe5e8 : 0xf5f7f9);
       const glass = route.clone().lerp(new THREE.Color(0x102235), 0.72);
       this.trainBody.setColorAt(idx, body);
       this.trainStripe.setColorAt(idx, route);
@@ -691,57 +925,101 @@ export class RailRenderer {
   }
 
   private trainRouteColor(lineId: number): THREE.Color {
-    const palette = [0x2276c9, 0x7658c9, 0x169bb0, 0xc15d9c, 0x4777c9, 0x8c65cf, 0x2e9caf];
+    const palette = [0x2276c9, 0x7656c8, 0x00a5b8, 0xc45da4, 0x4477cc, 0x8a5cc2, 0x2d9bb3];
     return new THREE.Color(palette[Math.abs(lineId) % palette.length]);
   }
 
+  /** 鉄道信号を3灯式の見える信号機として生成する。 */
   private buildRailSignals(): void {
-    const poles: StaticPart[] = [], lampMatrices: THREE.Matrix4[] = [];
+    const poles: StaticPart[] = [], heads: StaticPart[] = [];
     for (const line of this.rail.lines) {
       const smooth = this.smoothLines.get(line.id); if (!smooth) continue;
       for (let i = 0; i < line.stationIds.length; i++) {
         for (const dir of [-1, 1] as const) {
           const next = i + dir; if (next < 0 || next >= line.stationIds.length) continue;
-          const stationId = line.stationIds[i], edge = this.platformLength(stationId) / 2 + RailRenderer.SWITCH_CLEARANCE + 6;
+          const stationId = line.stationIds[i], edge = this.platformLength(stationId) / 2 + RailRenderer.SWITCH_CLEARANCE + 5;
           const d = THREE.MathUtils.clamp((smooth.stationDistances[i] ?? 0) + dir * edge, 0, smooth.length);
           const p = this.sampleSmooth(smooth, d); if (!p) continue;
-          const lateral = dir > 0 ? -2.65 : 2.65;
+          const lateral = dir > 0 ? -3.35 : 3.35;
           const x = p.x - Math.sin(p.heading) * lateral, z = p.z + Math.cos(p.heading) * lateral;
-          poles.push({ matrix: this.matrix(x, RailRenderer.TRACK_Y + 1.45, z, 0.16, 2.9, 0.16) });
-          lampMatrices.push(this.matrix(x, RailRenderer.TRACK_Y + 3.02, z, 0.55, 0.55, 0.55));
-          this.railSignals.push({ lineId: line.id, stationIndex: i, direction: dir, instanceIndex: lampMatrices.length - 1 });
+          poles.push({ matrix: this.matrix(x, RailRenderer.TRACK_Y + 1.65, z, 0.18, 3.3, 0.18) });
+          heads.push({ matrix: this.matrix(x, RailRenderer.TRACK_Y + 3.45, z, 0.76, 2.05, 0.52, -p.heading) });
+          this.railSignals.push({ lineId: line.id, stationIndex: i, direction: dir, instanceIndex: this.railSignals.length, x, z });
         }
       }
     }
+
     const box = new THREE.BoxGeometry(1, 1, 1);
     this.addStatic(box, new THREE.MeshStandardMaterial({ color: 0x4c5156, roughness: 0.7 }), poles);
-    if (lampMatrices.length === 0) return;
-    this.signalLamp = new THREE.InstancedMesh(
-      new THREE.SphereGeometry(1, 8, 6),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.25, emissive: 0x111111, vertexColors: true }),
-      lampMatrices.length,
-    );
-    lampMatrices.forEach((m, i) => this.signalLamp!.setMatrixAt(i, m));
-    this.signalLamp.instanceMatrix.needsUpdate = true; this.signalLamp.frustumCulled = false; this.scene.add(this.signalLamp);
+    this.addStatic(box, new THREE.MeshStandardMaterial({ color: 0x111417, roughness: 0.75 }), heads);
+    const count = this.railSignals.length; if (count === 0) return;
+    const sphere = new THREE.SphereGeometry(1, 10, 8);
+    this.signalRed = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0xff3030 }), count);
+    this.signalYellow = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0xffd23c }), count);
+    this.signalGreen = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0x39ef73 }), count);
+    for (const mesh of [this.signalRed, this.signalYellow, this.signalGreen]) {
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); mesh.frustumCulled = false; this.scene.add(mesh);
+    }
   }
 
   private updateSignals(): void {
-    if (!this.signalLamp) return;
+    if (!this.signalRed || !this.signalYellow || !this.signalGreen) return;
     for (const s of this.railSignals) {
-      const line = this.rail.lines[s.lineId]; if (!line) continue;
-      const next = s.stationIndex + s.direction;
-      const occupied = this.segmentOccupied(s.lineId, s.stationIndex, next);
-      let targetOccupied = false;
-      for (const run of this.trainRuns) if (run.lineId === s.lineId && run.currentStationIndex === next) { targetOccupied = true; break; }
-      const color = occupied ? 0xff2d2d : targetOccupied ? 0xffc83d : 0x39e36c;
-      this.signalLamp.setColorAt(s.instanceIndex, new THREE.Color(color));
+      const aspect = this.signalAspect(s);
+      this.setSignalLamp(this.signalRed, s, 0, aspect === 'red');
+      this.setSignalLamp(this.signalYellow, s, 1, aspect === 'yellow');
+      this.setSignalLamp(this.signalGreen, s, 2, aspect === 'green');
     }
-    if (this.signalLamp.instanceColor) this.signalLamp.instanceColor.needsUpdate = true;
+    this.signalRed.instanceMatrix.needsUpdate = true;
+    this.signalYellow.instanceMatrix.needsUpdate = true;
+    this.signalGreen.instanceMatrix.needsUpdate = true;
   }
 
-  /** Convert road-grid polylines into quadratic corner fillets. Shared spur junctions are moved outside platforms first. */
+  private setSignalLamp(mesh: THREE.InstancedMesh, signal: RailSignal, lamp: 0 | 1 | 2, on: boolean): void {
+    const y = RailRenderer.TRACK_Y + 4.02 - lamp * 0.58;
+    const size = on ? 0.30 : 0.115;
+    mesh.setMatrixAt(signal.instanceIndex, this.matrix(signal.x, y, signal.z, size, size, size));
+  }
+
+  private signalAspect(signal: RailSignal): SignalAspect {
+    const to = signal.stationIndex + signal.direction;
+    const blockId = this.blockIdFor(signal.lineId, signal.stationIndex, to);
+    if (blockId < 0) return 'red';
+    const block = this.lineBlocks[blockId]; if (!block) return 'red';
+
+    for (const conflictId of block.conflicts) if (this.blockOccupancy.has(conflictId)) return 'red';
+
+    let reservationOwner = -1;
+    for (const conflictId of block.conflicts) {
+      const owner = this.blockReservations.get(conflictId);
+      if (owner != null) { reservationOwner = owner; break; }
+    }
+    if (reservationOwner >= 0) {
+      const run = this.trainRuns[reservationOwner];
+      if (!run || run.lineId !== signal.lineId) return 'red';
+      const expectedDirection = run.direction;
+      if (expectedDirection !== signal.direction) return 'red';
+    }
+
+    const line = this.rail.lines[signal.lineId]; if (!line) return 'red';
+    const targetStationId = line.stationIds[to];
+    const junction = this.routeReservations.get(`junction:${targetStationId}`);
+    if (junction && junction.lineId !== signal.lineId) return 'red';
+
+    const next = to + signal.direction;
+    if (next >= 0 && next < line.stationIds.length) {
+      const nextBlock = this.blockIdFor(signal.lineId, to, next);
+      if (nextBlock >= 0) {
+        const nb = this.lineBlocks[nextBlock];
+        if (nb && [...nb.conflicts].some((id) => this.blockOccupancy.has(id) || this.blockReservations.has(id))) return 'yellow';
+      }
+    }
+    return 'green';
+  }
+
+  /** Convert road-grid polylines into quadratic corner fillets. */
   private makeSmoothLine(line: RailLine): SmoothLine {
-    const src = this.sourcePathForLine(line), path: RailPoint[] = [];
+    const src = this.sharedStationSafePath(line), path: RailPoint[] = [];
     const push = (p: RailPoint): void => {
       const last = path[path.length - 1]; if (!last || Math.hypot(last.x - p.x, last.z - p.z) > 0.08) path.push({ x: p.x, z: p.z });
     };
@@ -773,63 +1051,33 @@ export class RailRenderer {
     return { line, path, cumulative, length, stationDistances };
   }
 
-  /**
-   * 支線が幹線駅を共有する場合、駅中心～ホーム外までは幹線の接線に沿わせる。
-   * 分岐点をホーム外へ移すことで駅中央のポイント集中を避ける。
-   */
-  private sourcePathForLine(line: RailLine): RailPoint[] {
-    let src = line.path.map((p) => ({ x: p.x, z: p.z }));
-    if (line.kind !== 'spur' || src.length < 2) return src;
-    src = this.clearSharedEndpoint(src, line, true);
-    src = this.clearSharedEndpoint(src, line, false);
-    return src;
-  }
-
-  private clearSharedEndpoint(src: RailPoint[], line: RailLine, atStart: boolean): RailPoint[] {
-    if (src.length < 2) return src;
-    const stationIndex = atStart ? 0 : line.stationIds.length - 1;
-    const stationId = line.stationIds[stationIndex];
-    if (!this.stationHasTrunk(stationId)) return src;
-    const station = this.rail.stations[stationId]; if (!station) return src;
-
-    const neighbor = atStart ? src[1] : src[src.length - 2];
-    const bx = neighbor.x - station.x, bz = neighbor.z - station.z;
-    const bl = Math.hypot(bx, bz) || 1;
-    const tangent = this.sharedTrunkDirection(stationId, bx / bl, bz / bl); if (!tangent) return src;
-    const clear = this.platformLength(stationId) * 0.5 + RailRenderer.SWITCH_CLEARANCE + RailRenderer.SWITCH_APPROACH * 0.55;
-    const junction = { x: station.x + tangent.x * clear, z: station.z + tangent.z * clear };
-    const stationPoint = { x: station.x, z: station.z };
-
-    if (atStart) {
-      let first = 1;
-      while (first < src.length - 1 && Math.hypot(src[first].x - station.x, src[first].z - station.z) < clear * 0.72) first++;
-      return [stationPoint, junction, ...src.slice(first)];
-    }
-    let last = src.length - 2;
-    while (last > 0 && Math.hypot(src[last].x - station.x, src[last].z - station.z) < clear * 0.72) last--;
-    return [...src.slice(0, last + 1), junction, stationPoint];
-  }
-
-  private sharedTrunkDirection(stationId: number, preferredX: number, preferredZ: number): { x: number; z: number } | null {
-    const station = this.rail.stations[stationId]; if (!station) return null;
-    let best: { x: number; z: number } | null = null, bestScore = -Infinity;
-    for (const lineId of station.lineIds) {
-      const trunk = this.rail.lines[lineId]; if (!trunk || trunk.kind !== 'trunk') continue;
-      for (let i = 1; i < trunk.path.length; i++) {
-        const a = trunk.path[i - 1], b = trunk.path[i];
-        const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz; if (len2 < 0.01) continue;
-        const t = THREE.MathUtils.clamp(((station.x - a.x) * dx + (station.z - a.z) * dz) / len2, 0, 1);
-        const qx = a.x + dx * t, qz = a.z + dz * t;
-        const distancePenalty = Math.hypot(qx - station.x, qz - station.z);
-        const len = Math.sqrt(len2), ux = dx / len, uz = dz / len;
-        for (const sign of [-1, 1]) {
-          const tx = ux * sign, tz = uz * sign;
-          const score = tx * preferredX + tz * preferredZ - distancePenalty * 0.02;
-          if (score > bestScore) { bestScore = score; best = { x: tx, z: tz }; }
-        }
+  /** 共有駅では支線をホーム中央で分岐させず、幹線のホーム線形へ寄せる。 */
+  private sharedStationSafePath(line: RailLine): RailPoint[] {
+    if (line.kind !== 'spur' || line.path.length < 2) return line.path;
+    const out = line.path.map((p) => ({ x: p.x, z: p.z }));
+    for (const stationId of line.stationIds) {
+      const station = this.rail.stations[stationId]; if (!station || !this.stationHasTrunk(stationId)) continue;
+      const trunkId = station.lineIds.find((id) => this.rail.lines[id]?.kind === 'trunk');
+      if (trunkId == null) continue;
+      const trunk = this.smoothLines.get(trunkId); if (!trunk) continue;
+      const td = trunk.stationDistances[this.rail.lines[trunkId].stationIds.indexOf(stationId)];
+      if (!Number.isFinite(td)) continue;
+      const tp = this.sampleSmooth(trunk, td); if (!tp) continue;
+      // 駅周辺の支線path点を幹線接線へ投影し、分岐をホーム外へ押し出す。
+      const protect = this.platformLength(stationId) * 0.5 + RailRenderer.SWITCH_CLEARANCE + RailRenderer.SWITCH_APPROACH;
+      for (let i = 0; i < out.length; i++) {
+        const dx = out[i].x - station.x, dz = out[i].z - station.z;
+        const along = dx * Math.cos(tp.heading) + dz * Math.sin(tp.heading);
+        const lateral = -dx * Math.sin(tp.heading) + dz * Math.cos(tp.heading);
+        if (Math.abs(along) > protect) continue;
+        const u = THREE.MathUtils.clamp((protect - Math.abs(along)) / Math.max(1, RailRenderer.SWITCH_APPROACH), 0, 1);
+        const pull = u * u * (3 - 2 * u);
+        const newLat = lateral * (1 - pull);
+        out[i].x = station.x + Math.cos(tp.heading) * along - Math.sin(tp.heading) * newLat;
+        out[i].z = station.z + Math.sin(tp.heading) * along + Math.cos(tp.heading) * newLat;
       }
     }
-    return best;
+    return out;
   }
 
   private nearestDistanceOnPath(path: RailPoint[], cumulative: number[], x: number, z: number): number {
