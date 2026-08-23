@@ -2,6 +2,7 @@ import { RoadNetwork, RoadClass } from '../traffic/RoadNetwork';
 import { POIRegistry, POICategory } from '../world/POI';
 import { makeRng, clamp } from '../core/math';
 import { CityPlanning, CityPlanningOptions, DistrictType, PlanningSample } from './CityPlanning';
+import { BlockParcelLayout, FrontageSide, LandParcel, UrbanBlock } from './BlockParcelLayout';
 
 export interface CityConfig {
   seed: number;
@@ -47,6 +48,7 @@ export interface Building {
   urbanity: number;
   district: DistrictType;
   landValue: number;
+  frontage: FrontageSide;
 }
 
 export interface ParkingLot {
@@ -55,12 +57,14 @@ export interface ParkingLot {
 }
 
 /**
- * City Generator v2 phase 1.
- * Planning -> road hierarchy -> district-sensitive blocks -> building/POI の順で生成する。
+ * City Generator v2.
+ * Phase 1: city planning + road hierarchy.
+ * Phase 2: road-bounded blocks + frontage-aware parcels + setback-aware buildings.
  */
 export class CityGenerator {
   readonly net = new RoadNetwork(); readonly poi = new POIRegistry();
   readonly buildings: Building[] = []; readonly parkingLots: ParkingLot[] = [];
+  readonly blocks: UrbanBlock[] = []; readonly parcels: LandParcel[] = [];
   readonly lotByPOI = new Map<number, number>();
   readonly gateNodes: number[] = [];
   readonly sizeMeters: number; readonly planning: CityPlanning; urbanThreshold = 0.5;
@@ -68,6 +72,7 @@ export class CityGenerator {
   private arterialEvery = 10; private collectorEvery = 4;
   private arterialOffsetX = 0; private arterialOffsetZ = 0;
   private collectorOffsetX = 0; private collectorOffsetZ = 0;
+  private nextParcel = 0;
 
   constructor(private cfg: CityConfig) {
     this.rng = makeRng(cfg.seed ^ 0x9e3779b9);
@@ -79,7 +84,9 @@ export class CityGenerator {
 
   private calibrateThreshold(): void {
     const N = 72; const samples: number[] = [];
-    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) samples.push(this.urbanization(((i + 0.5) / N) * this.cfg.sizeMeters, ((j + 0.5) / N) * this.cfg.sizeMeters));
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      samples.push(this.urbanization(((i + 0.5) / N) * this.cfg.sizeMeters, ((j + 0.5) / N) * this.cfg.sizeMeters));
+    }
     samples.sort((a, b) => a - b);
     const idx = clamp(Math.floor((1 - this.cfg.urbanRatioTarget) * samples.length), 0, samples.length - 1);
     this.urbanThreshold = samples[idx];
@@ -105,7 +112,6 @@ export class CityGenerator {
         const majorX = xClass !== RoadClass.Local, majorZ = zClass !== RoadClass.Local;
         const localStep = this.planning.localRoadStep(p.district);
         const localX = this.mod(i, localStep) === 0, localZ = this.mod(j, localStep) === 0;
-        // 市街地外でも幹線同士は都市全体を貫通させる。市街地内はDistrict別にLocal道路を間引く。
         const keep = urban ? ((majorX || localX) && (majorZ || localZ)) : (majorX || majorZ);
         const signal = urban && this.shouldSignal(i, j, xClass, zClass, p.district);
         nodeGrid[i][j] = keep ? this.net.addNode(x, z, signal) : -1;
@@ -113,36 +119,138 @@ export class CityGenerator {
     }
 
     const maxSpan = bs * 3.65;
-    const connectSpan = (a: number, b: number, cls: RoadClass) => {
+    const connectSpan = (a: number, b: number, cls: RoadClass): void => {
       if (a < 0 || b < 0) return;
       const na = this.net.nodes[a], nb = this.net.nodes[b];
       if (Math.hypot(nb.x - na.x, nb.z - na.z) > maxSpan) return;
       const p = this.planning.sample((na.x + nb.x) / 2, (na.z + nb.z) / 2);
-      const lanes = cls === RoadClass.Arterial ? (p.district === DistrictType.CBD || p.district === DistrictType.Commercial ? 3 : 2)
+      const lanes = cls === RoadClass.Arterial
+        ? (p.district === DistrictType.CBD || p.district === DistrictType.Commercial ? 3 : 2)
         : cls === RoadClass.Collector ? (p.density > 0.72 ? 2 : 1) : 1;
       this.net.connect(a, b, cls, lanes);
     };
 
-    // 横道路はZグリッド線、縦道路はXグリッド線の階層を使う。
     for (let j = 0; j <= cols; j++) {
       const cls = this.classForGridLine(j, 'z'); let prev = -1;
-      for (let i = 0; i <= cols; i++) { const n = nodeGrid[i][j]; if (n < 0) continue; if (prev >= 0) connectSpan(prev, n, cls); prev = n; }
+      for (let i = 0; i <= cols; i++) {
+        const n = nodeGrid[i][j]; if (n < 0) continue;
+        if (prev >= 0) connectSpan(prev, n, cls); prev = n;
+      }
     }
     for (let i = 0; i <= cols; i++) {
       const cls = this.classForGridLine(i, 'x'); let prev = -1;
-      for (let j = 0; j <= cols; j++) { const n = nodeGrid[i][j]; if (n < 0) continue; if (prev >= 0) connectSpan(prev, n, cls); prev = n; }
+      for (let j = 0; j <= cols; j++) {
+        const n = nodeGrid[i][j]; if (n < 0) continue;
+        if (prev >= 0) connectSpan(prev, n, cls); prev = n;
+      }
     }
 
     this.ensureConnected(nodeGrid, cols);
-
-    // 建物は基準セルごとに生成するが、道路はDistrict別に間引かれているため街区サイズは地区ごとに変わる。
-    for (let i = 0; i < cols; i++) for (let j = 0; j < cols; j++) {
-      const cx = (i + 0.5) * bs, cz = (j + 0.5) * bs; const p = this.planning.sample(cx, cz);
-      if (p.urbanScore < this.urbanThreshold) continue;
-      const frontage = this.blockFrontageClass(i, j);
-      this.fillBlock(i * bs, j * bs, bs, p, frontage, i, j);
-    }
+    this.generateBlocksAndParcels(bs, cols);
     this.buildGates(nodeGrid, cols, bs, size);
+  }
+
+  private generateBlocksAndParcels(bs: number, cols: number): void {
+    const layout = new BlockParcelLayout(this.net, bs, cols);
+    const extracted = layout.extractBlocks((x, z) => this.urbanization(x, z) >= this.urbanThreshold);
+    this.blocks.push(...extracted);
+
+    for (const block of this.blocks) {
+      const centerPlan = this.planning.sample(block.x, block.z);
+      const parcels = layout.subdivide(
+        block,
+        this.parcelFrontage(centerPlan.district),
+        this.parcelDepth(centerPlan.district),
+        this.rng,
+        () => this.nextParcel++,
+      );
+      this.parcels.push(...parcels);
+      this.fillBlockParcels(block, parcels);
+    }
+  }
+
+  private fillBlockParcels(block: UrbanBlock, parcels: LandParcel[]): void {
+    if (parcels.length === 0) return;
+    let parkingPlaced = false;
+    for (const parcel of parcels) {
+      const plan = this.planning.sample(parcel.x, parcel.z);
+      if (plan.urbanScore < this.urbanThreshold) continue;
+      if (plan.district === DistrictType.Park && this.rng() > 0.10) continue;
+
+      const parkingChance = this.parkingChance(plan.district);
+      if (!parkingPlaced && plan.district !== DistrictType.CBD && plan.district !== DistrictType.Park && this.rng() < parkingChance) {
+        const mx = Math.max(2, Math.min(5, parcel.width * 0.08));
+        const mz = Math.max(2, Math.min(5, parcel.depth * 0.08));
+        this.addParkingRect(parcel.x, parcel.z, Math.max(8, parcel.width - mx * 2), Math.max(8, parcel.depth - mz * 2));
+        parkingPlaced = true;
+        continue;
+      }
+      if (this.rng() < this.emptyChance(plan.district)) continue;
+      this.placeParcelBuilding(parcel, plan);
+    }
+
+    const blockPlan = this.planning.sample(block.x, block.z);
+    if (!parkingPlaced && parcels.length >= 3 && blockPlan.district !== DistrictType.CBD && blockPlan.district !== DistrictType.Park
+      && this.rng() < this.parkingChance(blockPlan.district) * 0.9) {
+      const p = parcels[parcels.length - 1];
+      this.addParkingRect(p.x, p.z, Math.max(8, p.width * 0.84), Math.max(8, p.depth * 0.84));
+    }
+  }
+
+  private placeParcelBuilding(parcel: LandParcel, plan: PlanningSample): void {
+    const category = plan.district === DistrictType.Park ? POICategory.Leisure : this.pickCategory(plan, parcel.roadClass);
+    let floors = this.baseFloorsForPlan(plan);
+    const roughW = Math.max(6, parcel.width * 0.72), roughD = Math.max(6, parcel.depth * 0.72);
+    const archetype = this.pickArchetype(category, plan, floors, roughW, roughD);
+    floors = this.adjustFloors(archetype, floors);
+
+    const footprint = this.buildingFootprint(parcel, plan.district, archetype);
+    if (!footprint || footprint.width < 4 || footprint.depth < 4) return;
+
+    const id = this.buildings.length;
+    const roofType = this.pickRoofType(archetype);
+    const palette = Math.floor(this.rng() * 4);
+    const styleSeed = Math.floor(this.rng() * 0xffffffff) >>> 0;
+    this.buildings.push({
+      id, x: footprint.x, z: footprint.z, width: footprint.width, depth: footprint.depth, floors, category, archetype,
+      roofType, palette, styleSeed, rotation: footprint.rotation,
+      urbanity: plan.urbanScore, district: plan.district, landValue: plan.landValue, frontage: parcel.frontage,
+    });
+    this.registerPOIs(id, footprint.x, footprint.z, category, floors, archetype);
+  }
+
+  private buildingFootprint(
+    parcel: LandParcel,
+    district: DistrictType,
+    archetype: BuildingArchetype,
+  ): { x: number; z: number; width: number; depth: number; rotation: number } | null {
+    const front = this.frontSetback(district, archetype);
+    const rear = this.rearSetback(district, archetype);
+    const side = this.sideSetback(district, archetype);
+    const minX = parcel.x - parcel.width / 2, maxX = parcel.x + parcel.width / 2;
+    const minZ = parcel.z - parcel.depth / 2, maxZ = parcel.z + parcel.depth / 2;
+
+    let localWidth: number, localDepth: number, x = parcel.x, z = parcel.z, rotation = 0;
+    if (parcel.frontage === 'north' || parcel.frontage === 'south') {
+      const frontageAvail = parcel.width - side * 2, depthAvail = parcel.depth - front - rear;
+      if (frontageAvail < 4 || depthAvail < 4) return null;
+      localWidth = frontageAvail * this.frontageFill(archetype);
+      localDepth = depthAvail * this.depthFill(archetype);
+      const lateralSpare = Math.max(0, frontageAvail - localWidth);
+      x += (this.rng() - 0.5) * lateralSpare * 0.55;
+      z = parcel.frontage === 'north' ? minZ + front + localDepth / 2 : maxZ - front - localDepth / 2;
+      rotation = 0;
+    } else {
+      const frontageAvail = parcel.depth - side * 2, depthAvail = parcel.width - front - rear;
+      if (frontageAvail < 4 || depthAvail < 4) return null;
+      localWidth = frontageAvail * this.frontageFill(archetype);
+      localDepth = depthAvail * this.depthFill(archetype);
+      const lateralSpare = Math.max(0, frontageAvail - localWidth);
+      z += (this.rng() - 0.5) * lateralSpare * 0.55;
+      x = parcel.frontage === 'west' ? minX + front + localDepth / 2 : maxX - front - localDepth / 2;
+      rotation = Math.PI / 2;
+    }
+    return { x, z, width: localWidth, depth: localDepth, rotation };
   }
 
   private classForGridLine(index: number, axis: 'x' | 'z'): RoadClass {
@@ -159,13 +267,6 @@ export class CityGenerator {
     if (majorX && majorZ) return true;
     if (district === DistrictType.CBD && (xClass === RoadClass.Arterial || zClass === RoadClass.Arterial)) return ((i + j) & 1) === 0;
     return false;
-  }
-
-  private blockFrontageClass(i: number, j: number): RoadClass {
-    const candidates = [this.classForGridLine(i, 'x'), this.classForGridLine(i + 1, 'x'), this.classForGridLine(j, 'z'), this.classForGridLine(j + 1, 'z')];
-    if (candidates.includes(RoadClass.Arterial)) return RoadClass.Arterial;
-    if (candidates.includes(RoadClass.Collector)) return RoadClass.Collector;
-    return RoadClass.Local;
   }
 
   private ensureConnected(nodeGrid: number[][], cols: number): void {
@@ -197,7 +298,10 @@ export class CityGenerator {
 
   private buildGates(nodeGrid: number[][], cols: number, bs: number, size: number): void {
     const ext = 120;
-    const tryGate = (edgeNode: number, gx: number, gz: number) => { if (edgeNode < 0) return; const g = this.net.addNode(gx, gz, false); this.net.connect(edgeNode, g, RoadClass.Highway, 2); this.gateNodes.push(g); };
+    const tryGate = (edgeNode: number, gx: number, gz: number): void => {
+      if (edgeNode < 0) return; const g = this.net.addNode(gx, gz, false);
+      this.net.connect(edgeNode, g, RoadClass.Highway, 2); this.gateNodes.push(g);
+    };
     const midCol = Math.round(cols / 2);
     const findEdgeNode = (fixed: 'i' | 'j', fixedIdx: number, center: number): number => {
       for (let d = 0; d <= cols; d++) for (const s of [center - d, center + d]) {
@@ -212,93 +316,94 @@ export class CityGenerator {
     tryGate(findEdgeNode('j', cols, midCol), midCol * bs, size + ext);
   }
 
-  private fillBlock(ox: number, oz: number, bs: number, plan: PlanningSample, frontage: RoadClass, gridI: number, gridJ: number): void {
-    if (plan.district === DistrictType.Park) {
-      // 公園は「建物を置かなかった余白」としてまず表現。小規模なレジャー棟だけ稀に置く。
-      if (this.rng() > 0.12) return;
-    }
-
-    const margin = this.blockMargin(plan.district);
-    const parcel = this.parcelSize(plan.district) * (0.86 + this.rng() * 0.28);
-    const perRow = Math.max(1, Math.floor((bs - margin * 2) / parcel)); let placedParking = false;
-    const parkingChance = this.parkingChance(plan.district);
-    const emptyChance = this.emptyChance(plan.district);
-
-    for (let a = 0; a < perRow; a++) for (let b = 0; b < perRow; b++) {
-      const cellSize = (bs - margin * 2) / perRow;
-      const baseX = ox + margin + (a + 0.5) * cellSize, baseZ = oz + margin + (b + 0.5) * cellSize;
-      if (plan.district !== DistrictType.Park && !placedParking && this.rng() < parkingChance) {
-        this.addParking(baseX, baseZ, Math.min(cellSize * 0.84, 18 + this.rng() * 16)); placedParking = true; continue;
-      }
-      if (this.rng() < emptyChance) continue;
-
-      const category = plan.district === DistrictType.Park ? POICategory.Leisure : this.pickCategory(plan, frontage);
-      let floors = this.baseFloorsForPlan(plan);
-      let w = Math.min(cellSize * 0.84, parcel * (0.56 + this.rng() * 0.34));
-      let d = Math.min(cellSize * 0.84, parcel * (0.56 + this.rng() * 0.34));
-      const archetype = this.pickArchetype(category, plan, floors, w, d);
-      floors = this.adjustFloors(archetype, floors);
-
-      if (archetype === BuildingArchetype.DetachedHouse) { w *= 0.72; d *= 0.72; }
-      else if (archetype === BuildingArchetype.TownHouse) { w *= 0.82; d *= 0.92; }
-      else if (archetype === BuildingArchetype.RetailBox || archetype === BuildingArchetype.LeisureHall) { w *= 1.05; d *= 1.05; }
-      else if (archetype === BuildingArchetype.Factory || archetype === BuildingArchetype.Warehouse) { w = Math.min(cellSize * 0.9, w * 1.35); d = Math.min(cellSize * 0.9, d * 1.35); }
-
-      const setbackFactor = archetype === BuildingArchetype.DetachedHouse ? 0.14
-        : archetype === BuildingArchetype.SmallShop ? 0.03
-          : archetype === BuildingArchetype.Factory || archetype === BuildingArchetype.Warehouse ? 0.10 : 0.05;
-      const jitter = cellSize * setbackFactor;
-      const x = baseX + (this.rng() - 0.5) * jitter;
-      const z = baseZ + (this.rng() - 0.5) * jitter;
-      const id = this.buildings.length;
-      const roofType = this.pickRoofType(archetype);
-      const palette = Math.floor(this.rng() * 4);
-      const styleSeed = Math.floor(this.rng() * 0xffffffff) >>> 0;
-      const rotation = this.preferredRotation(gridI, gridJ, frontage);
-      this.buildings.push({
-        id, x, z, width: w, depth: d, floors, category, archetype, roofType, palette, styleSeed, rotation,
-        urbanity: plan.urbanScore, district: plan.district, landValue: plan.landValue,
-      });
-      this.registerPOIs(id, x, z, category, floors, archetype);
-    }
-
-    // 郊外・工業地区は敷地内駐車を多め、CBDは強制しない。
-    if (!placedParking && plan.district !== DistrictType.CBD && plan.district !== DistrictType.Park && this.rng() < parkingChance * 1.4) {
-      this.addParking(ox + bs - margin - 9, oz + bs - margin - 9, Math.min(20, bs * 0.24));
-    }
-  }
-
-  private blockMargin(district: DistrictType): number {
-    if (district === DistrictType.CBD || district === DistrictType.Commercial) return 4;
-    if (district === DistrictType.Industrial || district === DistrictType.Logistics) return 8;
-    if (district === DistrictType.ResidentialLow) return 7;
-    return 6;
-  }
-
-  private parcelSize(district: DistrictType): number {
+  private parcelFrontage(district: DistrictType): number {
     switch (district) {
-      case DistrictType.CBD: return 24;
-      case DistrictType.Commercial: return 28;
-      case DistrictType.MixedUse: return 27;
-      case DistrictType.ResidentialHigh: return 25;
-      case DistrictType.ResidentialLow: return 34;
-      case DistrictType.Industrial: return 44;
-      case DistrictType.Logistics: return 50;
-      case DistrictType.Civic: return 38;
-      case DistrictType.Park: return 48;
+      case DistrictType.CBD: return 21;
+      case DistrictType.Commercial: return 25;
+      case DistrictType.MixedUse: return 25;
+      case DistrictType.ResidentialHigh: return 27;
+      case DistrictType.ResidentialLow: return 36;
+      case DistrictType.Industrial: return 68;
+      case DistrictType.Logistics: return 92;
+      case DistrictType.Civic: return 48;
+      case DistrictType.Park: return 80;
+    }
+  }
+
+  private parcelDepth(district: DistrictType): number {
+    switch (district) {
+      case DistrictType.CBD: return 34;
+      case DistrictType.Commercial: return 38;
+      case DistrictType.MixedUse: return 40;
+      case DistrictType.ResidentialHigh: return 42;
+      case DistrictType.ResidentialLow: return 48;
+      case DistrictType.Industrial: return 72;
+      case DistrictType.Logistics: return 88;
+      case DistrictType.Civic: return 60;
+      case DistrictType.Park: return 70;
+    }
+  }
+
+  private frontSetback(district: DistrictType, type: BuildingArchetype): number {
+    if (type === BuildingArchetype.Factory || type === BuildingArchetype.Warehouse) return district === DistrictType.Logistics ? 12 : 9;
+    if (district === DistrictType.CBD || district === DistrictType.Commercial) return type === BuildingArchetype.SmallShop ? 0.8 : 1.5;
+    if (district === DistrictType.MixedUse) return 2.0;
+    if (district === DistrictType.ResidentialHigh) return 3.5;
+    if (district === DistrictType.ResidentialLow) return type === BuildingArchetype.DetachedHouse ? 6 : 4.5;
+    if (district === DistrictType.Civic) return 6;
+    return 3;
+  }
+
+  private rearSetback(district: DistrictType, type: BuildingArchetype): number {
+    if (type === BuildingArchetype.Factory || type === BuildingArchetype.Warehouse) return 8;
+    if (district === DistrictType.CBD || district === DistrictType.Commercial) return 3;
+    if (district === DistrictType.ResidentialLow) return 7;
+    if (district === DistrictType.ResidentialHigh) return 5;
+    return 4;
+  }
+
+  private sideSetback(district: DistrictType, type: BuildingArchetype): number {
+    if (type === BuildingArchetype.Factory || type === BuildingArchetype.Warehouse) return 5;
+    if (district === DistrictType.CBD) return 1.2;
+    if (district === DistrictType.Commercial || district === DistrictType.MixedUse) return 1.8;
+    if (district === DistrictType.ResidentialLow) return 3.5;
+    return 2.5;
+  }
+
+  private frontageFill(type: BuildingArchetype): number {
+    switch (type) {
+      case BuildingArchetype.DetachedHouse: return 0.70;
+      case BuildingArchetype.TownHouse: return 0.86;
+      case BuildingArchetype.SmallShop: return 0.96;
+      case BuildingArchetype.RetailBox: return 0.94;
+      case BuildingArchetype.CommercialBlock: return 0.96;
+      case BuildingArchetype.Factory: return 0.90;
+      case BuildingArchetype.Warehouse: return 0.92;
+      default: return 0.88;
+    }
+  }
+
+  private depthFill(type: BuildingArchetype): number {
+    switch (type) {
+      case BuildingArchetype.DetachedHouse: return 0.72;
+      case BuildingArchetype.TownHouse: return 0.82;
+      case BuildingArchetype.SmallShop: return 0.90;
+      case BuildingArchetype.Factory: return 0.86;
+      case BuildingArchetype.Warehouse: return 0.88;
+      default: return 0.84;
     }
   }
 
   private parkingChance(district: DistrictType): number {
     switch (district) {
-      case DistrictType.CBD: return 0.08;
-      case DistrictType.Commercial: return 0.18;
-      case DistrictType.MixedUse: return 0.18;
-      case DistrictType.ResidentialHigh: return 0.22;
-      case DistrictType.ResidentialLow: return 0.34;
-      case DistrictType.Industrial: return 0.42;
-      case DistrictType.Logistics: return 0.50;
-      case DistrictType.Civic: return 0.20;
+      case DistrictType.CBD: return 0.05;
+      case DistrictType.Commercial: return 0.13;
+      case DistrictType.MixedUse: return 0.11;
+      case DistrictType.ResidentialHigh: return 0.12;
+      case DistrictType.ResidentialLow: return 0.22;
+      case DistrictType.Industrial: return 0.30;
+      case DistrictType.Logistics: return 0.38;
+      case DistrictType.Civic: return 0.16;
       case DistrictType.Park: return 0;
     }
   }
@@ -309,20 +414,12 @@ export class CityGenerator {
       case DistrictType.Commercial: return 0.05;
       case DistrictType.MixedUse: return 0.06;
       case DistrictType.ResidentialHigh: return 0.07;
-      case DistrictType.ResidentialLow: return 0.15;
-      case DistrictType.Industrial: return 0.12;
-      case DistrictType.Logistics: return 0.18;
+      case DistrictType.ResidentialLow: return 0.13;
+      case DistrictType.Industrial: return 0.10;
+      case DistrictType.Logistics: return 0.16;
       case DistrictType.Civic: return 0.12;
-      case DistrictType.Park: return 0.78;
+      case DistrictType.Park: return 0.84;
     }
-  }
-
-  private preferredRotation(i: number, j: number, frontage: RoadClass): number {
-    if (frontage === RoadClass.Local) return this.rng() < 0.5 ? 0 : Math.PI / 2;
-    const verticalMajor = this.classForGridLine(i, 'x') === frontage || this.classForGridLine(i + 1, 'x') === frontage;
-    const horizontalMajor = this.classForGridLine(j, 'z') === frontage || this.classForGridLine(j + 1, 'z') === frontage;
-    if (verticalMajor !== horizontalMajor) return verticalMajor ? Math.PI / 2 : 0;
-    return this.rng() < 0.5 ? 0 : Math.PI / 2;
   }
 
   private baseFloorsForPlan(plan: PlanningSample): number {
@@ -333,17 +430,29 @@ export class CityGenerator {
     return Math.max(1, Math.round(1 + potential * cap * (0.56 + this.rng() * 0.58)));
   }
 
-  private addParking(x: number, z: number, size: number): void {
-    const safeSize = Math.max(8, size), cell = 3.0, usable = safeSize - 2; const cols = Math.max(1, Math.floor(usable / cell)), rows = Math.max(1, Math.floor(usable / cell));
-    const capacity = cols * rows; const slotX = new Float32Array(capacity), slotZ = new Float32Array(capacity); const free = new Uint8Array(capacity).fill(1);
-    let k = 0; for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) { slotX[k] = x - (usable / 2) + (c + 0.5) * (usable / cols); slotZ[k] = z - (usable / 2) + (r + 0.5) * (usable / rows); k++; }
+  private addParkingRect(x: number, z: number, width: number, depth: number): void {
+    const safeW = Math.max(8, width), safeD = Math.max(8, depth), cellW = 3.0, cellD = 5.4;
+    const usableW = Math.max(5, safeW - 2), usableD = Math.max(5, safeD - 2);
+    const cols = Math.max(1, Math.floor(usableW / cellW)), rows = Math.max(1, Math.floor(usableD / cellD));
+    const capacity = cols * rows; const slotX = new Float32Array(capacity), slotZ = new Float32Array(capacity), free = new Uint8Array(capacity).fill(1);
+    let k = 0;
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      slotX[k] = x - usableW / 2 + (c + 0.5) * (usableW / cols);
+      slotZ[k] = z - usableD / 2 + (r + 0.5) * (usableD / rows); k++;
+    }
     const poiId = this.poi.add({ category: POICategory.Parking, x, z, priceTier: 0.3, capacity, buildingId: -1 });
     this.lotByPOI.set(poiId, this.parkingLots.length);
-    this.parkingLots.push({ id: this.parkingLots.length, poiId, x, z, width: safeSize, depth: safeSize, capacity, slotX, slotZ, free });
+    this.parkingLots.push({ id: this.parkingLots.length, poiId, x, z, width: safeW, depth: safeD, capacity, slotX, slotZ, free });
   }
 
-  takeSlot(poiId: number): number { const li = this.lotByPOI.get(poiId); if (li === undefined) return -1; const lot = this.parkingLots[li]; for (let i = 0; i < lot.free.length; i++) if (lot.free[i]) { lot.free[i] = 0; return i; } return -1; }
-  giveSlot(poiId: number, slot: number): void { const li = this.lotByPOI.get(poiId); if (li === undefined) return; const lot = this.parkingLots[li]; if (slot >= 0 && slot < lot.free.length) lot.free[slot] = 1; }
+  takeSlot(poiId: number): number {
+    const li = this.lotByPOI.get(poiId); if (li === undefined) return -1; const lot = this.parkingLots[li];
+    for (let i = 0; i < lot.free.length; i++) if (lot.free[i]) { lot.free[i] = 0; return i; } return -1;
+  }
+  giveSlot(poiId: number, slot: number): void {
+    const li = this.lotByPOI.get(poiId); if (li === undefined) return; const lot = this.parkingLots[li];
+    if (slot >= 0 && slot < lot.free.length) lot.free[slot] = 1;
+  }
   slotX(poiId: number, slot: number): number { const li = this.lotByPOI.get(poiId); return li === undefined ? 0 : this.parkingLots[li].slotX[slot]; }
   slotZ(poiId: number, slot: number): number { const li = this.lotByPOI.get(poiId); return li === undefined ? 0 : this.parkingLots[li].slotZ[slot]; }
 
@@ -437,7 +546,9 @@ export class CityGenerator {
 
   private registerPOIs(buildingId: number, x: number, z: number, cat: POICategory, floors: number, archetype: BuildingArchetype): void {
     const priceTier = clamp(0.3 + this.rng() * 0.5, 0, 1);
-    let capacity = cat === POICategory.Home ? Math.max(4, floors * 5) : cat === POICategory.Work ? Math.max(6, floors * 8) : cat === POICategory.Food ? Math.max(8, floors * 6) : Math.max(6, floors * 5);
+    let capacity = cat === POICategory.Home ? Math.max(4, floors * 5)
+      : cat === POICategory.Work ? Math.max(6, floors * 8)
+        : cat === POICategory.Food ? Math.max(8, floors * 6) : Math.max(6, floors * 5);
     if (archetype === BuildingArchetype.Factory) capacity = Math.max(35, floors * 35);
     if (archetype === BuildingArchetype.Warehouse) capacity = Math.max(18, floors * 20);
     const stockFor = (c: POICategory): { stock: number; maxStock: number } => {
