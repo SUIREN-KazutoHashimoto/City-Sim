@@ -27,7 +27,7 @@ export class World {
   private readonly needs = new NeedSystem(); private readonly brain: UtilityBrain; private readonly walkAstar: AStar;
   private readonly agentWorkers: AgentWorkerPool; private readonly poiWorkers: POISearchWorkerPool; private readonly pedWorkers: PedestrianWorkerPool;
   private walkPaths: Int32Array[]; private rng = makeRng(999);
-  driveThreshold = 180; private decideCursor = 0;
+  driveThreshold = 180; private decideCursor = 0; private workerPedStep = false;
   private pedBlock: Uint8Array; private vehBlock!: Uint8Array;
   private readonly pedCrossingRoadNode: Int32Array;
   private readonly pedCrossingAxis: Uint8Array;
@@ -132,17 +132,21 @@ export class World {
   }
 
   private stepCore(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): void {
+    this.workerPedStep = false;
     const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
     for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, false); }
     this.stepAfterPed(now, updateActivities, dtSec);
   }
 
   private async stepCoreAsync(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): Promise<void> {
-    const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
-    this.pedWorkers.begin();
-    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, true); }
-    await this.pedWorkers.flush(dtSec);
-    this.stepAfterPed(now, updateActivities, dtSec);
+    this.workerPedStep = true;
+    try {
+      const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
+      this.pedWorkers.begin();
+      for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, true); }
+      await this.pedWorkers.flush(dtSec);
+      this.stepAfterPed(now, updateActivities, dtSec);
+    } finally { this.workerPedStep = false; }
   }
 
   private stepBeforePed(dtSec: number, updateNeeds: boolean, updateDecisions: boolean): number {
@@ -290,8 +294,8 @@ export class World {
   }
 
   private buildTravelerIndex(): void {
-    // Parallel mode uses the worker-side linked-cell index; avoid rebuilding the Map-based grid on the main thread.
-    if (this.pedWorkers.active) return;
+    // Async Ped worker steps use their linked-cell index. Synchronous World.step keeps the original grid.
+    if (this.workerPedStep) return;
     this.grid.clear(); const s = this.store;
     for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.grid.insert(i, s.posX[i], s.posZ[i]); }
   }
