@@ -30,6 +30,17 @@ declare module './RailRenderer' {
 type AnyRail = Record<string, any>;
 type AnyRun = Record<string, any>;
 const proto = RailRenderer.prototype as unknown as AnyRail;
+const originalBuild = proto.build as () => void;
+let activeProvider: RailRenderer | null = null;
+
+export function latestRailPassengerProvider(): RailRenderer | null {
+  return activeProvider;
+}
+
+proto.build = function passengerAwareBuild(this: RailRenderer): void {
+  originalBuild.call(this);
+  activeProvider = this;
+};
 
 proto.boardingTrains = function boardingTrains(this: AnyRail): RailBoardingTrainSnapshot[] {
   const out: RailBoardingTrainSnapshot[] = [];
