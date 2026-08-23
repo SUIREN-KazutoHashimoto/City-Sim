@@ -4,6 +4,7 @@ import '../generation/RailPlanningEnhancements';
 import './RailRendererEnhancements';
 import './RailDepotPlacement';
 import './RailRightHandOperation';
+import './RailSignalPlatformClearance';
 import './RailLightingAndIndicators';
 import './RailSupportClearance';
 import './PedestrianSignalOrientation';
