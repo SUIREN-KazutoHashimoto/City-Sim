@@ -2,83 +2,179 @@ import * as THREE from 'three';
 import { RailRenderer, TrainService } from './RailRenderer';
 
 /**
- * RailRenderer本体のhit mesh姿勢を利用して、車体左右に明確な路線色パネルを重ねる。
- * 既存の細い埋め込みstripeは近距離でも見えづらいため、独立した側面パネルとして描画する。
+ * 列車の最終表示レイヤー。
+ *
+ * RailRendererの運行poseは非同期SIM更新の影響を受けるため、そのまま表示せず
+ * VehicleVisualSmootherと同じ一次指数補間で位置/回転だけを追従する。
+ * 二次系・速度追従を持たないので、オーバーシュート（ばね挙動）は発生しない。
+ *
+ * 元のtrainHitMeshはRaycast proxyとして透明化し、外観はこのクラスで描画する。
  */
 export class TrainLiveryOverlay {
+  private shell: THREE.InstancedMesh | null = null;
+  private windows: THREE.InstancedMesh | null = null;
   private stripes: THREE.InstancedMesh | null = null;
   private capacity = 0;
-  private readonly bodyMatrix = new THREE.Matrix4();
-  private readonly local = new THREE.Matrix4();
-  private readonly position = new THREE.Vector3();
-  private readonly stripePosition = new THREE.Vector3();
-  private readonly quaternion = new THREE.Quaternion();
-  private readonly scale = new THREE.Vector3();
-  private readonly stripeScale = new THREE.Vector3();
+  private proxyHidden = false;
+
+  private x = new Float32Array(0);
+  private y = new Float32Array(0);
+  private z = new Float32Array(0);
+  private qx = new Float32Array(0);
+  private qy = new Float32Array(0);
+  private qz = new Float32Array(0);
+  private qw = new Float32Array(0);
+  private initialized = new Uint8Array(0);
+
+  private readonly rawMatrix = new THREE.Matrix4();
+  private readonly outMatrix = new THREE.Matrix4();
+  private readonly rawPos = new THREE.Vector3();
+  private readonly smoothPos = new THREE.Vector3();
+  private readonly panelPos = new THREE.Vector3();
   private readonly offset = new THREE.Vector3();
-  private readonly color = new THREE.Color();
+  private readonly rawQuat = new THREE.Quaternion();
+  private readonly smoothQuat = new THREE.Quaternion();
+  private readonly rawScale = new THREE.Vector3();
+  private readonly outScale = new THREE.Vector3();
+  private readonly routeColorTmp = new THREE.Color();
   private readonly rapidAccent = new THREE.Color(0xffb000);
+  private readonly localBody = new THREE.Color(0xe8ecef);
+  private readonly rapidBody = new THREE.Color(0xf7f8fa);
 
   constructor(private readonly scene: THREE.Scene, private readonly rail: RailRenderer) {}
 
-  sync(): void {
-    const body = this.rail.trainHitMesh;
-    if (!body || body.count <= 0) return;
-    const required = Math.max(2, body.instanceMatrix.count * 2);
-    if (!this.stripes || required !== this.capacity) this.rebuild(required);
-    if (!this.stripes) return;
+  sync(dt: number): void {
+    const proxy = this.rail.trainHitMesh;
+    if (!proxy || proxy.count <= 0) return;
 
-    let out = 0;
-    for (let i = 0; i < body.count; i++) {
-      body.getMatrixAt(i, this.bodyMatrix);
-      this.bodyMatrix.decompose(this.position, this.quaternion, this.scale);
+    this.hideProxy(proxy);
+    const required = Math.max(1, proxy.instanceMatrix.count);
+    if (!this.shell || required !== this.capacity) this.rebuild(required);
+    if (!this.shell || !this.windows || !this.stripes) return;
+
+    const posAlpha = 1 - Math.exp(-Math.max(0, dt) * 9);
+    const rotAlpha = 1 - Math.exp(-Math.max(0, dt) * 7);
+    let shellCount = 0, panelCount = 0;
+
+    for (let i = 0; i < proxy.count; i++) {
+      proxy.getMatrixAt(i, this.rawMatrix);
+      this.rawMatrix.decompose(this.rawPos, this.rawQuat, this.rawScale);
+
+      const dx = this.rawPos.x - this.x[i];
+      const dy = this.rawPos.y - this.y[i];
+      const dz = this.rawPos.z - this.z[i];
+      if (!this.initialized[i] || dx * dx + dy * dy + dz * dz > 90 * 90) {
+        this.x[i] = this.rawPos.x; this.y[i] = this.rawPos.y; this.z[i] = this.rawPos.z;
+        this.qx[i] = this.rawQuat.x; this.qy[i] = this.rawQuat.y; this.qz[i] = this.rawQuat.z; this.qw[i] = this.rawQuat.w;
+        this.initialized[i] = 1;
+      } else {
+        this.x[i] += dx * posAlpha; this.y[i] += dy * posAlpha; this.z[i] += dz * posAlpha;
+        this.smoothQuat.set(this.qx[i], this.qy[i], this.qz[i], this.qw[i]);
+        this.smoothQuat.slerp(this.rawQuat, rotAlpha).normalize();
+        this.qx[i] = this.smoothQuat.x; this.qy[i] = this.smoothQuat.y; this.qz[i] = this.smoothQuat.z; this.qw[i] = this.smoothQuat.w;
+      }
+
+      this.smoothPos.set(this.x[i], this.y[i] + 0.08, this.z[i]);
+      this.smoothQuat.set(this.qx[i], this.qy[i], this.qz[i], this.qw[i]).normalize();
+
+      const length = Math.max(7.5, Math.abs(this.rawScale.x) * 1.015);
+      const width = 3.08;
+      const height = 3.42;
+      this.outScale.set(length, height, width);
+      this.outMatrix.compose(this.smoothPos, this.smoothQuat, this.outScale);
+      this.shell.setMatrixAt(shellCount, this.outMatrix);
+
       const runId = this.rail.trainIdFromInstance(i);
       const status = runId >= 0 ? this.rail.trainStatus(runId) : null;
-      const lineId = status?.lineId ?? 0;
       const service: TrainService = status?.service ?? 'local';
-      const routeColor = this.routeColor(lineId, service);
+      this.shell.setColorAt(shellCount, service === 'rapid' ? this.rapidBody : this.localBody);
 
-      const sideOffset = Math.abs(this.scale.z) * 0.5 + 0.075;
-      const stripeLength = Math.max(4, Math.abs(this.scale.x) * 0.91);
-      const stripeHeight = service === 'rapid' ? 0.72 : 0.62;
-      this.stripeScale.set(stripeLength, stripeHeight, 0.15);
-
+      const routeColor = this.routeColor(status?.lineId ?? 0, service);
+      const sideOffset = width * 0.5 + 0.035;
       for (const side of [-1, 1]) {
-        this.offset.set(0, 0.12, sideOffset * side).applyQuaternion(this.quaternion);
-        this.stripePosition.copy(this.position).add(this.offset);
-        this.local.compose(this.stripePosition, this.quaternion, this.stripeScale);
-        this.stripes.setMatrixAt(out, this.local);
-        this.stripes.setColorAt(out, routeColor);
-        out++;
+        // 窓帯。元の黒いcab meshより外側に置き、暗色は窓部分だけに限定する。
+        this.offset.set(0, 0.77, sideOffset * side).applyQuaternion(this.smoothQuat);
+        this.panelPos.copy(this.smoothPos).add(this.offset);
+        this.outScale.set(length * 0.74, 0.72, 0.07);
+        this.outMatrix.compose(this.panelPos, this.smoothQuat, this.outScale);
+        this.windows.setMatrixAt(panelCount, this.outMatrix);
+
+        // 路線帯。MeshBasicMaterialなので昼夜・影に関係なく必ず見える。
+        this.offset.set(0, -0.22, (sideOffset + 0.045) * side).applyQuaternion(this.smoothQuat);
+        this.panelPos.copy(this.smoothPos).add(this.offset);
+        this.outScale.set(length * 0.94, service === 'rapid' ? 0.66 : 0.54, 0.075);
+        this.outMatrix.compose(this.panelPos, this.smoothQuat, this.outScale);
+        this.stripes.setMatrixAt(panelCount, this.outMatrix);
+        this.stripes.setColorAt(panelCount, routeColor);
+        panelCount++;
       }
+      shellCount++;
     }
 
-    this.stripes.count = out;
+    this.shell.count = shellCount;
+    this.windows.count = panelCount;
+    this.stripes.count = panelCount;
+    this.shell.instanceMatrix.needsUpdate = true;
+    this.windows.instanceMatrix.needsUpdate = true;
     this.stripes.instanceMatrix.needsUpdate = true;
+    if (this.shell.instanceColor) this.shell.instanceColor.needsUpdate = true;
     if (this.stripes.instanceColor) this.stripes.instanceColor.needsUpdate = true;
   }
 
-  private rebuild(capacity: number): void {
-    if (this.stripes) this.scene.remove(this.stripes);
-    this.capacity = capacity;
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.36,
-      metalness: 0.16,
-      vertexColors: true,
+  private hideProxy(proxy: THREE.InstancedMesh): void {
+    if (this.proxyHidden) return;
+    proxy.material = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      colorWrite: false,
     });
-    this.stripes = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, capacity);
-    this.stripes.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.stripes.frustumCulled = false;
-    this.stripes.castShadow = true;
-    this.stripes.receiveShadow = true;
-    this.scene.add(this.stripes);
+    proxy.castShadow = false;
+    proxy.receiveShadow = false;
+    this.proxyHidden = true;
+  }
+
+  private rebuild(capacity: number): void {
+    if (this.shell) this.scene.remove(this.shell);
+    if (this.windows) this.scene.remove(this.windows);
+    if (this.stripes) this.scene.remove(this.stripes);
+
+    this.capacity = capacity;
+    this.x = new Float32Array(capacity); this.y = new Float32Array(capacity); this.z = new Float32Array(capacity);
+    this.qx = new Float32Array(capacity); this.qy = new Float32Array(capacity); this.qz = new Float32Array(capacity); this.qw = new Float32Array(capacity);
+    this.initialized = new Uint8Array(capacity);
+
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    // setColorAt()はinstanceColorを使う。geometry vertex colorは使わないためvertexColors:trueを付けない。
+    this.shell = new THREE.InstancedMesh(
+      box,
+      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.48, metalness: 0.20 }),
+      capacity,
+    );
+    this.windows = new THREE.InstancedMesh(
+      box,
+      new THREE.MeshStandardMaterial({ color: 0x263947, roughness: 0.22, metalness: 0.16 }),
+      capacity * 2,
+    );
+    this.stripes = new THREE.InstancedMesh(
+      box,
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      capacity * 2,
+    );
+
+    for (const mesh of [this.shell, this.windows, this.stripes]) {
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      mesh.frustumCulled = false;
+      mesh.castShadow = mesh !== this.stripes;
+      mesh.receiveShadow = mesh !== this.stripes;
+      this.scene.add(mesh);
+    }
   }
 
   private routeColor(lineId: number, service: TrainService): THREE.Color {
-    const palette = [0x0877c9, 0xd83b32, 0x15925f, 0x7a48b7, 0xe57a18, 0x0097aa, 0xbb2f71];
-    this.color.setHex(palette[Math.abs(lineId) % palette.length]);
-    if (service === 'rapid') this.color.lerp(this.rapidAccent, 0.32);
-    return this.color;
+    const palette = [0x0788e6, 0xee4338, 0x19b46f, 0x955bd7, 0xff8a19, 0x00b9d0, 0xd83a89];
+    this.routeColorTmp.setHex(palette[Math.abs(lineId) % palette.length]);
+    if (service === 'rapid') this.routeColorTmp.lerp(this.rapidAccent, 0.28);
+    return this.routeColorTmp;
   }
 }
