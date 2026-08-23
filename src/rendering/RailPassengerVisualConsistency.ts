@@ -15,8 +15,8 @@ const rawQuaternion = new THREE.Quaternion();
 const rawScale = new THREE.Vector3();
 
 function ensureNormalRailPassengerMeshes(renderer: AnyRenderer, body: THREE.InstancedMesh): THREE.InstancedMesh | null {
-  if (!renderer.__railPassengerVisualNormalized) {
-    renderer.__railPassengerVisualNormalized = true;
+  if (renderer.__railPassengerVisualBody !== body) {
+    renderer.__railPassengerVisualBody = body;
     body.geometry = new THREE.BoxGeometry(0.48, 0.76, 0.30);
     const material = body.material as THREE.MeshStandardMaterial;
     if (material && !Array.isArray(material)) {
@@ -31,8 +31,7 @@ function ensureNormalRailPassengerMeshes(renderer: AnyRenderer, body: THREE.Inst
   const required = body.instanceMatrix.count * 2;
   let legs = renderer.__railPassengerLegs as THREE.InstancedMesh | undefined;
   if (legs && renderer.__railPassengerLegCapacity >= required) return legs;
-  const scene = renderer.sceneRef as THREE.Scene | undefined;
-  if (!scene) return null;
+  const scene = renderer.sceneRef as THREE.Scene | undefined; if (!scene) return null;
   if (legs) scene.remove(legs);
   legs = new THREE.InstancedMesh(
     new THREE.BoxGeometry(0.17, 0.72, 0.18),
@@ -63,8 +62,7 @@ proto.syncAgents = function syncAgentsWithConsistentRailPassengers(
   const body = renderer.__railPassengerBody as THREE.InstancedMesh | undefined;
   const head = renderer.__railPassengerHead as THREE.InstancedMesh | undefined;
   if (!body || !head) return;
-  const legs = ensureNormalRailPassengerMeshes(renderer, body);
-  if (!legs) return;
+  const legs = ensureNormalRailPassengerMeshes(renderer, body); if (!legs) return;
 
   const clothes = (renderer.clothes as THREE.Color[] | undefined) ?? fallbackClothes;
   const pose = renderer.pose as (
