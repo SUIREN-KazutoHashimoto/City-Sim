@@ -1,3 +1,5 @@
+export {};
+
 type BestQuery = { category: number; x: number; z: number; wealth: number };
 type NearestQuery = { category: number; x: number; z: number };
 
