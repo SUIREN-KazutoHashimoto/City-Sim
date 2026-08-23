@@ -25,16 +25,6 @@ function travelDirection(fromIndex: number, toIndex: number): 1 | -1 {
   return toIndex > fromIndex ? 1 : -1;
 }
 
-function departureDirection(line: AnyRail, run: AnyRun): 1 | -1 {
-  let direction = run.direction as 1 | -1;
-  const index = run.currentStationIndex as number;
-  if (index < 0) return direction;
-  const last = line.stationIds.length - 1;
-  if (index === 0 && direction < 0) direction = 1;
-  else if (index === last && direction > 0) direction = -1;
-  return direction;
-}
-
 function intervalIndex(fromIndex: number, toIndex: number): number {
   return Math.min(fromIndex, toIndex);
 }
@@ -62,15 +52,9 @@ proto.buildTrains = function patchedBuildTrains(this: AnyRail): void {
 };
 
 proto.rebuildDispatchReservations = function patchedRebuildDispatchReservations(this: AnyRail): void {
-  // 駅停車中は、次に出る向きの右側線へあらかじめ揃えておく。
-  for (const run of this.trainRuns as AnyRun[]) {
-    const line = this.rail.lines[run.lineId];
-    if (line?.kind !== 'trunk' || run.currentStationIndex < 0) continue;
-    const direction = departureDirection(line, run);
-    run.lane = rightHandLane(direction);
-    run.previousLane = run.lane;
-    run.laneChangeStationIndex = -1;
-  }
+  // 停車中は到着時のlaneを保持する。
+  // 次方向の右側線へ先に切り替えると、車体が同一駅の別ホームへ瞬間移動して見える。
+  // 必要な線路変更はenterPlannedRoute()で発車時にだけ開始する。
   originalRebuildDispatchReservations.call(this);
 };
 
@@ -146,8 +130,8 @@ proto.enterPlannedRoute = function patchedEnterPlannedRoute(this: AnyRail, run: 
   const line = this.rail.lines[run.lineId];
   if (!line || line.kind !== 'trunk') return;
 
-  // 終端の4線ファン内では物理的に好きな番線から右側本線へ出られるので、
-  // 旧direction由来の偽の渡線状態を持ち越さない。
+  // 終端の4線ファン内では、停車ホームを保持したまま発車後に右側本線へ収束する。
+  // terminal platform offsetが車体位置を保持するため、ここでは偽の渡線状態だけ消す。
   const stationId = line.stationIds[plan.fromIndex];
   const station = this.rail.stations[stationId];
   if (station?.kind === 3 && plan.lane === rightHandLane(direction)) {
