@@ -13,7 +13,7 @@
     "industrialRatio": 0.08,
     "parkRatio": 0.055,
     "railEnabled": true,
-    "railTrunkLines": 2,
+    "railTrunkLines": 3,
     "railStationSpacing": 525,
     "railInfluenceRadius": 900,
     "railSubCenterSpurs": true
