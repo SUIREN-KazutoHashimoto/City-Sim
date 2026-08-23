@@ -10,8 +10,6 @@ type StaticPart = { matrix: THREE.Matrix4 };
 type RoadSegment = {
   ax: number;
   az: number;
-  bx: number;
-  bz: number;
   ux: number;
   uz: number;
   length: number;
@@ -23,7 +21,10 @@ type RoadSegment = {
 };
 
 type RoadNodeZone = { x: number; z: number; radius: number };
-type RoadGeometry = { segments: RoadSegment[]; nodes: RoadNodeZone[] };
+type RoadGeometry = {
+  segmentCells: Map<string, RoadSegment[]>;
+  nodeCells: Map<string, RoadNodeZone[]>;
+};
 type Point2 = { x: number; z: number };
 type Axis2 = { x: number; z: number };
 
@@ -35,6 +36,7 @@ const STATION_FRAME_SPACING = 24;
 const SUPPORT_SEARCH_STEP = 2.0;
 const SUPPORT_SEARCH_MAX = 58;
 const INTERSECTION_EXTRA = 4.8;
+const ROAD_CELL = 72;
 
 const roadCache = new WeakMap<RoadNetwork, RoadGeometry>();
 const proto = RailRenderer.prototype as unknown as AnyRail;
@@ -66,12 +68,29 @@ function withoutStaticColor(self: AnyRail, blockedColor: number, build: () => vo
   }
 }
 
+function cellKey(x: number, z: number): string {
+  return `${Math.floor(x / ROAD_CELL)},${Math.floor(z / ROAD_CELL)}`;
+}
+
+function registerCells<T>(cells: Map<string, T[]>, value: T, minX: number, maxX: number, minZ: number, maxZ: number): void {
+  const ix0 = Math.floor(minX / ROAD_CELL), ix1 = Math.floor(maxX / ROAD_CELL);
+  const iz0 = Math.floor(minZ / ROAD_CELL), iz1 = Math.floor(maxZ / ROAD_CELL);
+  for (let ix = ix0; ix <= ix1; ix++) for (let iz = iz0; iz <= iz1; iz++) {
+    const key = `${ix},${iz}`;
+    const bucket = cells.get(key);
+    if (bucket) bucket.push(value);
+    else cells.set(key, [value]);
+  }
+}
+
 function roadGeometry(roads: RoadNetwork): RoadGeometry {
   const cached = roadCache.get(roads);
   if (cached) return cached;
 
-  const segments: RoadSegment[] = [];
+  const segmentCells = new Map<string, RoadSegment[]>();
+  const nodeCells = new Map<string, RoadNodeZone[]>();
   const seen = new Set<string>();
+
   for (const edge of roads.edges) {
     const low = Math.min(edge.from, edge.to);
     const high = Math.max(edge.from, edge.to);
@@ -85,33 +104,37 @@ function roadGeometry(roads: RoadNetwork): RoadGeometry {
     const length = Math.hypot(dx, dz);
     if (length < 0.1) continue;
     const halfWidth = roadWidth(Math.max(1, edge.lanes)) * 0.5;
-    segments.push({
+    const pad = halfWidth + SUPPORT_MARGIN + 2.0;
+    const segment: RoadSegment = {
       ax: a.x,
       az: a.z,
-      bx: b.x,
-      bz: b.z,
       ux: dx / length,
       uz: dz / length,
       length,
       halfWidth,
-      minX: Math.min(a.x, b.x) - halfWidth,
-      maxX: Math.max(a.x, b.x) + halfWidth,
-      minZ: Math.min(a.z, b.z) - halfWidth,
-      maxZ: Math.max(a.z, b.z) + halfWidth,
-    });
+      minX: Math.min(a.x, b.x) - pad,
+      maxX: Math.max(a.x, b.x) + pad,
+      minZ: Math.min(a.z, b.z) - pad,
+      maxZ: Math.max(a.z, b.z) + pad,
+    };
+    registerCells(segmentCells, segment, segment.minX, segment.maxX, segment.minZ, segment.maxZ);
   }
 
-  const nodes: RoadNodeZone[] = roads.nodes.map((node) => {
+  for (const node of roads.nodes) {
+    // 通常の直線Nodeは道路帯判定だけで十分。交差点だけ広めに保護する。
+    if (node.edges.length < 3) continue;
     let maxHalf = 3.5;
     for (const edgeId of node.edges) {
       const edge = roads.edges[edgeId];
       if (!edge) continue;
       maxHalf = Math.max(maxHalf, roadWidth(Math.max(1, edge.lanes)) * 0.5);
     }
-    return { x: node.x, z: node.z, radius: maxHalf + INTERSECTION_EXTRA };
-  });
+    const zone: RoadNodeZone = { x: node.x, z: node.z, radius: maxHalf + INTERSECTION_EXTRA };
+    const reach = zone.radius + SUPPORT_MARGIN + 2.0;
+    registerCells(nodeCells, zone, node.x - reach, node.x + reach, node.z - reach, node.z + reach);
+  }
 
-  const geometry = { segments, nodes };
+  const geometry = { segmentCells, nodeCells };
   roadCache.set(roads, geometry);
   return geometry;
 }
@@ -127,16 +150,16 @@ function distanceToSegmentSquared(x: number, z: number, segment: RoadSegment): n
 function roadOccupied(roads: RoadNetwork | undefined, x: number, z: number, margin = SUPPORT_MARGIN): boolean {
   if (!roads) return false;
   const geometry = roadGeometry(roads);
+  const key = cellKey(x, z);
 
-  for (const segment of geometry.segments) {
+  for (const segment of geometry.segmentCells.get(key) ?? []) {
     const reach = segment.halfWidth + margin;
-    if (x < segment.minX - margin || x > segment.maxX + margin || z < segment.minZ - margin || z > segment.maxZ + margin) continue;
+    if (x < segment.minX || x > segment.maxX || z < segment.minZ || z > segment.maxZ) continue;
     if (distanceToSegmentSquared(x, z, segment) <= reach * reach) return true;
   }
 
-  for (const node of geometry.nodes) {
+  for (const node of geometry.nodeCells.get(key) ?? []) {
     const reach = node.radius + margin;
-    if (Math.abs(x - node.x) > reach || Math.abs(z - node.z) > reach) continue;
     if ((x - node.x) ** 2 + (z - node.z) ** 2 <= reach * reach) return true;
   }
   return false;
@@ -145,10 +168,8 @@ function roadOccupied(roads: RoadNetwork | undefined, x: number, z: number, marg
 function occupyingRoadSegments(roads: RoadNetwork | undefined, x: number, z: number): RoadSegment[] {
   if (!roads) return [];
   const out: RoadSegment[] = [];
-  for (const segment of roadGeometry(roads).segments) {
+  for (const segment of roadGeometry(roads).segmentCells.get(cellKey(x, z)) ?? []) {
     const reach = segment.halfWidth + SUPPORT_MARGIN + 1.0;
-    if (x < segment.minX - SUPPORT_MARGIN - 1 || x > segment.maxX + SUPPORT_MARGIN + 1
-      || z < segment.minZ - SUPPORT_MARGIN - 1 || z > segment.maxZ + SUPPORT_MARGIN + 1) continue;
     if (distanceToSegmentSquared(x, z, segment) <= reach * reach) out.push(segment);
   }
   return out;
@@ -170,9 +191,7 @@ function addAxis(axes: Axis2[], axis: Axis2 | null): void {
 
 function supportAxes(roads: RoadNetwork | undefined, x: number, z: number, heading: number): Axis2[] {
   const axes: Axis2[] = [];
-  // 線路に直交する門型を第一候補にする。
   addAxis(axes, normalizedAxis(-Math.sin(heading), Math.cos(heading)));
-  // 道路を直交横断している場合は線路方向へ逃がす必要がある。
   addAxis(axes, normalizedAxis(Math.cos(heading), Math.sin(heading)));
   for (const segment of occupyingRoadSegments(roads, x, z)) {
     addAxis(axes, normalizedAxis(-segment.uz, segment.ux));
@@ -201,19 +220,11 @@ function findSafePair(
 
 function pushColumn(self: AnyRail, x: number, z: number, y: number, columns: StaticPart[]): void {
   const roads = self.roads as RoadNetwork | undefined;
-  // 最終防衛線。ここで道路上なら柱自体を出さない。
   if (roadOccupied(roads, x, z, 1.1)) return;
   columns.push({ matrix: self.matrix(x, y * 0.5, z, 0.72, y, 0.72) });
 }
 
-function pushBeam(
-  self: AnyRail,
-  a: Point2,
-  b: Point2,
-  y: number,
-  beams: StaticPart[],
-  width = 0.78,
-): void {
+function pushBeam(self: AnyRail, a: Point2, b: Point2, y: number, beams: StaticPart[], width = 0.78): void {
   const dx = b.x - a.x, dz = b.z - a.z;
   const length = Math.hypot(dx, dz);
   if (length < 0.4) return;
@@ -294,8 +305,6 @@ function buildRoadAwareStationSupports(self: AnyRail): void {
         const p = self.sampleSmooth(smooth, s);
         if (!p) continue;
         const pair = findSafePair(roads, p, p.heading, minimumOffset);
-        // 両側とも安全な支持位置が取れない場所には柱を置かない。
-        // 前後のフレームとホーム桁で飛ばす方が道路中央柱より安全。
         if (!pair) continue;
         pushColumn(self, pair.left.x, pair.left.z, y, columns);
         pushColumn(self, pair.right.x, pair.right.z, y, columns);
