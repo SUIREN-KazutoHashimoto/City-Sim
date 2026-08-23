@@ -9,6 +9,7 @@ import { RailRenderer, TrainService } from './RailRenderer';
  * 二次系・速度追従を持たないので、オーバーシュート（ばね挙動）は発生しない。
  *
  * 元のtrainHitMeshはRaycast proxyとして透明化し、外観はこのクラスで描画する。
+ * proxy自体も同じ補間poseへ書き戻すため、hover/追跡と見た目がずれない。
  */
 export class TrainLiveryOverlay {
   private shell: THREE.InstancedMesh | null = null;
@@ -26,6 +27,12 @@ export class TrainLiveryOverlay {
   private qw = new Float32Array(0);
   private initialized = new Uint8Array(0);
 
+  private trainX = new Float32Array(0);
+  private trainY = new Float32Array(0);
+  private trainZ = new Float32Array(0);
+  private trainHeading = new Float32Array(0);
+  private trainPoseValid = new Uint8Array(0);
+
   private readonly rawMatrix = new THREE.Matrix4();
   private readonly outMatrix = new THREE.Matrix4();
   private readonly rawPos = new THREE.Vector3();
@@ -36,6 +43,7 @@ export class TrainLiveryOverlay {
   private readonly smoothQuat = new THREE.Quaternion();
   private readonly rawScale = new THREE.Vector3();
   private readonly outScale = new THREE.Vector3();
+  private readonly euler = new THREE.Euler(0, 0, 0, 'YXZ');
   private readonly routeColorTmp = new THREE.Color();
   private readonly rapidAccent = new THREE.Color(0xffb000);
   private readonly localBody = new THREE.Color(0xe8ecef);
@@ -55,6 +63,7 @@ export class TrainLiveryOverlay {
     const posAlpha = 1 - Math.exp(-Math.max(0, dt) * 9);
     const rotAlpha = 1 - Math.exp(-Math.max(0, dt) * 7);
     let shellCount = 0, panelCount = 0;
+    let previousRunId = -1;
 
     for (let i = 0; i < proxy.count; i++) {
       proxy.getMatrixAt(i, this.rawMatrix);
@@ -80,6 +89,7 @@ export class TrainLiveryOverlay {
       const length = Math.max(7.5, Math.abs(this.rawScale.x) * 1.015);
       const width = 3.08;
       const height = 3.42;
+
       this.outScale.set(length, height, width);
       this.outMatrix.compose(this.smoothPos, this.smoothQuat, this.outScale);
       this.shell.setMatrixAt(shellCount, this.outMatrix);
@@ -89,17 +99,26 @@ export class TrainLiveryOverlay {
       const service: TrainService = status?.service ?? 'local';
       this.shell.setColorAt(shellCount, service === 'rapid' ? this.rapidBody : this.localBody);
 
+      if (runId >= 0 && runId !== previousRunId) {
+        this.ensureTrainPoseCapacity(runId + 1);
+        this.trainX[runId] = this.smoothPos.x;
+        this.trainY[runId] = this.smoothPos.y;
+        this.trainZ[runId] = this.smoothPos.z;
+        this.euler.setFromQuaternion(this.smoothQuat, 'YXZ');
+        this.trainHeading[runId] = -this.euler.y;
+        this.trainPoseValid[runId] = 1;
+        previousRunId = runId;
+      }
+
       const routeColor = this.routeColor(status?.lineId ?? 0, service);
       const sideOffset = width * 0.5 + 0.035;
       for (const side of [-1, 1]) {
-        // 窓帯。元の黒いcab meshより外側に置き、暗色は窓部分だけに限定する。
         this.offset.set(0, 0.77, sideOffset * side).applyQuaternion(this.smoothQuat);
         this.panelPos.copy(this.smoothPos).add(this.offset);
         this.outScale.set(length * 0.74, 0.72, 0.07);
         this.outMatrix.compose(this.panelPos, this.smoothQuat, this.outScale);
         this.windows.setMatrixAt(panelCount, this.outMatrix);
 
-        // 路線帯。MeshBasicMaterialなので昼夜・影に関係なく必ず見える。
         this.offset.set(0, -0.22, (sideOffset + 0.045) * side).applyQuaternion(this.smoothQuat);
         this.panelPos.copy(this.smoothPos).add(this.offset);
         this.outScale.set(length * 0.94, service === 'rapid' ? 0.66 : 0.54, 0.075);
@@ -108,6 +127,11 @@ export class TrainLiveryOverlay {
         this.stripes.setColorAt(panelCount, routeColor);
         panelCount++;
       }
+
+      // Raycast proxyも表示と同じ位置・回転へ合わせる。
+      this.outScale.copy(this.rawScale);
+      this.outMatrix.compose(new THREE.Vector3(this.x[i], this.y[i], this.z[i]), this.smoothQuat, this.outScale);
+      proxy.setMatrixAt(i, this.outMatrix);
       shellCount++;
     }
 
@@ -117,18 +141,20 @@ export class TrainLiveryOverlay {
     this.shell.instanceMatrix.needsUpdate = true;
     this.windows.instanceMatrix.needsUpdate = true;
     this.stripes.instanceMatrix.needsUpdate = true;
+    proxy.instanceMatrix.needsUpdate = true;
     if (this.shell.instanceColor) this.shell.instanceColor.needsUpdate = true;
     if (this.stripes.instanceColor) this.stripes.instanceColor.needsUpdate = true;
   }
 
+  getTrainPose(id: number, out: THREE.Vector3): number | null {
+    if (id < 0 || id >= this.trainPoseValid.length || !this.trainPoseValid[id]) return null;
+    out.set(this.trainX[id], this.trainY[id], this.trainZ[id]);
+    return this.trainHeading[id];
+  }
+
   private hideProxy(proxy: THREE.InstancedMesh): void {
     if (this.proxyHidden) return;
-    proxy.material = new THREE.MeshBasicMaterial({
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      colorWrite: false,
-    });
+    proxy.material = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false });
     proxy.castShadow = false;
     proxy.receiveShadow = false;
     this.proxyHidden = true;
@@ -145,7 +171,6 @@ export class TrainLiveryOverlay {
     this.initialized = new Uint8Array(capacity);
 
     const box = new THREE.BoxGeometry(1, 1, 1);
-    // setColorAt()はinstanceColorを使う。geometry vertex colorは使わないためvertexColors:trueを付けない。
     this.shell = new THREE.InstancedMesh(
       box,
       new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.48, metalness: 0.20 }),
@@ -169,6 +194,15 @@ export class TrainLiveryOverlay {
       mesh.receiveShadow = mesh !== this.stripes;
       this.scene.add(mesh);
     }
+  }
+
+  private ensureTrainPoseCapacity(required: number): void {
+    if (required <= this.trainPoseValid.length) return;
+    const size = Math.max(required, this.trainPoseValid.length * 2, 8);
+    const growF32 = (src: Float32Array): Float32Array => { const dst = new Float32Array(size); dst.set(src); return dst; };
+    const growU8 = (src: Uint8Array): Uint8Array => { const dst = new Uint8Array(size); dst.set(src); return dst; };
+    this.trainX = growF32(this.trainX); this.trainY = growF32(this.trainY); this.trainZ = growF32(this.trainZ);
+    this.trainHeading = growF32(this.trainHeading); this.trainPoseValid = growU8(this.trainPoseValid);
   }
 
   private routeColor(lineId: number, service: TrainService): THREE.Color {
