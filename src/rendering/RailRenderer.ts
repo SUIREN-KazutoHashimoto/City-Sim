@@ -114,16 +114,20 @@ export class RailRenderer {
     }
   }
 
+  /** A*で曲がった後の実線路から、駅に最も近いsegmentの向きを取る。 */
   private stationHeading(stationId: number): number {
-    const station = this.rail.stations[stationId];
+    const station = this.rail.stations[stationId]; let bestD = Infinity, bestHeading = 0;
     for (const lineId of station.lineIds) {
-      const line = this.rail.lines[lineId], idx = line.stationIds.indexOf(stationId); if (idx < 0) continue;
-      const otherId = idx + 1 < line.stationIds.length ? line.stationIds[idx + 1] : idx > 0 ? line.stationIds[idx - 1] : -1;
-      if (otherId >= 0) {
-        const other = this.rail.stations[otherId]; return Math.atan2(other.z - station.z, other.x - station.x);
+      const line = this.rail.lines[lineId]; if (!line) continue;
+      for (let i = 1; i < line.path.length; i++) {
+        const a = line.path[i - 1], b = line.path[i], dx = b.x - a.x, dz = b.z - a.z;
+        const len2 = dx * dx + dz * dz; if (len2 < 0.01) continue;
+        const t = THREE.MathUtils.clamp(((station.x - a.x) * dx + (station.z - a.z) * dz) / len2, 0, 1);
+        const qx = a.x + dx * t, qz = a.z + dz * t, d2 = (station.x - qx) ** 2 + (station.z - qz) ** 2;
+        if (d2 < bestD) { bestD = d2; bestHeading = Math.atan2(dz, dx); }
       }
     }
-    return 0;
+    return bestHeading;
   }
 
   private sampleLine(line: RailLine, distance: number): { x: number; z: number; heading: number } | null {
