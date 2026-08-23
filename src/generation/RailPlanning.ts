@@ -13,7 +13,7 @@ export interface RailPlanningOptions {
 export const DEFAULT_RAIL_PLANNING: RailPlanningOptions = {
   railEnabled: true,
   railTrunkLines: 2,
-  railStationSpacing: 1050,
+  railStationSpacing: 525,
   railInfluenceRadius: 900,
   railSubCenterSpurs: true,
 };
@@ -167,7 +167,7 @@ export class RailNetworkPlan {
   private buildTrunk(cx: number, cz: number, angle: number, index: number): void {
     const dx = Math.cos(angle), dz = Math.sin(angle), margin = Math.min(220, this.sizeMeters * 0.025);
     const pos = this.rayExtent(cx, cz, dx, dz, margin), neg = this.rayExtent(cx, cz, -dx, -dz, margin);
-    const spacing = Math.max(450, this.options.railStationSpacing);
+    const spacing = Math.max(260, this.options.railStationSpacing);
     const ts: number[] = [0];
     for (let t = spacing; t < pos - spacing * 0.30; t += spacing) ts.push(t);
     for (let t = spacing; t < neg - spacing * 0.30; t += spacing) ts.push(-t);
@@ -193,7 +193,7 @@ export class RailNetworkPlan {
       const d = Math.hypot(s.plannedX - center.x, s.plannedZ - center.z);
       if (d < best) { best = d; nearest = s; }
     }
-    if (best < Math.max(320, this.options.railStationSpacing * 0.34)) {
+    if (best < Math.max(180, this.options.railStationSpacing * 0.34)) {
       if (nearest.kind !== RailStationKind.Central) nearest.kind = RailStationKind.SubCenter;
       if (nearest.kind === RailStationKind.SubCenter) nearest.name = `副都心${subIndex + 1}駅`;
       nearest.influenceRadius = Math.max(nearest.influenceRadius, this.options.railInfluenceRadius * 1.15);
@@ -202,7 +202,7 @@ export class RailNetworkPlan {
 
     const dx = center.x - nearest.plannedX, dz = center.z - nearest.plannedZ, length = Math.hypot(dx, dz);
     const stationIds = [nearest.id];
-    const spacing = Math.max(500, this.options.railStationSpacing * 0.90);
+    const spacing = Math.max(280, this.options.railStationSpacing * 0.90);
     const intermediate = Math.max(0, Math.floor(length / spacing) - 1);
     for (let i = 1; i <= intermediate; i++) {
       const t = i / (intermediate + 1);
