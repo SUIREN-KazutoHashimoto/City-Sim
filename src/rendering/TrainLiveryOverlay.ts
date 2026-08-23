@@ -6,6 +6,7 @@ import './RailDepotPlacement';
 import './RailRightHandOperation';
 import './RailLightingAndIndicators';
 import './RailSupportClearance';
+import './PedestrianSignalOrientation';
 
 /**
  * 列車の外装レイヤー。
