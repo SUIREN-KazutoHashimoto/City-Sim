@@ -64,7 +64,7 @@ async function bootstrap(): Promise<void> {
   const gfx = new EnhancedRenderer(scene);
   gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
   buildSpecialFacilityVisuals(scene, world.city.facilities, world.city.parks);
-  const railRenderer = new RailRenderer(scene, rail); railRenderer.build();
+  const railRenderer = new RailRenderer(scene, rail, world.city.net); railRenderer.build();
   gfx.buildAgents(world.store.capacity);
   // Inspectorは透明proxyへraycastする。visible=falseでもRaycasterは拾えるが、
   // 動的InstancedMeshの自動boundingSphereが初回未配置状態で固定されないよう都市全体のSphereを明示する。
