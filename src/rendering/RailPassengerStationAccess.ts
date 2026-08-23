@@ -35,12 +35,12 @@ type PlatformNode = {
   stationId: number;
   offset: number;
   distance: number;
-  groundDirection: -1 | 1;
   x: number;
   y: number;
   z: number;
   heading: number;
 };
+type StationLevel = { y: number; lineIds: number[] };
 
 const MAIN_OFFSET = 1.72;
 const SIDING_OFFSET = 8.0;
@@ -57,6 +57,7 @@ const originalBuildPlatformAccess = proto.buildPlatformAccess as (
   y: number,
   stairs: StaticPart[],
 ) => void;
+const generatedByParts = new WeakMap<object, Set<string>>();
 
 function platformOffsets(self: AnyRail, lineId: number, stationIndex: number): number[] {
   const line = self.rail.lines[lineId];
@@ -87,74 +88,83 @@ function platformOffsetForDirection(self: AnyRail, lineId: number, stationIndex:
   return direction > 0 ? Math.min(...offsets) : Math.max(...offsets);
 }
 
-function stationLineOrder(self: AnyRail, stationId: number): number[] {
-  const station = self.rail.stations[stationId];
-  if (!station) return [];
-  return (station.lineIds as number[])
-    .filter((lineId) => {
-      const line = self.rail.lines[lineId];
-      return !!line && !!self.smoothLines.get(lineId) && line.stationIds.includes(stationId);
-    })
-    .sort((a, b) => {
-      const ay = self.lineTrackY(a) as number;
-      const by = self.lineTrackY(b) as number;
-      if (Math.abs(ay - by) > LEVEL_EPSILON) return ay - by;
-      return a - b;
-    });
-}
-
 function stationIndexForLine(self: AnyRail, stationId: number, lineId: number): number {
   const line = self.rail.lines[lineId];
   return line ? line.stationIds.indexOf(stationId) : -1;
 }
 
-function nodesForLine(self: AnyRail, stationId: number, lineId: number, forcedOffset?: number): PlatformNode[] {
+function stationLevels(self: AnyRail, stationId: number): StationLevel[] {
+  const station = self.rail.stations[stationId];
+  if (!station) return [];
+  const lines = [...new Set(station.lineIds as number[])]
+    .filter((lineId) => {
+      const line = self.rail.lines[lineId];
+      return !!line && !!self.smoothLines.get(lineId) && line.stationIds.includes(stationId);
+    })
+    .sort((a, b) => (self.lineTrackY(a) as number) - (self.lineTrackY(b) as number) || a - b);
+  const levels: StationLevel[] = [];
+  for (const lineId of lines) {
+    const y = self.lineTrackY(lineId) as number;
+    const last = levels[levels.length - 1];
+    if (last && Math.abs(last.y - y) <= LEVEL_EPSILON) last.lineIds.push(lineId);
+    else levels.push({ y, lineIds: [lineId] });
+  }
+  return levels;
+}
+
+function levelIndexForLine(levels: StationLevel[], lineId: number): number {
+  return levels.findIndex((level) => level.lineIds.includes(lineId));
+}
+
+function chooseOffset(offsets: number[], sideHint: number): number | null {
+  if (!offsets.length) return null;
+  if (offsets.length === 1) return offsets[0];
+  return sideHint < 0 ? Math.min(...offsets) : Math.max(...offsets);
+}
+
+function coreNodeForLine(self: AnyRail, stationId: number, lineId: number, sideHint: number): PlatformNode | null {
   const line = self.rail.lines[lineId];
   const smooth = self.smoothLines.get(lineId) as AnySmooth | undefined;
   const stationIndex = stationIndexForLine(self, stationId, lineId);
-  if (!line || !smooth || stationIndex < 0) return [];
-  const center = smooth.stationDistances[stationIndex] ?? 0;
-  const length = self.platformLength(stationId) as number;
-  const start = Math.max(0, center - length * 0.5);
-  const end = Math.min(smooth.length as number, center + length * 0.5);
-  const offsets = forcedOffset == null ? platformOffsets(self, lineId, stationIndex) : [forcedOffset];
-  const y = (self.lineTrackY(lineId) as number) + 0.60;
-  const out: PlatformNode[] = [];
-  for (const offset of offsets) {
-    for (const endSpec of [
-      { distance: start + 3, groundDirection: -1 as const },
-      { distance: end - 3, groundDirection: 1 as const },
-    ]) {
-      const distance = THREE.MathUtils.clamp(endSpec.distance, 0, smooth.length as number);
-      const p = self.offsetPoint(smooth, distance, offset) as { x: number; z: number; heading: number } | null;
-      if (!p) continue;
-      out.push({
-        lineId, stationId, offset, distance, groundDirection: endSpec.groundDirection,
-        x: p.x, y, z: p.z, heading: p.heading,
-      });
-    }
-  }
-  return out;
+  if (!line || !smooth || stationIndex < 0) return null;
+  const offset = chooseOffset(platformOffsets(self, lineId, stationIndex), sideHint);
+  if (offset == null) return null;
+  const distance = THREE.MathUtils.clamp(smooth.stationDistances[stationIndex] ?? 0, 0, smooth.length as number);
+  const p = self.offsetPoint(smooth, distance, offset) as { x: number; z: number; heading: number } | null;
+  if (!p) return null;
+  return {
+    lineId,
+    stationId,
+    offset,
+    distance,
+    x: p.x,
+    y: (self.lineTrackY(lineId) as number) + 0.60,
+    z: p.z,
+    heading: p.heading,
+  };
 }
 
-function nearestNode(nodes: PlatformNode[], x: number, z: number): PlatformNode | null {
+function nearestCoreInLevel(self: AnyRail, stationId: number, level: StationLevel, sideHint: number, x: number, z: number): PlatformNode | null {
   let best: PlatformNode | null = null;
   let bestD = Infinity;
-  for (const node of nodes) {
+  for (const lineId of level.lineIds) {
+    const node = coreNodeForLine(self, stationId, lineId, sideHint);
+    if (!node) continue;
     const d = Math.hypot(node.x - x, node.z - z);
     if (d < bestD) { bestD = d; best = node; }
   }
   return best;
 }
 
-function hierarchyForTarget(self: AnyRail, stationId: number, targetLineId: number, target: PlatformNode): PlatformNode[] {
-  const order = stationLineOrder(self, stationId);
-  const targetIndex = order.indexOf(targetLineId);
-  if (targetIndex < 0) return [target];
+function hierarchyForTarget(self: AnyRail, stationId: number, targetLineId: number, sideHint: number): PlatformNode[] {
+  const levels = stationLevels(self, stationId);
+  const targetLevel = levelIndexForLine(levels, targetLineId);
+  const target = coreNodeForLine(self, stationId, targetLineId, sideHint);
+  if (!target || targetLevel < 0) return target ? [target] : [];
   const descending: PlatformNode[] = [target];
   let child = target;
-  for (let i = targetIndex - 1; i >= 0; i--) {
-    const parent = nearestNode(nodesForLine(self, stationId, order[i]), child.x, child.z);
+  for (let levelIndex = targetLevel - 1; levelIndex >= 0; levelIndex--) {
+    const parent = nearestCoreInLevel(self, stationId, levels[levelIndex], sideHint, child.x, child.z);
     if (!parent) continue;
     descending.push(parent);
     child = parent;
@@ -162,7 +172,7 @@ function hierarchyForTarget(self: AnyRail, stationId: number, targetLineId: numb
   return descending.reverse();
 }
 
-function groundEntrance(self: AnyRail, ground: PlatformNode): { entrance: RailPassengerPoint3D; outer: RailPassengerPoint3D } | null {
+function groundEntrance(self: AnyRail, ground: PlatformNode): RailPassengerPoint3D | null {
   const smooth = self.smoothLines.get(ground.lineId) as AnySmooth | undefined;
   if (!smooth) return null;
   const side = ground.offset >= 0 ? 1 : -1;
@@ -170,49 +180,90 @@ function groundEntrance(self: AnyRail, ground: PlatformNode): { entrance: RailPa
   const outerAbs = Math.max(Math.abs(ground.offset) + 3.3, roadHalf + 3.2);
   const outer = self.offsetPoint(smooth, ground.distance, side * outerAbs) as { x: number; z: number; heading: number } | null;
   if (!outer) return null;
-  const lineY = self.lineTrackY(ground.lineId) as number;
-  const concourseY = Math.max(4.4, lineY - 2.9);
-  const run = Math.max(15.5, concourseY * 2.6);
+  const run = Math.max(12, ground.y * 1.75);
+  const alongSign = side > 0 ? 1 : -1;
   return {
-    entrance: {
-      x: outer.x + Math.cos(outer.heading) * ground.groundDirection * run,
-      y: 0,
-      z: outer.z + Math.sin(outer.heading) * ground.groundDirection * run,
-    },
-    outer: { x: outer.x, y: concourseY, z: outer.z },
+    x: outer.x + Math.cos(outer.heading) * alongSign * run,
+    y: 0,
+    z: outer.z + Math.sin(outer.heading) * alongSign * run,
   };
 }
 
-function makeAccess(self: AnyRail, stationId: number, lineId: number, direction: 1 | -1, target: PlatformNode): RailPassengerStationAccess | null {
-  const chain = hierarchyForTarget(self, stationId, lineId, target);
-  if (!chain.length) return null;
-  const ground = chain[0];
-  const groundLeg = groundEntrance(self, ground);
-  if (!groundLeg) return null;
-  const smooth = self.smoothLines.get(lineId) as AnySmooth | undefined;
+function makeStackedAccess(self: AnyRail, stationId: number, lineId: number, direction: 1 | -1): RailPassengerStationAccess | null {
   const stationIndex = stationIndexForLine(self, stationId, lineId);
+  const smooth = self.smoothLines.get(lineId) as AnySmooth | undefined;
   if (!smooth || stationIndex < 0) return null;
-  const center = smooth.stationDistances[stationIndex] ?? target.distance;
-  const wait = self.offsetPoint(smooth, center, target.offset) as { x: number; z: number; heading: number } | null;
+  const offset = platformOffsetForDirection(self, lineId, stationIndex, direction);
+  if (offset == null) return null;
+  const sideHint = offset >= 0 ? 1 : -1;
+  const chain = hierarchyForTarget(self, stationId, lineId, sideHint);
+  if (!chain.length) return null;
+  const entrance = groundEntrance(self, chain[0]);
+  if (!entrance) return null;
+  const target = chain[chain.length - 1];
+  const wait = self.offsetPoint(smooth, smooth.stationDistances[stationIndex] ?? target.distance, target.offset) as { x: number; z: number; heading: number } | null;
   if (!wait) return null;
-  const length = self.platformLength(stationId) as number;
-
-  // 既存旅客ルートの4つの中継点へ、下層→上層のホーム接続を割り当てる。
-  // 現在の都市生成は最大3段の幹線ホームなので、地上から各段を順に通る。
   const lowest = chain[0];
-  const parent = chain.length >= 3 ? chain[chain.length - 2] : lowest;
-  const landing = chain[chain.length - 1];
+  const middle = chain.length >= 3 ? chain[chain.length - 2] : lowest;
+  const landing = target;
+  const length = self.platformLength(stationId) as number;
   return {
     stationId,
     lineId,
     direction,
     heading: wait.heading,
-    entrance: groundLeg.entrance,
+    entrance,
     stairTop: { x: lowest.x, y: lowest.y, z: lowest.z },
-    concourse: { x: parent.x, y: parent.y, z: parent.z },
+    concourse: { x: middle.x, y: middle.y, z: middle.z },
     platformLanding: { x: landing.x, y: landing.y, z: landing.z },
     platformWait: { x: wait.x, y: landing.y, z: wait.z },
     waitSpan: Math.max(8, length * 0.46),
+  };
+}
+
+function makeLegacyAccess(
+  self: AnyRail,
+  stationId: number,
+  lineId: number,
+  direction: 1 | -1,
+  distance: number,
+  offset: number,
+  groundDirection: -1 | 1,
+): RailPassengerStationAccess | null {
+  const smooth = self.smoothLines.get(lineId) as AnySmooth | undefined;
+  const stationIndex = stationIndexForLine(self, stationId, lineId);
+  if (!smooth || stationIndex < 0) return null;
+  const anchor = self.offsetPoint(smooth, distance, offset) as { x: number; z: number; heading: number } | null;
+  if (!anchor) return null;
+  const side = offset >= 0 ? 1 : -1;
+  const roadHalf = self.roadHalfWidthAt(anchor.x, anchor.z, anchor.heading) as number;
+  const outerAbs = Math.max(Math.abs(offset) + 3.3, roadHalf + 3.2);
+  const outer = self.offsetPoint(smooth, distance, side * outerAbs) as { x: number; z: number; heading: number } | null;
+  if (!outer) return null;
+  const y = self.lineTrackY(lineId) as number;
+  const concourseY = Math.max(4.4, y - 2.9);
+  const platformY = y + 0.60;
+  const groundRun = Math.max(15.5, concourseY * 2.6);
+  const center = smooth.stationDistances[stationIndex] ?? distance;
+  const landingDistance = THREE.MathUtils.clamp(distance - groundDirection * UPPER_STAIR_RUN, 0, smooth.length as number);
+  const landing = self.offsetPoint(smooth, landingDistance, offset) as { x: number; z: number; heading: number } | null;
+  const wait = self.offsetPoint(smooth, center, offset) as { x: number; z: number; heading: number } | null;
+  if (!landing || !wait) return null;
+  return {
+    stationId,
+    lineId,
+    direction,
+    heading: wait.heading,
+    entrance: {
+      x: outer.x + Math.cos(outer.heading) * groundDirection * groundRun,
+      y: 0,
+      z: outer.z + Math.sin(outer.heading) * groundDirection * groundRun,
+    },
+    stairTop: { x: outer.x, y: concourseY, z: outer.z },
+    concourse: { x: anchor.x, y: concourseY, z: anchor.z },
+    platformLanding: { x: landing.x, y: platformY, z: landing.z },
+    platformWait: { x: wait.x, y: platformY, z: wait.z },
+    waitSpan: Math.max(8, (self.platformLength(stationId) as number) * 0.46),
   };
 }
 
@@ -224,14 +275,24 @@ proto.passengerStationAccesses = function passengerStationAccesses(
 ): RailPassengerStationAccess[] {
   const stationIndex = stationIndexForLine(this, stationId, lineId);
   if (stationIndex < 0) return [];
-  const offset = platformOffsetForDirection(this, lineId, stationIndex, direction);
-  if (offset == null) return [];
-  const targets = nodesForLine(this, stationId, lineId, offset);
-  const out: RailPassengerStationAccess[] = [];
-  for (const target of targets) {
-    const access = makeAccess(this, stationId, lineId, direction, target);
-    if (access) out.push(access);
+  const levels = stationLevels(this, stationId);
+  if (levels.length > 1) {
+    const access = makeStackedAccess(this, stationId, lineId, direction);
+    return access ? [access] : [];
   }
+
+  const smooth = this.smoothLines.get(lineId) as AnySmooth | undefined;
+  const offset = platformOffsetForDirection(this, lineId, stationIndex, direction);
+  if (!smooth || offset == null) return [];
+  const center = smooth.stationDistances[stationIndex] ?? 0;
+  const length = this.platformLength(stationId) as number;
+  const start = Math.max(0, center - length * 0.5);
+  const end = Math.min(smooth.length as number, center + length * 0.5);
+  const out: RailPassengerStationAccess[] = [];
+  const a = makeLegacyAccess(this, stationId, lineId, direction, start + 3, offset, -1);
+  const b = makeLegacyAccess(this, stationId, lineId, direction, end - 3, offset, 1);
+  if (a) out.push(a);
+  if (b) out.push(b);
   return out;
 };
 
@@ -248,7 +309,7 @@ function nearestStationIndex(self: AnyRail, smooth: AnySmooth, distance: number)
   return bestD <= half ? best : -1;
 }
 
-function addGroundToPlatformStairs(self: AnyRail, smooth: AnySmooth, distance: number, offset: number, direction: -1 | 1, y: number, stairs: StaticPart[]): void {
+function addUpperSteps(self: AnyRail, smooth: AnySmooth, distance: number, offset: number, direction: -1 | 1, y: number, stairs: StaticPart[]): void {
   const concourseY = Math.max(4.4, y - 2.9);
   const platformY = y + 0.58;
   const baseY = concourseY - 0.08;
@@ -264,27 +325,34 @@ function addGroundToPlatformStairs(self: AnyRail, smooth: AnySmooth, distance: n
   }
 }
 
-function addInterLevelStairs(self: AnyRail, from: PlatformNode, to: PlatformNode, stairs: StaticPart[]): void {
-  // lower -> upper の順にする。
-  const lower = from.y <= to.y ? from : to;
-  const upper = from.y <= to.y ? to : from;
-  const dx = upper.x - lower.x;
-  const dz = upper.z - lower.z;
+function addStairFlight(self: AnyRail, from: RailPassengerPoint3D, to: RailPassengerPoint3D, stairs: StaticPart[]): void {
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
   const horizontal = Math.hypot(dx, dz);
-  const heading = horizontal > 0.01 ? Math.atan2(dz, dx) : lower.heading;
-  const steps = Math.max(8, Math.min(18, Math.ceil(Math.max(horizontal, Math.abs(upper.y - lower.y) * 3) / 1.25)));
-  const depth = Math.max(0.7, horizontal / Math.max(1, steps - 1) * 1.18);
+  const rise = Math.abs(to.y - from.y);
+  if (horizontal < 0.15 && rise < 0.15) return;
+  const heading = horizontal > 0.01 ? Math.atan2(dz, dx) : 0;
+  const steps = Math.max(6, Math.min(40, Math.ceil(Math.max(rise / 0.22, horizontal / 0.75))));
+  const depth = Math.max(0.48, horizontal / Math.max(1, steps - 1) * 1.14);
   for (let i = 0; i < steps; i++) {
     const t = steps <= 1 ? 1 : i / (steps - 1);
-    const x = THREE.MathUtils.lerp(lower.x, upper.x, t);
-    const z = THREE.MathUtils.lerp(lower.z, upper.z, t);
-    const yy = THREE.MathUtils.lerp(lower.y, upper.y, t) - 0.10;
-    stairs.push({ matrix: self.matrix(x, yy, z, depth, 0.22, 1.45, -heading) });
+    const x = THREE.MathUtils.lerp(from.x, to.x, t);
+    const z = THREE.MathUtils.lerp(from.z, to.z, t);
+    const yy = THREE.MathUtils.lerp(from.y, to.y, t);
+    stairs.push({ matrix: self.matrix(x, yy - 0.09, z, depth, 0.18, 1.55, -heading) });
   }
 }
 
-// 複数路線駅では各ホームから地上へ降ろさない。
-// 最下層ホームだけを地上へ接続し、それより上は必ず一つ下のホームへ階段接続する。
+function markOnce(stairs: StaticPart[], key: string): boolean {
+  let keys = generatedByParts.get(stairs);
+  if (!keys) { keys = new Set<string>(); generatedByParts.set(stairs, keys); }
+  if (keys.has(key)) return false;
+  keys.add(key);
+  return true;
+}
+
+// 単一路線駅は従来の地上アクセスを維持する。
+// 複数路線駅は、ホーム端同士を直接結ばず駅中央の共通階段コアだけを生成する。
 if (!proto.__railPassengerStackedAccessPatched && originalBuildPlatformAccess) {
   proto.__railPassengerStackedAccessPatched = true;
   proto.buildPlatformAccess = function stackedPlatformAccess(
@@ -299,28 +367,36 @@ if (!proto.__railPassengerStackedAccessPatched && originalBuildPlatformAccess) {
     const stationIndex = nearestStationIndex(this, smooth, distance);
     if (stationIndex < 0) {
       originalBuildPlatformAccess.call(this, smooth, distance, offset, direction, y, stairs);
-      addGroundToPlatformStairs(this, smooth, distance, offset, direction, y, stairs);
-      return;
-    }
-    const stationId = smooth.line.stationIds[stationIndex];
-    const lineId = smooth.line.id as number;
-    const order = stationLineOrder(this, stationId);
-    const levelIndex = order.indexOf(lineId);
-    if (levelIndex <= 0) {
-      originalBuildPlatformAccess.call(this, smooth, distance, offset, direction, y, stairs);
-      addGroundToPlatformStairs(this, smooth, distance, offset, direction, y, stairs);
+      addUpperSteps(this, smooth, distance, offset, direction, y, stairs);
       return;
     }
 
-    const currentPoint = this.offsetPoint(smooth, distance, offset) as { x: number; z: number; heading: number } | null;
-    if (!currentPoint) return;
-    const current: PlatformNode = {
-      lineId, stationId, offset, distance, groundDirection: direction,
-      x: currentPoint.x, y: y + 0.60, z: currentPoint.z, heading: currentPoint.heading,
-    };
-    const parentLine = order[levelIndex - 1];
-    const parent = nearestNode(nodesForLine(this, stationId, parentLine), current.x, current.z);
+    const stationId = smooth.line.stationIds[stationIndex];
+    const lineId = smooth.line.id as number;
+    const levels = stationLevels(this, stationId);
+    if (levels.length <= 1) {
+      originalBuildPlatformAccess.call(this, smooth, distance, offset, direction, y, stairs);
+      addUpperSteps(this, smooth, distance, offset, direction, y, stairs);
+      return;
+    }
+
+    const levelIndex = levelIndexForLine(levels, lineId);
+    if (levelIndex < 0) return;
+    const sideHint = offset >= 0 ? 1 : -1;
+    const current = coreNodeForLine(this, stationId, lineId, sideHint);
+    if (!current) return;
+    const actualSide = current.offset >= 0 ? 1 : -1;
+    const key = `station:${stationId}:level:${levelIndex}:side:${actualSide}`;
+    if (!markOnce(stairs, key)) return;
+
+    if (levelIndex === 0) {
+      const entrance = groundEntrance(this, current);
+      if (entrance) addStairFlight(this, entrance, current, stairs);
+      return;
+    }
+
+    const parent = nearestCoreInLevel(this, stationId, levels[levelIndex - 1], actualSide, current.x, current.z);
     if (!parent) return;
-    addInterLevelStairs(this, parent, current, stairs);
+    addStairFlight(this, parent, current, stairs);
   };
 }
