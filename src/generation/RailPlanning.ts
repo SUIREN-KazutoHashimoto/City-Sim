@@ -40,12 +40,12 @@ export interface RailStation {
   /** TOD計算に使う計画上の駅位置。道路スナップ後も変えない。 */
   plannedX: number;
   plannedZ: number;
-  /** 実際の高架駅・バス接続位置。alignToRoadNetwork()後は道路Node位置。 */
+  /** 実際の高架駅位置。終端駅は道路接続点から土地側へ引き込む。 */
   x: number;
   z: number;
   kind: RailStationKind;
   lineIds: number[];
-  influenceRadius: number;
+  /** 鉄道が道路網へ接続するNode。終端駅では駅本体ではなくアプローチ線の接続点。 */
   roadNode: number;
   busStopId: number;
 }
@@ -55,7 +55,7 @@ export interface RailLine {
   name: string;
   kind: 'trunk' | 'spur';
   stationIds: number[];
-  /** 描画・列車走行用。道路スナップ前は駅間直線、後は道路A*経路。 */
+  /** 描画・列車走行用。道路スナップ後は道路A*＋終端専用アプローチ線。 */
   path: RailPoint[];
   cumulative: number[];
   length: number;
@@ -73,6 +73,7 @@ interface RailContext { cbd: RailCenter; subCenters: RailCenter[]; }
 /**
  * City Generator v2 Phase 4用の鉄道計画。
  * 生成時はCBDを貫く幹線＋副都心支線を作り、都市道路完成後に幹線道路へA*スナップする。
+ * 終端駅だけは道路上を避け、道路接続点から土地側へ短い専用線で引き込む。
  */
 export class RailNetworkPlan {
   readonly options: RailPlanningOptions;
@@ -106,14 +107,22 @@ export class RailNetworkPlan {
 
   /**
    * 線路を道路中心線へ寄せる。高架描画前提なので道路交通とは別レイヤーのまま。
-   * 駅はHighway/Path以外の最寄り道路Nodeへスナップし、駅間はdrive A*で結ぶ。
+   * 通過駅は道路Nodeへスナップするが、終端駅は道路接続点を保持したまま土地側へ退避させる。
    */
   alignToRoadNetwork(net: RoadNetwork): void {
     if (this.stations.length === 0 || net.nodes.length === 0) return;
     for (const station of this.stations) {
       const node = this.nearestSurfaceNode(net, station.plannedX, station.plannedZ);
       station.roadNode = node;
-      if (node >= 0) { station.x = net.nodes[node].x; station.z = net.nodes[node].z; }
+      if (node < 0) continue;
+      if (station.kind === RailStationKind.Terminal) {
+        const land = this.terminalLandPoint(station, net, node);
+        station.x = land.x;
+        station.z = land.z;
+      } else {
+        station.x = net.nodes[node].x;
+        station.z = net.nodes[node].z;
+      }
     }
 
     const astar = new AStar(net, 'drive');
@@ -126,7 +135,19 @@ export class RailNetworkPlan {
           const nodes = astar.findPath(a.roadNode, b.roadNode);
           if (nodes.length >= 2) segment = nodes.map((id) => ({ x: net.nodes[id].x, z: net.nodes[id].z }));
         }
-        if (segment.length < 2) segment = [{ x: a.x, z: a.z }, { x: b.x, z: b.z }];
+        if (segment.length < 2) {
+          const ax = a.roadNode >= 0 ? net.nodes[a.roadNode].x : a.x;
+          const az = a.roadNode >= 0 ? net.nodes[a.roadNode].z : a.z;
+          const bx = b.roadNode >= 0 ? net.nodes[b.roadNode].x : b.x;
+          const bz = b.roadNode >= 0 ? net.nodes[b.roadNode].z : b.z;
+          segment = [{ x: ax, z: az }, { x: bx, z: bz }];
+        }
+        if (a.kind === RailStationKind.Terminal && !this.samePoint(segment[0], a)) {
+          segment.unshift({ x: a.x, z: a.z });
+        }
+        if (b.kind === RailStationKind.Terminal && !this.samePoint(segment[segment.length - 1], b)) {
+          segment.push({ x: b.x, z: b.z });
+        }
         if (points.length && segment.length && this.samePoint(points[points.length - 1], segment[0])) segment.shift();
         points.push(...segment);
       }
@@ -157,7 +178,6 @@ export class RailNetworkPlan {
       for (let i = 0; i < context.subCenters.length; i++) this.promoteNearestStation(context.subCenters[i], i);
     }
 
-    // 最後にローカル駅の名前を安定させる。
     for (const s of this.stations) {
       if (s.kind === RailStationKind.Local) s.name = `第${s.id + 1}駅`;
       else if (s.kind === RailStationKind.Terminal && !s.name.startsWith('終端')) s.name = `終端${s.id + 1}駅`;
@@ -259,6 +279,39 @@ export class RailNetworkPlan {
       line.cumulative[i] = total;
     }
     line.length = total;
+  }
+
+  private terminalLandPoint(station: RailStation, net: RoadNetwork, roadNode: number): RailPoint {
+    const base = net.nodes[roadNode];
+    let tx = 1, tz = 0;
+    for (const lineId of station.lineIds) {
+      const line = this.lines[lineId]; if (!line) continue;
+      const index = line.stationIds.indexOf(station.id); if (index < 0) continue;
+      const neighborIndex = index === 0 ? 1 : index === line.stationIds.length - 1 ? index - 1 : -1;
+      if (neighborIndex < 0) continue;
+      const neighbor = this.stations[line.stationIds[neighborIndex]]; if (!neighbor) continue;
+      const dx = station.plannedX - neighbor.plannedX, dz = station.plannedZ - neighbor.plannedZ, len = Math.hypot(dx, dz);
+      if (len > 1) { tx = dx / len; tz = dz / len; break; }
+    }
+    const nx = -tz, nz = tx;
+    const side = ((station.id + station.lineIds[0]) & 1) === 0 ? 1 : -1;
+    const candidate = (sign: number): RailPoint => ({
+      x: clamp(base.x + tx * 18 + nx * 64 * sign, 24, this.sizeMeters - 24),
+      z: clamp(base.z + tz * 18 + nz * 64 * sign, 24, this.sizeMeters - 24),
+    });
+    const a = candidate(side), b = candidate(-side);
+    return this.roadClearanceScore(a, net, roadNode) >= this.roadClearanceScore(b, net, roadNode) ? a : b;
+  }
+
+  private roadClearanceScore(point: RailPoint, net: RoadNetwork, ignoredNode: number): number {
+    let best = Infinity;
+    for (const node of net.nodes) {
+      if (node.id === ignoredNode) continue;
+      const d2 = (node.x - point.x) ** 2 + (node.z - point.z) ** 2;
+      if (d2 < best) best = d2;
+    }
+    const edge = Math.min(point.x, point.z, this.sizeMeters - point.x, this.sizeMeters - point.z);
+    return Math.sqrt(best) + Math.min(50, edge) * 0.25;
   }
 
   private nearestSurfaceNode(net: RoadNetwork, x: number, z: number): number {
