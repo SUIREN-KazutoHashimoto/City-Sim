@@ -3,6 +3,7 @@ import { POIRegistry, POICategory } from '../world/POI';
 import { makeRng, clamp } from '../core/math';
 import { CityPlanning, CityPlanningOptions, DistrictType, PlanningSample } from './CityPlanning';
 import { BlockParcelLayout, FrontageSide, LandParcel, UrbanBlock } from './BlockParcelLayout';
+import { FacilityRecord, ParkSpace, planSpecialFacilities } from './SpecialFacilityPlanner';
 
 export interface CityConfig {
   seed: number;
@@ -81,11 +82,13 @@ export interface ParkingLot {
  * Phase 1: city planning + road hierarchy.
  * Phase 2: road-bounded blocks + frontage-aware parcels + setback-aware buildings.
  * Phase 2.5: land-value/density driven redevelopment, parcel consolidation, coverage/FAR based massing.
+ * Phase 3: demand-spaced special facilities + park POIs.
  */
 export class CityGenerator {
   readonly net = new RoadNetwork(); readonly poi = new POIRegistry();
   readonly buildings: Building[] = []; readonly parkingLots: ParkingLot[] = [];
   readonly blocks: UrbanBlock[] = []; readonly parcels: LandParcel[] = []; readonly developmentSites: DevelopmentSite[] = [];
+  readonly facilities: FacilityRecord[] = []; readonly parks: ParkSpace[] = [];
   readonly lotByPOI = new Map<number, number>();
   readonly gateNodes: number[] = [];
   readonly sizeMeters: number; readonly planning: CityPlanning; urbanThreshold = 0.5;
@@ -169,6 +172,8 @@ export class CityGenerator {
     this.ensureConnected(nodeGrid, cols);
     this.generateBlocksAndParcels(bs, cols);
     this.buildGates(nodeGrid, cols, bs, size);
+    const phase3 = planSpecialFacilities(this, this.cfg.seed);
+    this.facilities.push(...phase3.facilities); this.parks.push(...phase3.parks);
   }
 
   private generateBlocksAndParcels(bs: number, cols: number): void {
