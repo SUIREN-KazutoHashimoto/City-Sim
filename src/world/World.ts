@@ -5,6 +5,7 @@ import { NeedSystem } from '../agents/NeedSystem';
 import { UtilityBrain } from '../agents/UtilityBrain';
 import { AgentWorkerPool } from '../simulation/AgentWorkerPool';
 import { POISearchWorkerPool, POIBestQuery } from '../simulation/POISearchWorkerPool';
+import { PedestrianWorkerPool } from '../simulation/PedestrianWorkerPool';
 import { CityGenerator, CityConfig } from '../generation/CityGenerator';
 import { VehicleStore, VehicleState } from '../traffic/VehicleStore';
 import { TrafficSystem } from '../traffic/TrafficSystem';
@@ -24,14 +25,14 @@ export class World {
   readonly bus: BusSystem; readonly logistics: LogisticsSystem;
   private readonly grid = new SpatialHashGrid(8);
   private readonly needs = new NeedSystem(); private readonly brain: UtilityBrain; private readonly walkAstar: AStar;
-  private readonly agentWorkers: AgentWorkerPool; private readonly poiWorkers: POISearchWorkerPool;
+  private readonly agentWorkers: AgentWorkerPool; private readonly poiWorkers: POISearchWorkerPool; private readonly pedWorkers: PedestrianWorkerPool;
   private walkPaths: Int32Array[]; private rng = makeRng(999);
   driveThreshold = 180; private decideCursor = 0;
   private pedBlock: Uint8Array; private vehBlock!: Uint8Array;
 
   constructor(cityCfg: CityConfig, agentCapacity: number, vehicleCapacity = 8000) {
     this.store = new AgentStore(agentCapacity); this.vehicles = new VehicleStore(vehicleCapacity);
-    this.agentWorkers = new AgentWorkerPool(this.store);
+    this.agentWorkers = new AgentWorkerPool(this.store); this.pedWorkers = new PedestrianWorkerPool(this.store);
     this.city = new CityGenerator(cityCfg); this.city.generate();
     this.poiWorkers = new POISearchWorkerPool(this.city.poi);
     this.brain = new UtilityBrain(this.city.poi);
@@ -47,9 +48,10 @@ export class World {
     this.traffic.pedBlockedFn = (node: number) => this.pedBlock[node] === 1;
   }
 
-  get simulationWorkerCount(): number { return this.agentWorkers.workerCount + this.poiWorkers.workerCount; }
+  get simulationWorkerCount(): number { return this.agentWorkers.workerCount + this.poiWorkers.workerCount + this.pedWorkers.workerCount; }
   get agentWorkerCount(): number { return this.agentWorkers.workerCount; }
   get poiWorkerCount(): number { return this.poiWorkers.workerCount; }
+  get pedestrianWorkerCount(): number { return this.pedWorkers.workerCount; }
   get sharedAgentMemory(): boolean { return this.store.sharedMemory; }
 
   private assignOccupation(): { occ: Occupation; start: number; end: number } {
@@ -110,93 +112,85 @@ export class World {
     }
   }
 
-  /** 従来互換の同期step。 */
   step(dtSec: number): void { this.stepCore(dtSec, true, true, true); }
 
-  /** AgentのNeed/ActivityとPOI検索を並列化し、依存系システムはCoordinatorで順序実行する。 */
   async stepBatchAsync(dtSec: number, steps: number): Promise<void> {
     if (steps <= 0) return;
-    const agentParallel = this.agentWorkers.active, poiParallel = this.poiWorkers.active;
+    const agentParallel = this.agentWorkers.active, poiParallel = this.poiWorkers.active, pedParallel = this.pedWorkers.active;
     const totalDt = dtSec * steps, now = this.clock.totalSeconds;
     if (agentParallel) await this.agentWorkers.updateAgentBatch(totalDt, now, this.store.count);
     for (let i = 0; i < steps; i++) {
       if (poiParallel) await this.decideAgentsAsync();
-      this.stepCore(dtSec, !agentParallel, !agentParallel, !poiParallel);
+      if (pedParallel) await this.stepCoreAsync(dtSec, !agentParallel, !agentParallel, !poiParallel);
+      else this.stepCore(dtSec, !agentParallel, !agentParallel, !poiParallel);
     }
     if (agentParallel) this.processParallelActivityExits(now);
   }
 
   private stepCore(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): void {
-    const s = this.store; const now = this.clock.totalSeconds;
-    this.signals.update(dtSec); if (updateNeeds) this.needs.update(s, dtSec);
-    if (updateDecisions) this.decideAgentsSync();
+    const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
+    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, false); }
+    this.stepAfterPed(now, updateActivities);
+  }
+
+  private async stepCoreAsync(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): Promise<void> {
+    const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
+    this.pedWorkers.begin(s.count);
+    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, true); }
+    await this.pedWorkers.flush(dtSec, s.count);
+    this.stepAfterPed(now, updateActivities);
+  }
+
+  private stepBeforePed(dtSec: number, updateNeeds: boolean, updateDecisions: boolean): number {
+    const s = this.store, now = this.clock.totalSeconds;
+    this.signals.update(dtSec); if (updateNeeds) this.needs.update(s, dtSec); if (updateDecisions) this.decideAgentsSync();
     for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Routing) this.beginTrip(i);
     this.computePedBlocks(); this.traffic.update(dtSec);
     this.bus.update(dtSec, (agent: number, stop: { x: number; z: number }) => this.onBusAlight(agent, stop), (stop: { id: number }, routeId: number, freeSeats: number) => this.collectBoarders(stop, routeId, freeSeats));
     this.bus.syncOnboard((agent: number, x: number, z: number) => { s.posX[agent] = x; s.posZ[agent] = z; });
-    this.logistics.update(dtSec);
-    this.buildTravelerIndex();
-    for (let i = 0; i < s.count; i++) {
-      const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec);
-    }
-    this.handleArrivedVehicles();
-    if (updateActivities) for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Engaged) this.activity(i, now, dtSec);
+    this.logistics.update(dtSec); this.buildTravelerIndex(); return now;
+  }
+
+  private stepAfterPed(now: number, updateActivities: boolean): void {
+    const s = this.store; this.handleArrivedVehicles();
+    if (updateActivities) for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Engaged) this.activity(i, now, this.clock.stepDt);
   }
 
   private decideAgentsSync(): void {
     const s = this.store, now = this.clock.totalSeconds, budget = Math.min(s.count, 512);
     for (let k = 0; k < budget; k++) {
       const i = (this.decideCursor + k) % s.count;
-      if (s.state[i] === AgentState.Idle && now >= s.nextDecideAt[i]) {
-        this.brain.decide(s, i, this.clock);
-        if (s.state[i] === AgentState.Idle) this.deferDecision(i, now);
-      }
+      if (s.state[i] === AgentState.Idle && now >= s.nextDecideAt[i]) { this.brain.decide(s, i, this.clock); if (s.state[i] === AgentState.Idle) this.deferDecision(i, now); }
     }
     this.decideCursor = (this.decideCursor + budget) % Math.max(1, s.count);
   }
 
   private async decideAgentsAsync(): Promise<void> {
-    const s = this.store, now = this.clock.totalSeconds, budget = Math.min(s.count, 512);
-    const agents: number[] = [], queries: POIBestQuery[] = [];
+    const s = this.store, now = this.clock.totalSeconds, budget = Math.min(s.count, 512); const agents: number[] = [], queries: POIBestQuery[] = [];
     for (let k = 0; k < budget; k++) {
-      const i = (this.decideCursor + k) % s.count;
-      if (s.state[i] !== AgentState.Idle || now < s.nextDecideAt[i]) continue;
-      const plan = this.brain.plan(s, i, this.clock);
-      if (!plan) { this.deferDecision(i, now); continue; }
-      if (plan.directTarget >= 0) {
-        if (!this.brain.applyTarget(s, i, plan.directTarget)) this.deferDecision(i, now);
-        continue;
-      }
+      const i = (this.decideCursor + k) % s.count; if (s.state[i] !== AgentState.Idle || now < s.nextDecideAt[i]) continue;
+      const plan = this.brain.plan(s, i, this.clock); if (!plan) { this.deferDecision(i, now); continue; }
+      if (plan.directTarget >= 0) { if (!this.brain.applyTarget(s, i, plan.directTarget)) this.deferDecision(i, now); continue; }
       agents.push(i); queries.push({ category: plan.category, x: s.posX[i], z: s.posZ[i], wealth: s.wealth[i] });
     }
-    if (queries.length > 0) {
-      const results = await this.poiWorkers.findBestBatch(queries);
-      for (let q = 0; q < results.length; q++) if (!this.brain.applyTarget(s, agents[q], results[q])) this.deferDecision(agents[q], now);
-    }
+    if (queries.length > 0) { const results = await this.poiWorkers.findBestBatch(queries); for (let q = 0; q < results.length; q++) if (!this.brain.applyTarget(s, agents[q], results[q])) this.deferDecision(agents[q], now); }
     this.decideCursor = (this.decideCursor + budget) % Math.max(1, s.count);
   }
 
-  private deferDecision(i: number, now: number): void {
-    this.store.state[i] = AgentState.Idle; this.store.nextDecideAt[i] = now + 600 + this.rng() * 1200;
-  }
+  private deferDecision(i: number, now: number): void { this.store.state[i] = AgentState.Idle; this.store.nextDecideAt[i] = now + 600 + this.rng() * 1200; }
 
   private processParallelActivityExits(now: number): void {
     const s = this.store;
     for (let i = 0; i < s.count; i++) {
-      if (s.activityExit[i] === 0) continue; s.activityExit[i] = 0;
-      if (s.state[i] !== AgentState.Engaged || s.goalPOI[i] < 0) continue;
-      const poi = this.city.poi.get(s.goalPOI[i]);
-      if (poi.maxStock > 0 && poi.stock > 0) poi.stock -= 1;
+      if (s.activityExit[i] === 0) continue; s.activityExit[i] = 0; if (s.state[i] !== AgentState.Engaged || s.goalPOI[i] < 0) continue;
+      const poi = this.city.poi.get(s.goalPOI[i]); if (poi.maxStock > 0 && poi.stock > 0) poi.stock -= 1;
       this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = now;
     }
   }
 
   private collectBoarders(stop: { id: number }, routeId: number, freeSeats: number): number[] {
     const s = this.store; const out: number[] = [];
-    for (let i = 0; i < s.count && out.length < freeSeats; i++) {
-      if (s.state[i] !== AgentState.WaitingBus) continue; if (s.boardStop[i] !== stop.id || s.busRoute[i] !== routeId) continue;
-      this.bus.setAlight(i, s.alightStop[i]); s.state[i] = AgentState.OnBus; s.waiting[i] = 0; out.push(i);
-    }
+    for (let i = 0; i < s.count && out.length < freeSeats; i++) { if (s.state[i] !== AgentState.WaitingBus) continue; if (s.boardStop[i] !== stop.id || s.busRoute[i] !== routeId) continue; this.bus.setAlight(i, s.alightStop[i]); s.state[i] = AgentState.OnBus; s.waiting[i] = 0; out.push(i); }
     return out;
   }
 
@@ -224,19 +218,15 @@ export class World {
     }
   }
 
-  private storeUsable(id: number): boolean {
-    const p = this.city.poi.get(id); if (p.occupancy >= p.capacity) return false; if (p.maxStock > 0 && p.stock <= 0) return false; return true;
-  }
+  private storeUsable(id: number): boolean { const p = this.city.poi.get(id); if (p.occupancy >= p.capacity) return false; if (p.maxStock > 0 && p.stock <= 0) return false; return true; }
 
   private reserveGoal(i: number): boolean {
-    const s = this.store; const poi = this.city.poi; const g = s.goalPOI[i]; if (g < 0) return false;
+    const s = this.store, poi = this.city.poi, g = s.goalPOI[i]; if (g < 0) return false;
     if (this.storeUsable(g) && poi.reserve(g)) { s.goalCategory[i] = poi.get(g).category; return true; }
     const cat = poi.get(g).category;
     if (cat === POICategory.Food || cat === POICategory.Retail || cat === POICategory.Leisure) {
       const alt = poi.findBest(cat, s.posX[i], s.posZ[i], s.wealth[i]);
-      if (alt >= 0 && this.storeUsable(alt) && poi.reserve(alt)) {
-        s.goalPOI[i] = alt; const p = poi.get(alt); s.goalCategory[i] = p.category; s.goalX[i] = p.x; s.goalZ[i] = p.z; return true;
-      }
+      if (alt >= 0 && this.storeUsable(alt) && poi.reserve(alt)) { s.goalPOI[i] = alt; const p = poi.get(alt); s.goalCategory[i] = p.category; s.goalX[i] = p.x; s.goalZ[i] = p.z; return true; }
     }
     return false;
   }
@@ -244,143 +234,92 @@ export class World {
   private beginTrip(i: number): void {
     const s = this.store;
     if (!this.reserveGoal(i)) { s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = this.clock.totalSeconds + 120 + this.rng() * 300; return; }
-    const tripDist = Math.hypot(s.goalX[i] - s.posX[i], s.goalZ[i] - s.posZ[i]);
-    const far = tripDist >= this.driveThreshold || (tripDist >= 90 && s.energy[i] < 0.4);
+    const tripDist = Math.hypot(s.goalX[i] - s.posX[i], s.goalZ[i] - s.posZ[i]); const far = tripDist >= this.driveThreshold || (tripDist >= 90 && s.energy[i] < 0.4);
     if (far && s.ownsCar[i] && s.car[i] >= 0) {
-      const v = s.car[i];
-      if (this.vehicles.state[v] === VehicleState.Parked) {
+      const v = s.car[i]; if (this.vehicles.state[v] === VehicleState.Parked) {
         const destLot = this.city.poi.findNearestFree(POICategory.Parking, s.goalX[i], s.goalZ[i]);
-        if (destLot >= 0 && this.city.poi.reserve(destLot)) {
-          s.destParkPOI[i] = destLot; s.destParkSlot[i] = this.city.takeSlot(destLot);
-          const dCar = Math.hypot(s.posX[i] - this.vehicles.posX[v], s.posZ[i] - this.vehicles.posZ[v]);
-          if (dCar < 25) this.startDriving(i); else { this.assignWalkPath(i, this.vehicles.posX[v], this.vehicles.posZ[v]); s.state[i] = AgentState.ToVehicle; }
-          return;
-        }
+        if (destLot >= 0 && this.city.poi.reserve(destLot)) { s.destParkPOI[i] = destLot; s.destParkSlot[i] = this.city.takeSlot(destLot); const dCar = Math.hypot(s.posX[i] - this.vehicles.posX[v], s.posZ[i] - this.vehicles.posZ[v]); if (dCar < 25) this.startDriving(i); else { this.assignWalkPath(i, this.vehicles.posX[v], this.vehicles.posZ[v]); s.state[i] = AgentState.ToVehicle; } return; }
       }
     }
     if (far) {
-      const board = this.bus.nearestStop(s.posX[i], s.posZ[i], 350), alight = this.bus.nearestStop(s.goalX[i], s.goalZ[i], 350); const route = this.bus.sharedRoute(board, alight);
-      if (route >= 0) {
-        s.boardStop[i] = board; s.alightStop[i] = alight; s.busRoute[i] = route; const bs = this.bus.stopById(board);
-        this.assignWalkPath(i, bs.x, bs.z); s.state[i] = AgentState.ToBusStop; return;
-      }
+      const board = this.bus.nearestStop(s.posX[i], s.posZ[i], 350), alight = this.bus.nearestStop(s.goalX[i], s.goalZ[i], 350), route = this.bus.sharedRoute(board, alight);
+      if (route >= 0) { s.boardStop[i] = board; s.alightStop[i] = alight; s.busRoute[i] = route; const bs = this.bus.stopById(board); this.assignWalkPath(i, bs.x, bs.z); s.state[i] = AgentState.ToBusStop; return; }
     }
     this.assignWalkPath(i, s.goalX[i], s.goalZ[i]);
-    if (s.pathHandle[i] <= 0 && tripDist > 300) {
-      this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = this.clock.totalSeconds + 300 + this.rng() * 600; return;
-    }
+    if (s.pathHandle[i] <= 0 && tripDist > 300) { this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = this.clock.totalSeconds + 300 + this.rng() * 600; return; }
     s.state[i] = AgentState.Traveling;
   }
 
   private startDriving(i: number): void {
-    const s = this.store; const v = s.car[i]; const lot = this.city.poi.get(s.destParkPOI[i]); const origin = this.vehicles.parkPOI[v];
-    if (this.traffic.dispatch(v, this.vehicles.posX[v], this.vehicles.posZ[v], lot.x, lot.z)) {
-      if (origin >= 0) { this.city.poi.release(origin); this.city.giveSlot(origin, this.vehicles.parkSlot[v]); }
-      this.vehicles.parkSlot[v] = -1; s.state[i] = AgentState.Driving;
-    } else {
-      this.city.poi.release(s.destParkPOI[i]); this.city.giveSlot(s.destParkPOI[i], s.destParkSlot[i]); s.destParkPOI[i] = -1; s.destParkSlot[i] = -1;
-      this.assignWalkPath(i, s.goalX[i], s.goalZ[i]); s.state[i] = AgentState.Traveling;
-    }
+    const s = this.store, v = s.car[i], lot = this.city.poi.get(s.destParkPOI[i]), origin = this.vehicles.parkPOI[v];
+    if (this.traffic.dispatch(v, this.vehicles.posX[v], this.vehicles.posZ[v], lot.x, lot.z)) { if (origin >= 0) { this.city.poi.release(origin); this.city.giveSlot(origin, this.vehicles.parkSlot[v]); } this.vehicles.parkSlot[v] = -1; s.state[i] = AgentState.Driving; }
+    else { this.city.poi.release(s.destParkPOI[i]); this.city.giveSlot(s.destParkPOI[i], s.destParkSlot[i]); s.destParkPOI[i] = -1; s.destParkSlot[i] = -1; this.assignWalkPath(i, s.goalX[i], s.goalZ[i]); s.state[i] = AgentState.Traveling; }
   }
 
   private assignWalkPath(i: number, tx: number, tz: number): void {
-    const s = this.store; const startNode = this.sidewalk.nearestNode(s.posX[i], s.posZ[i]), goalNode = this.sidewalk.nearestNode(tx, tz);
+    const s = this.store, startNode = this.sidewalk.nearestNode(s.posX[i], s.posZ[i]), goalNode = this.sidewalk.nearestNode(tx, tz);
     if (startNode < 0 || goalNode < 0 || startNode === goalNode) { this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1; }
-    else {
-      const path = this.walkAstar.findPath(startNode, goalNode);
-      if (path.length < 2) { this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1; }
-      else { this.walkPaths[i] = Int32Array.from(path); s.pathHandle[i] = 1; }
-    }
+    else { const path = this.walkAstar.findPath(startNode, goalNode); if (path.length < 2) { this.walkPaths[i] = EMPTY_PATH; s.pathHandle[i] = -1; } else { this.walkPaths[i] = Int32Array.from(path); s.pathHandle[i] = 1; } }
     s.pathCursor[i] = 0; s.waiting[i] = 0;
   }
 
   private handleArrivedVehicles(): void {
     const vs = this.vehicles, s = this.store;
     for (let v = 0; v < vs.count; v++) {
-      if (vs.state[v] !== VehicleState.Arrived) continue; if (vs.isBus[v] || vs.isTruck[v]) continue;
-      const driver = vs.driver[v]; let lotId = driver >= 0 ? s.destParkPOI[driver] : -1; let slot = driver >= 0 ? s.destParkSlot[driver] : -1;
+      if (vs.state[v] !== VehicleState.Arrived || vs.isBus[v] || vs.isTruck[v]) continue;
+      const driver = vs.driver[v]; let lotId = driver >= 0 ? s.destParkPOI[driver] : -1, slot = driver >= 0 ? s.destParkSlot[driver] : -1;
       if (lotId < 0) { lotId = this.city.poi.findNearestFree(POICategory.Parking, vs.posX[v], vs.posZ[v]); if (lotId >= 0) { this.city.poi.reserve(lotId); slot = this.city.takeSlot(lotId); } }
       vs.state[v] = VehicleState.Parked; vs.parkPOI[v] = lotId; vs.parkSlot[v] = slot; vs.speed[v] = 0;
-      if (lotId >= 0) {
-        const px = slot >= 0 ? this.city.slotX(lotId, slot) : this.city.poi.get(lotId).x, pz = slot >= 0 ? this.city.slotZ(lotId, slot) : this.city.poi.get(lotId).z;
-        vs.posX[v] = px; vs.posZ[v] = pz; vs.heading[v] = 0;
-      }
-      if (driver >= 0) {
-        s.posX[driver] = vs.posX[v]; s.posZ[driver] = vs.posZ[v]; s.destParkPOI[driver] = -1; s.destParkSlot[driver] = -1;
-        this.assignWalkPath(driver, s.goalX[driver], s.goalZ[driver]); s.state[driver] = AgentState.Traveling;
-      }
+      if (lotId >= 0) { const px = slot >= 0 ? this.city.slotX(lotId, slot) : this.city.poi.get(lotId).x, pz = slot >= 0 ? this.city.slotZ(lotId, slot) : this.city.poi.get(lotId).z; vs.posX[v] = px; vs.posZ[v] = pz; vs.heading[v] = 0; }
+      if (driver >= 0) { s.posX[driver] = vs.posX[v]; s.posZ[driver] = vs.posZ[v]; s.destParkPOI[driver] = -1; s.destParkSlot[driver] = -1; this.assignWalkPath(driver, s.goalX[driver], s.goalZ[driver]); s.state[driver] = AgentState.Traveling; }
     }
   }
 
   private buildTravelerIndex(): void {
     this.grid.clear(); const s = this.store;
-    for (let i = 0; i < s.count; i++) {
-      const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.grid.insert(i, s.posX[i], s.posZ[i]);
-    }
+    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.grid.insert(i, s.posX[i], s.posZ[i]); }
   }
 
-  private walkStep(i: number, dt: number): void {
-    const s = this.store; const sw = this.sidewalk; const path = this.walkPaths[i]; const hasPath = s.pathHandle[i] > 0 && path.length >= 2;
+  private walkStep(i: number, dt: number, deferMovement: boolean): void {
+    const s = this.store, sw = this.sidewalk, path = this.walkPaths[i], hasPath = s.pathHandle[i] > 0 && path.length >= 2;
     let finalX: number, finalZ: number;
     if (s.state[i] === AgentState.ToVehicle && s.car[i] >= 0) { finalX = this.vehicles.posX[s.car[i]]; finalZ = this.vehicles.posZ[s.car[i]]; }
     else if (s.state[i] === AgentState.ToBusStop && s.boardStop[i] >= 0) { const bs = this.bus.stopById(s.boardStop[i]); finalX = bs.x; finalZ = bs.z; }
     else { finalX = s.goalX[i]; finalZ = s.goalZ[i]; }
     if (!hasPath && s.state[i] === AgentState.Traveling) {
       const dg = Math.hypot(finalX - s.posX[i], finalZ - s.posZ[i]);
-      if (dg > 300) {
-        if (s.goalPOI[i] >= 0) this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.waiting[i] = 0;
-        s.nextDecideAt[i] = this.clock.totalSeconds + 300 + this.rng() * 600; return;
-      }
+      if (dg > 300) { if (s.goalPOI[i] >= 0) this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.waiting[i] = 0; s.nextDecideAt[i] = this.clock.totalSeconds + 300 + this.rng() * 600; return; }
     }
-    let tx = finalX, tz = finalZ; let arriving = !hasPath;
+    let tx = finalX, tz = finalZ, arriving = !hasPath;
     if (hasPath) {
       const cur = s.pathCursor[i];
       if (cur < path.length) {
         const node = sw.nodes[path[cur]]; tx = node.x; tz = node.z;
         if (cur + 1 < path.length) {
           const e = sw.edgeBetween(path[cur], path[cur + 1]);
-          if (e && e.crossing) {
-            const nearCurb = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 3; const signalized = this.signals.modeOf(node.roadNode) !== null;
-            const redPed = signalized && !this.signals.pedWalk(node.roadNode, e.axis); const carInside = this.vehBlock && this.vehBlock[node.roadNode] === 1;
-            if (nearCurb && (redPed || carInside)) { s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0; return; }
-          }
+          if (e && e.crossing) { const nearCurb = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 3, signalized = this.signals.modeOf(node.roadNode) !== null; const redPed = signalized && !this.signals.pedWalk(node.roadNode, e.axis), carInside = this.vehBlock && this.vehBlock[node.roadNode] === 1; if (nearCurb && (redPed || carInside)) { s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0; return; } }
         }
-        s.waiting[i] = 0;
-        if (Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 2.5) { s.pathCursor[i] = cur + 1; if (cur + 1 >= path.length) arriving = true; }
+        s.waiting[i] = 0; if (Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 2.5) { s.pathCursor[i] = cur + 1; if (cur + 1 >= path.length) arriving = true; }
       } else arriving = true;
     }
     if (arriving) { tx = finalX; tz = finalZ; }
     const dx = tx - s.posX[i], dz = tz - s.posZ[i], d2 = dx * dx + dz * dz;
     if (arriving && d2 < 9) {
-      if (s.state[i] === AgentState.ToVehicle) {
-        s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; this.startDriving(i); return;
-      }
-      if (s.state[i] === AgentState.ToBusStop) {
-        s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; s.state[i] = AgentState.WaitingBus; return;
-      }
-      s.state[i] = AgentState.Engaged; s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH;
-      const p = this.city.poi.get(s.goalPOI[i]); if (p) { s.goalCategory[i] = p.category; s.dwellUntil[i] = this.computeDwellUntil(p.category); }
-      return;
+      if (s.state[i] === AgentState.ToVehicle) { s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; this.startDriving(i); return; }
+      if (s.state[i] === AgentState.ToBusStop) { s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; s.state[i] = AgentState.WaitingBus; return; }
+      s.state[i] = AgentState.Engaged; s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; const p = this.city.poi.get(s.goalPOI[i]); if (p) { s.goalCategory[i] = p.category; s.dwellUntil[i] = this.computeDwellUntil(p.category); } return;
     }
-    const inv = d2 > 1e-4 ? 1 / Math.sqrt(d2) : 0; let desX = dx * inv, desZ = dz * inv;
-    let sepX = 0, sepZ = 0, nn = 0;
-    this.grid.queryNeighbors(s.posX[i], s.posZ[i], 2, (j) => {
-      if (j === i) return; const ddx = s.posX[i] - s.posX[j], ddz = s.posZ[i] - s.posZ[j], dd = ddx * ddx + ddz * ddz;
-      if (dd > 0 && dd < 4) { const w = 1 / Math.sqrt(dd); sepX += ddx * w; sepZ += ddz * w; nn++; }
-    });
+    const inv = d2 > 1e-4 ? 1 / Math.sqrt(d2) : 0; let desX = dx * inv, desZ = dz * inv, sepX = 0, sepZ = 0, nn = 0;
+    this.grid.queryNeighbors(s.posX[i], s.posZ[i], 2, (j) => { if (j === i) return; const ddx = s.posX[i] - s.posX[j], ddz = s.posZ[i] - s.posZ[j], dd = ddx * ddx + ddz * ddz; if (dd > 0 && dd < 4) { const w = 1 / Math.sqrt(dd); sepX += ddx * w; sepZ += ddz * w; nn++; } });
     if (nn > 0) { desX += (sepX / nn) * 0.6; desZ += (sepZ / nn) * 0.6; }
-    const mag = Math.hypot(desX, desZ) || 1; const sp = s.maxSpeed[i];
-    s.velX[i] = (desX / mag) * sp; s.velZ[i] = (desZ / mag) * sp; s.posX[i] += s.velX[i] * dt; s.posZ[i] += s.velZ[i] * dt; s.heading[i] = Math.atan2(s.velZ[i], s.velX[i]);
-    s.energy[i] = Math.max(0, s.energy[i] - (1 / (2.5 * 3600)) * dt);
+    if (deferMovement) { this.pedWorkers.queue(i, desX, desZ); return; }
+    const mag = Math.hypot(desX, desZ) || 1, sp = s.maxSpeed[i]; s.velX[i] = (desX / mag) * sp; s.velZ[i] = (desZ / mag) * sp; s.posX[i] += s.velX[i] * dt; s.posZ[i] += s.velZ[i] * dt; s.heading[i] = Math.atan2(s.velZ[i], s.velX[i]); s.energy[i] = Math.max(0, s.energy[i] - (1 / (2.5 * 3600)) * dt);
   }
 
   private computeDwellUntil(cat: POICategory): number {
     const now = this.clock.totalSeconds, hour = this.clock.hour, H = 3600;
     switch (cat) {
-      case POICategory.Home: {
-        if (hour >= 22 || hour < 6) { const sec = now % 86400, wake = (6 + Math.random() * 2) * H; return sec < wake ? now + (wake - sec) : now + (24 * H - sec) + wake; }
-        return now + (1 + Math.random() * 2) * H;
-      }
+      case POICategory.Home: { if (hour >= 22 || hour < 6) { const sec = now % 86400, wake = (6 + Math.random() * 2) * H; return sec < wake ? now + (wake - sec) : now + (24 * H - sec) + wake; } return now + (1 + Math.random() * 2) * H; }
       case POICategory.Work: return now + (3 + Math.random() * 3) * H;
       case POICategory.Food: return now + (0.4 + Math.random() * 0.5) * H;
       case POICategory.Leisure: return now + (1 + Math.random() * 1.5) * H;
@@ -390,7 +329,7 @@ export class World {
   }
 
   private activity(i: number, now: number, dt: number): void {
-    const s = this.store; const poi = this.city.poi.get(s.goalPOI[i]); if (!poi) { s.state[i] = AgentState.Idle; s.goalCategory[i] = 255; return; }
+    const s = this.store, poi = this.city.poi.get(s.goalPOI[i]); if (!poi) { s.state[i] = AgentState.Idle; s.goalCategory[i] = 255; return; }
     const rec = (perSec: number) => perSec * dt;
     switch (poi.category) {
       case POICategory.Home: s.energy[i] = Math.min(1, s.energy[i] + rec(1 / 1800)); s.hygiene[i] = Math.min(1, s.hygiene[i] + rec(1 / 1200)); s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 6000)); break;
@@ -401,16 +340,12 @@ export class World {
       default: s.fun[i] = Math.min(1, s.fun[i] + rec(1 / 3000));
     }
     const critical = (poi.category !== POICategory.Food && s.hunger[i] < 0.05) || (poi.category !== POICategory.Home && s.energy[i] < 0.05);
-    if (now >= s.dwellUntil[i] || critical) {
-      if (poi.maxStock > 0 && poi.stock > 0) poi.stock -= 1; this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = now;
-    }
+    if (now >= s.dwellUntil[i] || critical) { if (poi.maxStock > 0 && poi.stock > 0) poi.stock -= 1; this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = now; }
   }
 
   stats() {
     let driving = 0, parked = 0;
-    for (let v = 0; v < this.vehicles.count; v++) {
-      if (this.vehicles.isBus[v] || this.vehicles.isTruck[v]) continue; this.vehicles.state[v] === VehicleState.Driving ? driving++ : parked++;
-    }
+    for (let v = 0; v < this.vehicles.count; v++) { if (this.vehicles.isBus[v] || this.vehicles.isTruck[v]) continue; this.vehicles.state[v] === VehicleState.Driving ? driving++ : parked++; }
     let stores = 0, empty = 0; for (const p of this.city.poi.all()) { if (p.maxStock > 0) { stores++; if (p.stock <= 0) empty++; } }
     return { agents: this.store.count, buildings: this.city.buildings.length, nodes: this.city.net.nodes.length, pois: this.city.poi.size, vehiclesDriving: driving,
       vehiclesTotal: this.vehicles.count - this.bus.busCount - this.logistics.truckCount, parkingLots: this.city.parkingLots.length, signals: this.signals.count,
@@ -420,15 +355,9 @@ export class World {
   activitySnapshot() {
     const s = this.store; let traveling = 0, home = 0, work = 0, food = 0, leisure = 0, idle = 0, driving = 0, onbus = 0;
     for (let i = 0; i < s.count; i++) {
-      const st = s.state[i];
-      if (st === AgentState.Driving) { driving++; continue; }
-      if (st === AgentState.OnBus) { onbus++; continue; }
+      const st = s.state[i]; if (st === AgentState.Driving) { driving++; continue; } if (st === AgentState.OnBus) { onbus++; continue; }
       if (st === AgentState.Traveling || st === AgentState.Routing || st === AgentState.ToVehicle || st === AgentState.ToBusStop || st === AgentState.WaitingBus) { traveling++; continue; }
-      if (st === AgentState.Engaged) {
-        const g = s.goalPOI[i]; const cat = g >= 0 ? this.city.poi.get(g).category : -1;
-        if (cat === POICategory.Home) home++; else if (cat === POICategory.Work) work++; else if (cat === POICategory.Food) food++;
-        else if (cat === POICategory.Leisure || cat === POICategory.Retail) leisure++; else idle++; continue;
-      }
+      if (st === AgentState.Engaged) { const g = s.goalPOI[i], cat = g >= 0 ? this.city.poi.get(g).category : -1; if (cat === POICategory.Home) home++; else if (cat === POICategory.Work) work++; else if (cat === POICategory.Food) food++; else if (cat === POICategory.Leisure || cat === POICategory.Retail) leisure++; else idle++; continue; }
       idle++;
     }
     return { traveling, home, work, food, leisure, idle, driving, onbus };
