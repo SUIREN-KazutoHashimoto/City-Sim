@@ -7,6 +7,7 @@ import './RailRightHandOperation';
 import './RailLightingAndIndicators';
 import './RailSupportClearance';
 import './PedestrianSignalOrientation';
+import './RailPassengerStationAccess';
 import '../world/RailPassengerAutoAttach';
 import '../world/RailPassengerDemand';
 import './TrainPassengerInspector';
