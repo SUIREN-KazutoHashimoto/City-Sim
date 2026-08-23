@@ -8,6 +8,7 @@ import './RailLightingAndIndicators';
 import './RailSupportClearance';
 import './PedestrianSignalOrientation';
 import '../world/RailPassengerAutoAttach';
+import '../world/RailPassengerDemand';
 import './TrainPassengerInspector';
 
 /**
