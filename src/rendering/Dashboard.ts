@@ -1,10 +1,12 @@
 import { World } from '../world/World';
 import { SimulationClock } from '../core/SimulationClock';
 type Snapshot = ReturnType<World['activitySnapshot']>;
-const CATS: { key: keyof Snapshot; label: string; color: string }[] = [
+type ActivityKey = keyof Snapshot | 'ontrain';
+const CATS: { key: ActivityKey; label: string; color: string }[] = [
   { key: 'home', label: '在宅', color: '#5b8cc7' }, { key: 'work', label: '勤務', color: '#d0873f' },
   { key: 'food', label: '飲食', color: '#cf5b5b' }, { key: 'leisure', label: '娯楽/買物', color: '#5cb98a' },
-  { key: 'driving', label: '運転', color: '#e0c94f' }, { key: 'onbus', label: 'バス', color: '#2f9e44' }, { key: 'traveling', label: '徒歩', color: '#b0b7c3' }, { key: 'idle', label: '待機', color: '#4a4f5a' },
+  { key: 'driving', label: '運転', color: '#e0c94f' }, { key: 'onbus', label: 'バス', color: '#2f9e44' }, { key: 'ontrain', label: '鉄道', color: '#4aa7d8' },
+  { key: 'traveling', label: '徒歩', color: '#b0b7c3' }, { key: 'idle', label: '待機', color: '#4a4f5a' },
 ];
 export const SPEED_PRESETS = [ { scale: 0.5, label: '0.5×' }, { scale: 1, label: '1×' }, { scale: 5, label: '5×' }, { scale: 30, label: '30s/s' }, { scale: 60, label: '1m/s' }, { scale: 180, label: '3m/s' }, { scale: 600, label: '10m/s' }, { scale: 1800, label: '30m/s' }, { scale: 3600, label: '1h/s' } ];
 
@@ -46,7 +48,11 @@ export class Dashboard {
   get graphsVisible(): boolean { return this.graphVisible; }
   toggleGraph(): void { this.graphVisible = !this.graphVisible; this.graphRoot.style.display = this.graphVisible ? 'block' : 'none'; }
 
-  sample(): void { const bin = Math.floor((this.clock.totalSeconds % 86400) / this.binSeconds) % this.bins; const snap = this.world.activitySnapshot(); CATS.forEach((c, ci) => { this.data[ci][bin] = snap[c.key]; }); }
+  sample(): void {
+    const bin = Math.floor((this.clock.totalSeconds % 86400) / this.binSeconds) % this.bins;
+    const snap = this.world.activitySnapshot() as unknown as Record<string, number>;
+    CATS.forEach((c, ci) => { this.data[ci][bin] = snap[c.key as string] ?? 0; });
+  }
   draw(): void {
     if (!this.graphVisible) return;
     const { ctx } = this; const W = this.canvas.width, H = this.canvas.height; ctx.clearRect(0, 0, W, H); ctx.fillStyle = '#0d1219'; ctx.fillRect(0, 0, W, H);
