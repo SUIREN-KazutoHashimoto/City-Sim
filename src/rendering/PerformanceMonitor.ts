@@ -19,6 +19,11 @@ interface SimProfile {
   workerMs: number;
   poiWorkerMs: number;
   pedWorkerMs: number;
+  pedWorkerPrepMs: number;
+  pedWorkerIndexMs: number;
+  pedWorkerAvoidMoveMs: number;
+  pedWorkerBarrierMs: number;
+  pedWorkerCoreMs: number;
   agentMs: number;
   pedBlocksMs: number;
   trafficMs: number;
@@ -68,6 +73,7 @@ interface HistorySample {
 }
 
 interface TimerExt { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number; }
+interface PedTiming { prepMs: number; indexMs: number; avoidMoveMs: number; barrierMs: number; totalMs: number; }
 
 interface WorldInternals {
   stepCore: (dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean) => void;
@@ -81,13 +87,15 @@ interface WorldInternals {
   walkAstar: { findPath: (start: number, goal: number) => number[] };
   agentWorkers: { updateAgentBatch: (dt: number, now: number, count?: number) => Promise<void> };
   poiWorkers: { findBestBatch: (queries: readonly unknown[]) => Promise<Int32Array> };
-  pedWorkers: { flush: (dt: number, count?: number) => Promise<void> };
+  pedWorkers: { flush: (dt: number) => Promise<void>; readonly latestTiming: PedTiming };
 }
 
 interface TrafficInternals { astar: { findPath: (start: number, goal: number) => number[] }; }
 
 const emptySim = (): SimProfile => ({
-  totalMs: 0, workerMs: 0, poiWorkerMs: 0, pedWorkerMs: 0, agentMs: 0, pedBlocksMs: 0, trafficMs: 0, signalsMs: 0, busMs: 0, logisticsMs: 0,
+  totalMs: 0, workerMs: 0, poiWorkerMs: 0, pedWorkerMs: 0,
+  pedWorkerPrepMs: 0, pedWorkerIndexMs: 0, pedWorkerAvoidMoveMs: 0, pedWorkerBarrierMs: 0, pedWorkerCoreMs: 0,
+  agentMs: 0, pedBlocksMs: 0, trafficMs: 0, signalsMs: 0, busMs: 0, logisticsMs: 0,
   pedIndexMs: 0, pedestrianMs: 0, arrivalsMs: 0, activityMs: 0, poiFindBestMs: 0, poiParkingMs: 0, poiMutationMs: 0, otherMs: 0, steps: 0,
   decisions: 0, tripStarts: 0, poiFindBestCount: 0, poiParkingCount: 0, poiMutationCount: 0,
   astarWalkMs: 0, astarWalkCount: 0, astarWalkMaxMs: 0, astarVehicleMs: 0, astarVehicleCount: 0, astarVehicleMaxMs: 0,
@@ -132,7 +140,7 @@ class SimulationProfiler {
       try { await originalBatch(dtSec, steps); }
       finally {
         this.current.totalMs = performance.now() - started;
-        // pedWorkerMsはpedestrianMsに含まれるネスト値なのでcoveredへ重複加算しない。
+        // Ped worker internal timing is nested in pedestrianMs and is diagnostic only.
         const covered = this.current.workerMs + this.current.poiWorkerMs + this.current.agentMs + this.current.pedBlocksMs + this.current.trafficMs +
           this.current.busMs + this.current.logisticsMs + this.current.pedIndexMs + this.current.pedestrianMs + this.current.arrivalsMs + this.current.activityMs + this.current.signalsMs;
         this.current.otherMs = Math.max(0, this.current.totalMs - covered);
@@ -179,8 +187,17 @@ class SimulationProfiler {
       const t = performance.now(); const out = await originalPoiWorker(queries); if (this.inBatch) this.current.poiWorkerMs += performance.now() - t; return out;
     };
     const originalPedWorker = w.pedWorkers.flush.bind(w.pedWorkers);
-    w.pedWorkers.flush = async (dt: number, count?: number): Promise<void> => {
-      const t = performance.now(); await originalPedWorker(dt, count); if (this.inBatch) this.current.pedWorkerMs += performance.now() - t;
+    w.pedWorkers.flush = async (dt: number): Promise<void> => {
+      const t = performance.now(); await originalPedWorker(dt);
+      if (this.inBatch) {
+        this.current.pedWorkerMs += performance.now() - t;
+        const m = w.pedWorkers.latestTiming;
+        this.current.pedWorkerPrepMs += m.prepMs;
+        this.current.pedWorkerIndexMs += m.indexMs;
+        this.current.pedWorkerAvoidMoveMs += m.avoidMoveMs;
+        this.current.pedWorkerBarrierMs += m.barrierMs;
+        this.current.pedWorkerCoreMs += m.totalMs;
+      }
     };
 
     const originalPlan = w.brain.plan.bind(w.brain);
@@ -252,16 +269,16 @@ export class PerformanceMonitor {
   constructor(private readonly world: World, renderer: THREE.WebGLRenderer) {
     this.profiler = new SimulationProfiler(world); this.gpu = new GpuTimer(renderer);
     this.root = document.createElement('div');
-    this.root.style.cssText = ['position:fixed', 'top:190px', 'right:8px', 'z-index:16', 'width:390px', 'max-height:calc(100vh - 200px)', 'overflow:auto',
+    this.root.style.cssText = ['position:fixed', 'top:190px', 'right:8px', 'z-index:16', 'width:410px', 'max-height:calc(100vh - 200px)', 'overflow:auto',
       'font:10px/1.35 ui-monospace,monospace', 'color:#d7e0ec', 'background:rgba(8,12,18,.90)', 'border:1px solid #34445b', 'border-radius:8px', 'padding:8px',
       'box-shadow:0 6px 24px rgba(0,0,0,.35)', 'user-select:none'].join(';'); document.body.appendChild(this.root);
     const title = document.createElement('div'); title.textContent = 'PERFORMANCE  [P=show/hide]'; title.style.cssText = 'font-weight:700;margin-bottom:5px;color:#f0f5fb'; this.root.appendChild(title);
     this.summary = document.createElement('div'); this.summary.style.cssText = 'white-space:pre;margin-bottom:6px'; this.root.appendChild(this.summary);
-    this.frameCanvas = this.addCanvas('Frame timing (60 sec)', 374, 88);
+    this.frameCanvas = this.addCanvas('Frame timing (60 sec)', 394, 88);
     this.addLegend([['Frame', '#d9e1ea'], ['Render', '#63a6ff'], ['GPU', '#b979ff'], ['SIM', '#ff9a52']]);
-    this.simCanvas = this.addCanvas('Simulation breakdown (exclusive)', 374, 92);
+    this.simCanvas = this.addCanvas('Simulation breakdown (exclusive)', 394, 92);
     this.addLegend([['Workers', '#9c7bff'], ['Agent', '#4c91e8'], ['Ped', '#49b982'], ['Traffic', '#e7ba42'], ['Bus', '#2f9e44'], ['Logi', '#c7763b'], ['Signal', '#df5b5b'], ['Activity', '#bb79d8'], ['Other', '#66717f']]);
-    this.loadCanvas = this.addCanvas('Workload', 374, 82);
+    this.loadCanvas = this.addCanvas('Workload', 394, 82);
     this.addLegend([['Visible A', '#63a6ff'], ['Ped', '#63d69b'], ['Visible V', '#ffcf5a'], ['Driving V', '#ff7d6e']]);
     window.addEventListener('keydown', (e) => { if (e.code === 'KeyP') { this.visible = !this.visible; this.root.style.display = this.visible ? 'block' : 'none'; } });
   }
@@ -284,19 +301,22 @@ export class PerformanceMonitor {
 
   private draw(activePedestrians: number, engaged: number, drivingVehicles: number): void {
     const p = this.profiler.latest, r = this.latestRender, gpuText = Number.isFinite(this.gpu.latestMs) ? `${this.gpu.latestMs.toFixed(1)}ms` : 'n/a';
-    const us = (ms: number, count: number) => count > 0 ? `${((ms * 1000) / count).toFixed(2)}us/${count}` : '-';
-    const pedMs = p.pedBlocksMs + p.pedIndexMs + p.pedestrianMs, pedPrepMs = Math.max(0, p.pedestrianMs - p.pedWorkerMs), actMs = p.arrivalsMs + p.activityMs;
+    const pedMs = p.pedBlocksMs + p.pedIndexMs + p.pedestrianMs;
+    const pedPrepMs = Math.max(0, p.pedestrianMs - p.pedWorkerMs), actMs = p.arrivalsMs + p.activityMs;
+    const pedUsPerStep = activePedestrians > 0 && p.steps > 0 ? ((pedMs * 1000) / (activePedestrians * p.steps)).toFixed(2) : '-';
+    const dispatchGap = Math.max(0, p.pedWorkerMs - p.pedWorkerCoreMs);
     this.summary.textContent =
 `FRAME ${this.latestFrameMs.toFixed(1)}ms  FPS ${this.latestFps.toFixed(0)}  GPU ${gpuText}  backlog ${(this.latestBacklog * 1000).toFixed(0)}ms ${this.latestSimBusy ? 'BUSY' : ''}
 RENDER ${r.totalMs.toFixed(1)}ms  LOD ${r.lodMs.toFixed(1)}  Agent ${r.agentsMs.toFixed(1)}  Vehicle ${r.vehiclesMs.toFixed(1)}  Signal ${r.signalsMs.toFixed(1)}  Light ${r.lightingMs.toFixed(1)}  WebGL ${r.webglMs.toFixed(1)}
 SIM ${p.totalMs.toFixed(1)}ms/${p.steps}step  AgentW ${p.workerMs.toFixed(1)}  POIW ${p.poiWorkerMs.toFixed(1)}  Agent ${p.agentMs.toFixed(1)}  Traffic ${p.trafficMs.toFixed(1)}
-PED total ${pedMs.toFixed(1)}  Block ${p.pedBlocksMs.toFixed(1)}  Index ${p.pedIndexMs.toFixed(1)}  Walk/AvoidPrep ${pedPrepMs.toFixed(1)}  WorkerMove ${p.pedWorkerMs.toFixed(1)}
-    ${us(pedMs, activePedestrians)}
+PED total ${pedMs.toFixed(1)}  Block ${p.pedBlocksMs.toFixed(1)}  MainIndex ${p.pedIndexMs.toFixed(1)}  Path/Signal ${pedPrepMs.toFixed(1)}  WorkerWall ${p.pedWorkerMs.toFixed(1)}
+    Worker Prep ${p.pedWorkerPrepMs.toFixed(1)}  Index ${p.pedWorkerIndexMs.toFixed(1)}  Avoid+Move ${p.pedWorkerAvoidMoveMs.toFixed(1)}  Barrier ${p.pedWorkerBarrierMs.toFixed(1)}  DispatchGap ${dispatchGap.toFixed(1)}
+    ${pedUsPerStep}us/ped/step  peds ${activePedestrians}
 POI WorkerSearch ${p.poiWorkerMs.toFixed(1)}  MainSearch ${p.poiFindBestMs.toFixed(1)}/${p.poiFindBestCount}  Parking ${p.poiParkingMs.toFixed(1)}/${p.poiParkingCount}
     Reserve/Release ${p.poiMutationMs.toFixed(1)}/${p.poiMutationCount}  Activity+Arrival ${actMs.toFixed(1)}
 SYS Bus ${p.busMs.toFixed(1)}  Logistics ${p.logisticsMs.toFixed(1)}  Signals ${p.signalsMs.toFixed(1)}  Other ${p.otherMs.toFixed(1)}
 A* walk ${p.astarWalkMs.toFixed(1)}ms/${p.astarWalkCount} max ${p.astarWalkMaxMs.toFixed(2)}ms   vehicle ${p.astarVehicleMs.toFixed(1)}ms/${p.astarVehicleCount} max ${p.astarVehicleMaxMs.toFixed(2)}ms
-LOAD visible A ${this.latestLod.agents.join('/')}  V ${this.latestLod.vehicles.join('/')}  B ${this.latestLod.buildings.join('/')}  ped ${activePedestrians}  engaged ${engaged}`;
+LOAD visible A ${this.latestLod.agents.join('/')}  V ${this.latestLod.vehicles.join('/')}  B ${this.latestLod.buildings.join('/')}  ped ${activePedestrians}  engaged ${engaged}  driving ${drivingVehicles}`;
     this.drawLines(this.frameCanvas, [{ key: 'frameMs', color: '#d9e1ea' }, { key: 'renderMs', color: '#63a6ff' }, { key: 'gpuMs', color: '#b979ff' }, { key: 'simMs', color: '#ff9a52' }], [16.67, 33.33]);
     this.drawStacked(this.simCanvas);
     this.drawLines(this.loadCanvas, [{ key: 'visibleAgents', color: '#63a6ff' }, { key: 'activePedestrians', color: '#63d69b' }, { key: 'visibleVehicles', color: '#ffcf5a' }, { key: 'drivingVehicles', color: '#ff7d6e' }]);
