@@ -1,4 +1,4 @@
-export enum AgentState { Idle = 0, Routing = 2, Traveling = 3, Engaged = 4, Driving = 5, ToVehicle = 6, ToBusStop = 7, WaitingBus = 8, OnBus = 9 }
+export enum AgentState { Idle = 0, Routing = 2, Traveling = 3, Engaged = 4, Driving = 5, ToVehicle = 6, ToBusStop = 7, WaitingBus = 8, OnBus = 9, ToRailStation = 10, WaitingTrain = 11, OnTrain = 12 }
 export enum Occupation { Office = 0, ShiftEarly = 1, ShiftLate = 2, NightShift = 3, Student = 4, Retail = 5, Freelance = 6, Unemployed = 7, Retiree = 8 }
 export const OCCUPATION_LABEL: Record<Occupation, string> = {
   [Occupation.Office]: '会社員', [Occupation.ShiftEarly]: '早番勤務', [Occupation.ShiftLate]: '遅番勤務', [Occupation.NightShift]: '夜勤',
