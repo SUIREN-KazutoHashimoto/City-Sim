@@ -135,6 +135,9 @@ export class Inspector {
     const pois = this.world.city.poi.poisInBuilding(b.id); let occ = 0, cap = 0; for (const p of pois) { occ += p.occupancy; cap += p.capacity; }
     const uses = pois.length ? pois.map((p) => { const stk = p.maxStock > 0 ? `  在庫${p.stock}/${p.maxStock}` : ''; return `  · ${POICategory[p.category]} (在 ${p.occupancy}/${p.capacity})${stk}`; }).join('\n') : '  · 用途なし';
     const dev = `地価 ${b.landValue.toFixed(2)}  開発強度 ${b.developmentIntensity.toFixed(2)}\n敷地 ${b.siteArea.toFixed(0)}m²  統合Parcel ${b.parcelCount}\n建ぺい率 ${(b.coverageRatio * 100).toFixed(0)}%  容積率 ${(b.floorAreaRatio * 100).toFixed(0)}%`;
-    return `🏢 建物 #${b.id}  [${cat}]${facilityText}\n階数 ${b.floors}F   間口 ${b.width.toFixed(0)}×${b.depth.toFixed(0)} m\n${dev}\n在館 ${occ} / 収容 ${cap}\n─────────────\n入居用途:\n${uses}`;
+    const plan = this.world.city.planning.sample(b.x, b.z);
+    const station = plan.nearestStationId >= 0 ? this.world.city.planning.rail.stations[plan.nearestStationId] : null;
+    const transitText = station && plan.transitInfluence > 0.02 ? `\n最寄駅 ${station.name}  駅勢圏 ${(plan.transitInfluence * 100).toFixed(0)}%` : '';
+    return `🏢 建物 #${b.id}  [${cat}]${facilityText}\n階数 ${b.floors}F   間口 ${b.width.toFixed(0)}×${b.depth.toFixed(0)} m\n${dev}${transitText}\n在館 ${occ} / 収容 ${cap}\n─────────────\n入居用途:\n${uses}`;
   }
 }
