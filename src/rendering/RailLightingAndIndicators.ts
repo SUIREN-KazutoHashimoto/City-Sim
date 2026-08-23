@@ -19,11 +19,19 @@ interface PlatformIndicator {
   approachMatrix: THREE.Matrix4;
 }
 
+interface TrainEndInstances {
+  first: number;
+  last: number;
+}
+
 const TERMINAL_TRACK_OFFSETS = [-9.5, -1.9, 1.9, 9.5] as const;
 const MAIN_OFFSET = 1.72;
 const SIDING_OFFSET = 8.0;
 const TRACK_LIGHT_SPACING = 115;
 const APPROACH_NOTICE_DISTANCE = 280;
+const TRAIN_LAMP_LATERAL = 0.68;
+const TRAIN_LAMP_FORWARD = 0.06;
+const TRAIN_LAMP_VERTICAL = 0.18;
 
 const proto = RailRenderer.prototype as unknown as AnyRail;
 const originalBuildTrackGeometry = proto.buildTrackGeometry as () => void;
@@ -190,16 +198,37 @@ proto.buildStations = function litStations(this: AnyRail): void {
   }
 };
 
+function buildTrainEndInstanceMap(self: AnyRail): Map<number, TrainEndInstances> {
+  const map = new Map<number, TrainEndInstances>();
+  const instanceToRun = self.trainInstanceToRun as number[];
+  for (let instance = 0; instance < instanceToRun.length; instance++) {
+    const runId = instanceToRun[instance];
+    if (runId == null || runId < 0) continue;
+    const current = map.get(runId);
+    if (!current) map.set(runId, { first: instance, last: instance });
+    else current.last = instance;
+  }
+  return map;
+}
+
+function hideTrainLamp(self: AnyRail, mesh: THREE.InstancedMesh, index: number): void {
+  mesh.setMatrixAt(index, self.matrix(0, -1000, 0, 0.01, 0.01, 0.01));
+}
+
 proto.buildTrains = function litTrains(this: AnyRail): void {
   originalBuildTrains.call(this);
   const count = this.trainRuns.length as number;
   if (!count) return;
-  const sphere = new THREE.SphereGeometry(1, 10, 8);
-  this.trainHeadLights = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0xfff7d5 }), count);
-  this.trainTailLights = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0xff3131 }), count);
+
+  this.trainEndInstances = buildTrainEndInstanceMap(this);
+  const box = new THREE.BoxGeometry(1, 1, 1);
+  this.trainHeadLights = new THREE.InstancedMesh(box, new THREE.MeshBasicMaterial({ color: 0xfff7d5 }), count * 2);
+  this.trainTailLights = new THREE.InstancedMesh(box, new THREE.MeshBasicMaterial({ color: 0xff3131 }), count * 2);
   for (const mesh of [this.trainHeadLights, this.trainTailLights] as THREE.InstancedMesh[]) {
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.frustumCulled = false;
+    for (let i = 0; i < count * 2; i++) hideTrainLamp(this, mesh, i);
+    mesh.instanceMatrix.needsUpdate = true;
     this.scene.add(mesh);
   }
 };
@@ -243,25 +272,64 @@ function updatePlatformIndicators(self: AnyRail): void {
   if (approach.instanceColor) approach.instanceColor.needsUpdate = true;
 }
 
+function placeLampPair(
+  mesh: THREE.InstancedMesh,
+  baseIndex: number,
+  matrix: THREE.Matrix4,
+  frontFace: boolean,
+): void {
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  matrix.decompose(position, quaternion, scale);
+
+  const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion).normalize();
+  const lateral = new THREE.Vector3(0, 0, 1).applyQuaternion(quaternion).normalize();
+  const faceSign = frontFace ? 1 : -1;
+  const faceCenter = position.clone()
+    .addScaledVector(forward, faceSign * (Math.abs(scale.x) * 0.5 + TRAIN_LAMP_FORWARD));
+  faceCenter.y += TRAIN_LAMP_VERTICAL;
+
+  for (let side = 0; side < 2; side++) {
+    const lampPosition = faceCenter.clone().addScaledVector(lateral, side === 0 ? -TRAIN_LAMP_LATERAL : TRAIN_LAMP_LATERAL);
+    const lampMatrix = new THREE.Matrix4().compose(
+      lampPosition,
+      quaternion,
+      new THREE.Vector3(0.10, 0.20, 0.22),
+    );
+    mesh.setMatrixAt(baseIndex + side, lampMatrix);
+  }
+}
+
 function updateTrainLights(self: AnyRail): void {
   const heads = self.trainHeadLights as THREE.InstancedMesh | undefined;
   const tails = self.trainTailLights as THREE.InstancedMesh | undefined;
-  if (!heads || !tails) return;
+  const body = self.trainBody as THREE.InstancedMesh | undefined;
+  const ends = self.trainEndInstances as Map<number, TrainEndInstances> | undefined;
+  if (!heads || !tails || !body || !ends) return;
+
+  const frontMatrix = new THREE.Matrix4();
+  const rearMatrix = new THREE.Matrix4();
 
   for (const run of self.trainRuns as AnyRun[]) {
-    const index = run.id as number;
-    if (run.state === 'depot') {
-      heads.setMatrixAt(index, self.matrix(0, -1000, 0, 0.01, 0.01, 0.01));
-      tails.setMatrixAt(index, self.matrix(0, -1000, 0, 0.01, 0.01, 0.01));
+    const base = (run.id as number) * 2;
+    const end = ends.get(run.id);
+    if (run.state === 'depot' || !end) {
+      hideTrainLamp(self, heads, base);
+      hideTrainLamp(self, heads, base + 1);
+      hideTrainLamp(self, tails, base);
+      hideTrainLamp(self, tails, base + 1);
       continue;
     }
-    const half = self.consistLength(run) * 0.5 + 0.28;
-    const cos = Math.cos(run.heading), sin = Math.sin(run.heading);
-    const frontX = run.x + cos * half, frontZ = run.z + sin * half;
-    const tailX = run.x - cos * half, tailZ = run.z - sin * half;
-    const y = run.y + 2.15;
-    heads.setMatrixAt(index, self.matrix(frontX, y, frontZ, 0.22, 0.22, 0.22));
-    tails.setMatrixAt(index, self.matrix(tailX, y, tailZ, 0.20, 0.20, 0.20));
+
+    // trainBodyの各車両行列が実描画位置そのもの。
+    // 進行方向が正ならcar0側、負なら最終car側が先頭になる。
+    const frontInstance = run.direction > 0 ? end.first : end.last;
+    const rearInstance = run.direction > 0 ? end.last : end.first;
+    body.getMatrixAt(frontInstance, frontMatrix);
+    body.getMatrixAt(rearInstance, rearMatrix);
+    placeLampPair(heads, base, frontMatrix, true);
+    placeLampPair(tails, base, rearMatrix, false);
   }
   heads.instanceMatrix.needsUpdate = true;
   tails.instanceMatrix.needsUpdate = true;
