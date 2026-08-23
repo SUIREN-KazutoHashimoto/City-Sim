@@ -5,5 +5,12 @@
   "blockSize": 90,
   "population": 50000,
   "agentCapacity": 60000,
-  "vehicleCapacity": 30000
+  "vehicleCapacity": 30000,
+  "planning": {
+    "subCenters": 3,
+    "arterialSpacing": 900,
+    "collectorSpacing": 360,
+    "industrialRatio": 0.08,
+    "parkRatio": 0.055
+  }
 }
