@@ -252,7 +252,7 @@ export class BlockParcelLayout {
   }
 
   private stripDepth(target: number, available: number, rng: () => number): number {
-    return Math.min(available * 0.46, Math.max(12, target * (0.88 + rng() * 0.22)));
+    return Math.min(available * 0.32, Math.max(12, target * (0.88 + rng() * 0.22)));
   }
 
   private splitRun(start: number, end: number, target: number, rng: () => number, emit: (a: number, b: number) => void): void {
