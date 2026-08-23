@@ -5,6 +5,7 @@ import type { CameraFollowTarget } from './FirstPersonController';
 import { AgentState, Occupation, OCCUPATION_LABEL } from '../agents/AgentStore';
 import { VehicleState } from '../traffic/VehicleStore';
 import { POICategory } from '../world/POI';
+import { FACILITY_LABEL } from '../generation/SpecialFacilityPlanner';
 
 export class Inspector {
   private raycaster = new THREE.Raycaster(); private pointer = new THREE.Vector2();
@@ -129,8 +130,11 @@ export class Inspector {
 
   private describeBuilding(i: number): string {
     const b = this.world.city.buildings[i]; if (!b) return ''; const cat = POICategory[b.category] ?? '?';
+    const facility = this.world.city.facilities.find((f) => f.buildingId === b.id);
+    const facilityText = facility ? `\n施設 ${FACILITY_LABEL[facility.type]}  定員 ${facility.capacity}` : '';
     const pois = this.world.city.poi.poisInBuilding(b.id); let occ = 0, cap = 0; for (const p of pois) { occ += p.occupancy; cap += p.capacity; }
     const uses = pois.length ? pois.map((p) => { const stk = p.maxStock > 0 ? `  在庫${p.stock}/${p.maxStock}` : ''; return `  · ${POICategory[p.category]} (在 ${p.occupancy}/${p.capacity})${stk}`; }).join('\n') : '  · 用途なし';
-    return `🏢 建物 #${b.id}  [${cat}]\n階数 ${b.floors}F   間口 ${b.width.toFixed(0)}×${b.depth.toFixed(0)} m\n在館 ${occ} / 収容 ${cap}\n─────────────\n入居用途:\n${uses}`;
+    const dev = `地価 ${b.landValue.toFixed(2)}  開発強度 ${b.developmentIntensity.toFixed(2)}\n敷地 ${b.siteArea.toFixed(0)}m²  統合Parcel ${b.parcelCount}\n建ぺい率 ${(b.coverageRatio * 100).toFixed(0)}%  容積率 ${(b.floorAreaRatio * 100).toFixed(0)}%`;
+    return `🏢 建物 #${b.id}  [${cat}]${facilityText}\n階数 ${b.floors}F   間口 ${b.width.toFixed(0)}×${b.depth.toFixed(0)} m\n${dev}\n在館 ${occ} / 収容 ${cap}\n─────────────\n入居用途:\n${uses}`;
   }
 }
