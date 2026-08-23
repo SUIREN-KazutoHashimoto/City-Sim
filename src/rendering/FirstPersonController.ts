@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 
 export interface CameraFollowTarget {
-  kind: 'agent' | 'vehicle';
+  kind: 'agent' | 'vehicle' | 'train';
   id: number;
   position: THREE.Vector3;
-  /** TrafficSystemと同じ +X基準のrad。vehicle追跡時のみ使用。 */
+  /** Traffic/Railと同じ +X基準のrad。vehicle/train追跡時に使用。 */
   heading?: number;
   length?: number;
   firstPersonHeight?: number;
@@ -29,9 +29,9 @@ export class FirstPersonController {
     window.addEventListener('mouseup', (e) => { if (e.button === 0) this.dragging = false; });
     document.addEventListener('mousemove', (e) => {
       if (!this.dragging) return;
-      if (this.followTarget?.kind === 'vehicle') {
-        if (this.vehicleFirstPerson) return;
-        // 通常視点と同じドラッグ感になるよう、vehicle orbitではX移動を正方向へ反映する。
+      if (this.followTarget?.kind === 'vehicle' || this.followTarget?.kind === 'train') {
+        if (this.followTarget.kind === 'vehicle' && this.vehicleFirstPerson) return;
+        // heading追従orbitは通常視点と同じドラッグ感にする。
         this.followYawOffset += e.movementX * this.lookSensitivity;
         this.followPitch -= e.movementY * this.lookSensitivity;
         this.followPitch = THREE.MathUtils.clamp(this.followPitch, -0.12, 1.25);
@@ -66,6 +66,7 @@ export class FirstPersonController {
 
   get isFollowing(): boolean { return this.followTarget !== null; }
   get isFollowingVehicle(): boolean { return this.followTarget?.kind === 'vehicle'; }
+  get isFollowingTrain(): boolean { return this.followTarget?.kind === 'train'; }
   get isVehicleFirstPerson(): boolean { return this.isFollowingVehicle && this.vehicleFirstPerson; }
 
   toggleVehicleView(): boolean {
@@ -76,9 +77,9 @@ export class FirstPersonController {
   update(dt: number): void {
     if (this.followTarget) {
       const t = this.followTarget;
-      if (t.kind === 'vehicle') {
+      if (t.kind === 'vehicle' || t.kind === 'train') {
         const h = t.heading ?? 0;
-        if (this.vehicleFirstPerson) {
+        if (t.kind === 'vehicle' && this.vehicleFirstPerson) {
           const forwardOffset = Math.max(0.8, (t.length ?? 4.5) * 0.36);
           this.camera.position.set(
             t.position.x + Math.cos(h) * forwardOffset,
@@ -97,7 +98,7 @@ export class FirstPersonController {
           t.position.y + Math.sin(this.followPitch) * d + 1.2,
           t.position.z - Math.sin(orbitHeading) * cp * d,
         );
-        this.camera.lookAt(t.position.x, t.position.y + 1.0, t.position.z);
+        this.camera.lookAt(t.position.x, t.position.y + (t.kind === 'train' ? 0.8 : 1.0), t.position.z);
         return;
       }
 
