@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RailRenderer } from './RailRenderer';
 import './RailStationOperationsTuning';
+import './RailSpurConsistency';
 
 type AnyRail = Record<string, any>;
 type AnyRun = Record<string, any>;
