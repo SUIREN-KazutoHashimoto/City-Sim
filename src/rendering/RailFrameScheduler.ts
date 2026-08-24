@@ -1,6 +1,9 @@
 import { RailRenderer } from './RailRenderer';
 import { installExternalRailConnection } from './ExternalRailConnection';
 import { installRailInterlockingSafety } from './RailInterlockingSafety';
+import { installRailLeftHandRuntime, prepareRailLeftHandTraffic } from './RailLeftHandTraffic';
+
+prepareRailLeftHandTraffic();
 
 interface RailRuntimeInternals {
   stepOperations: (dt: number) => void;
@@ -48,9 +51,11 @@ export class RailFrameScheduler {
   private pendingSeconds = 0;
 
   constructor(renderer: RailRenderer) {
-    // City-rail safety owns only the existing network. The external high-speed line is installed
-    // afterwards and advances from the same completed rail time without joining city blocks/routes.
+    // City-rail safety owns only the existing network. Re-apply the Japanese left-hand running
+    // convention after the safety layer replaces route-planning methods, then install the external
+    // high-speed line which follows the same physical left-hand convention.
     installRailInterlockingSafety(renderer);
+    installRailLeftHandRuntime(renderer);
     installExternalRailConnection(renderer);
     this.runtime = renderer as unknown as RailRuntimeInternals;
   }
