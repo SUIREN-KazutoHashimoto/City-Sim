@@ -22,17 +22,24 @@ const MAIN_OFFSET = 1.72;
 const SIDING_OFFSET = 10.0;
 const TRAIN_HALF_WIDTH = 1.50;
 const PLATFORM_CLEARANCE = 0.48;
-const ROOF_CENTER_HEIGHT = 5.45;
-const ROOF_UNDERSIDE_HEIGHT = 5.34;
+const PLATFORM_TOP_HEIGHT = 1.05;
+const PLATFORM_SLAB_THICKNESS = 0.56;
+const PLATFORM_SLAB_CENTER_HEIGHT = PLATFORM_TOP_HEIGHT - PLATFORM_SLAB_THICKNESS * 0.5;
+const ROOF_CENTER_HEIGHT = 4.45;
+const ROOF_THICKNESS = 0.18;
+const ROOF_UNDERSIDE_HEIGHT = ROOF_CENTER_HEIGHT - ROOF_THICKNESS * 0.5;
 const TERMINAL_MIN_LENGTH = 270;
+const LEGACY_PLATFORM_COLOR = 0xc9c7bf;
+const LEGACY_ROOF_COLOR = 0x6f7d88;
 
 const proto = RailRenderer.prototype as unknown as AnyRail;
 const previousBuildStations = proto.buildStations as () => void;
 const previousUpdateTrainMeshes = proto.updateTrainMeshes as () => void;
 
-function platformWidth(kind: RailStationKind, terminal: boolean): number {
-  if (terminal) return 4.4;
-  return kind === RailStationKind.Central || kind === RailStationKind.SubCenter ? 4.2 : 3.8;
+function platformWidth(kind: RailStationKind, terminal: boolean, island: boolean): number {
+  if (terminal) return 4.8;
+  const base = kind === RailStationKind.Central || kind === RailStationKind.SubCenter ? 4.2 : 3.8;
+  return base + (island ? 0.2 : 0.4);
 }
 
 function geometryCenter(smooth: AnySmooth, stationIndex: number, length: number, terminal: boolean): number {
@@ -50,11 +57,12 @@ function platformSpecs(self: AnyRail, line: AnyRail, stationId: number, stationI
   const terminal = station.kind === RailStationKind.Terminal && (stationIndex === 0 || stationIndex === line.stationIds.length - 1);
   const length = terminal ? Math.max(TERMINAL_MIN_LENGTH, rawLength) : rawLength;
   const center = geometryCenter(smooth, stationIndex, length, terminal);
-  const width = platformWidth(station.kind as RailStationKind, terminal);
+  const island = line.kind === 'trunk' && self.lineStationHasPassingLoop(line.id, stationIndex);
+  const width = platformWidth(station.kind as RailStationKind, terminal, island);
 
-  if (line.kind === 'trunk' && self.lineStationHasPassingLoop(line.id, stationIndex)) {
-    const island = (MAIN_OFFSET + SIDING_OFFSET) * 0.5;
-    return [-island, island].map((offset) => ({ stationId, stationIndex, lineId: line.id, center, length, offset, width, y, terminal }));
+  if (island) {
+    const islandOffset = (MAIN_OFFSET + SIDING_OFFSET) * 0.5;
+    return [-islandOffset, islandOffset].map((offset) => ({ stationId, stationIndex, lineId: line.id, center, length, offset, width, y, terminal }));
   }
 
   if (line.kind === 'trunk') {
@@ -68,9 +76,21 @@ function platformSpecs(self: AnyRail, line: AnyRail, stationId: number, stationI
   return [{ stationId, stationIndex, lineId: line.id, center, length, offset, width, y, terminal }];
 }
 
-function pushRange(
+function stationPoint(self: AnyRail, smooth: AnySmooth, spec: PlatformSpec, distance: number, offset: number): { x: number; z: number; heading: number } | null {
+  const anchor = self.sampleSmooth(smooth, spec.center) as { x: number; z: number; heading: number } | null;
+  if (!anchor) return null;
+  const along = distance - spec.center;
+  return {
+    x: anchor.x + Math.cos(anchor.heading) * along - Math.sin(anchor.heading) * offset,
+    z: anchor.z + Math.sin(anchor.heading) * along + Math.cos(anchor.heading) * offset,
+    heading: anchor.heading,
+  };
+}
+
+function pushStationRange(
   self: AnyRail,
   smooth: AnySmooth,
+  spec: PlatformSpec,
   distanceStart: number,
   distanceEnd: number,
   offset: number,
@@ -83,8 +103,8 @@ function pushRange(
   if (distanceEnd - distanceStart < 0.5) return;
   for (let s = distanceStart; s < distanceEnd - 0.01; s += step) {
     const e = Math.min(distanceEnd, s + step);
-    const a = self.offsetPoint(smooth, s, offset) as { x: number; z: number } | null;
-    const b = self.offsetPoint(smooth, e, offset) as { x: number; z: number } | null;
+    const a = stationPoint(self, smooth, spec, s, offset);
+    const b = stationPoint(self, smooth, spec, e, offset);
     if (a && b) self.pushRibbonSegment(a, b, y, height, width, parts);
   }
 }
@@ -93,7 +113,7 @@ function buildPlatformDetails(
   self: AnyRail,
   smooth: AnySmooth,
   spec: PlatformSpec,
-  terminalSlabs: StaticPart[],
+  platformSlabs: StaticPart[],
   roofs: StaticPart[],
   pillars: StaticPart[],
   seats: StaticPart[],
@@ -106,42 +126,44 @@ function buildPlatformDetails(
   const end = Math.min(smooth.length, spec.center + spec.length * 0.5);
   if (end - start < 8) return;
 
-  if (spec.terminal) pushRange(self, smooth, start, end, spec.offset, spec.y + 0.38, 0.38, spec.width, terminalSlabs);
+  pushStationRange(self, smooth, spec, start, end, spec.offset, spec.y + PLATFORM_SLAB_CENTER_HEIGHT, PLATFORM_SLAB_THICKNESS, spec.width, platformSlabs);
 
   const canopyStart = start + 8;
   const canopyEnd = end - 8;
-  pushRange(self, smooth, canopyStart, canopyEnd, spec.offset, spec.y + ROOF_CENTER_HEIGHT, 0.18, spec.width * 0.94, roofs, 7.2);
+  pushStationRange(self, smooth, spec, canopyStart, canopyEnd, spec.offset, spec.y + ROOF_CENTER_HEIGHT, ROOF_THICKNESS, spec.width * 0.94, roofs);
 
+  const pillarHeight = ROOF_UNDERSIDE_HEIGHT - PLATFORM_TOP_HEIGHT;
+  const pillarCenter = PLATFORM_TOP_HEIGHT + pillarHeight * 0.5;
   for (let s = canopyStart + 4; s <= canopyEnd - 4; s += 12) {
-    const p = self.offsetPoint(smooth, s, spec.offset) as { x: number; z: number; heading: number } | null;
+    const p = stationPoint(self, smooth, spec, s, spec.offset);
     if (!p) continue;
-    pillars.push({ matrix: self.matrix(p.x, spec.y + 2.92, p.z, 0.18, 4.70, 0.18) });
-    fluorescent.push({ matrix: self.matrix(p.x, spec.y + ROOF_UNDERSIDE_HEIGHT, p.z, 2.45, 0.075, 0.22, -p.heading) });
+    pillars.push({ matrix: self.matrix(p.x, spec.y + pillarCenter, p.z, 0.18, pillarHeight, 0.18) });
+    fluorescent.push({ matrix: self.matrix(p.x, spec.y + ROOF_UNDERSIDE_HEIGHT - 0.055, p.z, 2.15, 0.07, 0.20, -p.heading) });
   }
 
   const side = spec.offset >= 0 ? 1 : -1;
   for (let s = start + 28; s <= end - 28; s += 48) {
     if (Math.abs(s - spec.center) < 15) continue;
     const seatOffset = spec.offset + side * Math.min(0.72, spec.width * 0.18);
-    const p = self.offsetPoint(smooth, s, seatOffset) as { x: number; z: number; heading: number } | null;
+    const p = stationPoint(self, smooth, spec, s, seatOffset);
     if (!p) continue;
-    seats.push({ matrix: self.matrix(p.x, spec.y + 0.88, p.z, 2.35, 0.18, 0.62, -p.heading) });
-    const back = self.offsetPoint(smooth, s, seatOffset + side * 0.25) as { x: number; z: number; heading: number } | null;
-    if (back) backs.push({ matrix: self.matrix(back.x, spec.y + 1.20, back.z, 2.35, 0.72, 0.13, -back.heading) });
+    seats.push({ matrix: self.matrix(p.x, spec.y + 1.35, p.z, 2.35, 0.18, 0.62, -p.heading) });
+    const back = stationPoint(self, smooth, spec, s, seatOffset + side * 0.25);
+    if (back) backs.push({ matrix: self.matrix(back.x, spec.y + 1.68, back.z, 2.35, 0.72, 0.13, -back.heading) });
   }
 
   for (const s of [spec.center - spec.length * 0.22, spec.center + spec.length * 0.22]) {
     if (s <= start + 5 || s >= end - 5) continue;
     const machineOffset = spec.offset - side * Math.min(0.75, spec.width * 0.20);
-    const p = self.offsetPoint(smooth, s, machineOffset) as { x: number; z: number; heading: number } | null;
+    const p = stationPoint(self, smooth, spec, s, machineOffset);
     if (!p) continue;
-    vending.push({ matrix: self.matrix(p.x, spec.y + 1.48, p.z, 0.92, 1.82, 0.78, -p.heading) });
-    const front = self.offsetPoint(smooth, s + 0.02, machineOffset - side * 0.40) as { x: number; z: number; heading: number } | null;
-    if (front) vendingFronts.push({ matrix: self.matrix(front.x, spec.y + 1.52, front.z, 0.76, 1.45, 0.055, -front.heading) });
+    vending.push({ matrix: self.matrix(p.x, spec.y + 1.96, p.z, 0.92, 1.82, 0.78, -p.heading) });
+    const front = stationPoint(self, smooth, spec, s + 0.02, machineOffset - side * 0.40);
+    if (front) vendingFronts.push({ matrix: self.matrix(front.x, spec.y + 1.96, front.z, 0.76, 1.45, 0.055, -front.heading) });
   }
 }
 
-function wallOffsets(self: AnyRail, line: AnyRail, stationId: number, stationIndex: number, center: number, width: number): number[] {
+function wallOffsets(self: AnyRail, line: AnyRail, stationIndex: number, center: number, width: number): number[] {
   if (line.kind !== 'trunk') {
     const smooth = self.smoothLines.get(line.id) as AnySmooth | undefined;
     if (!smooth) return [];
@@ -173,14 +195,35 @@ function buildOuterShell(
   const start = Math.max(0, spec.center - spec.length * 0.5 + 8);
   const end = Math.min(smooth.length, spec.center + spec.length * 0.5 - 8);
   for (const offset of offsets) {
-    pushRange(self, smooth, start, end, offset, spec.y + 1.35, 1.55, 0.18, lowerWalls, 7.2);
-    pushRange(self, smooth, start, end, offset, spec.y + 3.46, 2.35, 0.12, glass, 7.2);
-    pushRange(self, smooth, start, end, offset, spec.y + 5.00, 0.34, 0.24, fascia, 7.2);
+    pushStationRange(self, smooth, spec, start, end, offset, spec.y + 1.80, 1.50, 0.18, lowerWalls);
+    pushStationRange(self, smooth, spec, start, end, offset, spec.y + 3.35, 1.60, 0.12, glass);
+    pushStationRange(self, smooth, spec, start, end, offset, spec.y + 4.24, 0.24, 0.24, fascia);
+  }
+}
+
+function materialColor(material: THREE.Material): number | null {
+  const color = (material as THREE.Material & { color?: THREE.Color }).color;
+  return color ? color.getHex() : null;
+}
+
+function withoutLegacyPlatformAndRoof(self: AnyRail, build: () => void): void {
+  const hadOwn = Object.prototype.hasOwnProperty.call(self, 'addStatic');
+  const previous = self.addStatic as (...args: any[]) => any;
+  self.addStatic = function filteredAddStatic(this: AnyRail, geometry: THREE.BufferGeometry, material: THREE.Material, parts: StaticPart[]): any {
+    const color = materialColor(material);
+    if (color === LEGACY_PLATFORM_COLOR || color === LEGACY_ROOF_COLOR) return null;
+    return previous.call(this, geometry, material, parts);
+  };
+  try {
+    build();
+  } finally {
+    if (hadOwn) self.addStatic = previous;
+    else delete self.addStatic;
   }
 }
 
 function buildStationArchitecture(self: AnyRail): void {
-  const terminalSlabs: StaticPart[] = [];
+  const platformSlabs: StaticPart[] = [];
   const roofs: StaticPart[] = [], pillars: StaticPart[] = [];
   const lowerWalls: StaticPart[] = [], glass: StaticPart[] = [], fascia: StaticPart[] = [];
   const seats: StaticPart[] = [], backs: StaticPart[] = [];
@@ -202,15 +245,15 @@ function buildStationArchitecture(self: AnyRail): void {
       if (!specs.length) continue;
 
       for (const spec of specs) {
-        buildPlatformDetails(self, smooth, spec, terminalSlabs, roofs, pillars, seats, backs, vending, vendingFronts, fluorescent);
+        buildPlatformDetails(self, smooth, spec, platformSlabs, roofs, pillars, seats, backs, vending, vendingFronts, fluorescent);
       }
-      buildOuterShell(self, smooth, specs[0], wallOffsets(self, line, stationId, i, specs[0].center, specs[0].width), lowerWalls, glass, fascia);
+      buildOuterShell(self, smooth, specs[0], wallOffsets(self, line, i, specs[0].center, specs[0].width), lowerWalls, glass, fascia);
 
       if (!lightStations.has(stationId) && station.kind !== RailStationKind.Local) {
-        const p = self.sampleSmooth(smooth, specs[0].center) as { x: number; z: number } | null;
+        const p = stationPoint(self, smooth, specs[0], specs[0].center, 0);
         if (p) {
-          const light = new THREE.PointLight(0xf5f8ff, 0, 68, 2.0);
-          light.position.set(p.x, y + 5.05, p.z);
+          const light = new THREE.PointLight(0xf5f8ff, 0, 62, 2.0);
+          light.position.set(p.x, y + 4.10, p.z);
           light.castShadow = false;
           self.scene.add(light);
           lights.push(light);
@@ -221,7 +264,7 @@ function buildStationArchitecture(self: AnyRail): void {
   }
 
   const box = new THREE.BoxGeometry(1, 1, 1);
-  self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0xc9c7bf, roughness: 0.86 }), terminalSlabs);
+  self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0xc9c7bf, roughness: 0.86 }), platformSlabs);
   self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0x697984, roughness: 0.52, metalness: 0.20 }), roofs);
   self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0x626d74, roughness: 0.65, metalness: 0.18 }), pillars);
   self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0x66727b, roughness: 0.82, metalness: 0.08 }), lowerWalls);
@@ -233,11 +276,11 @@ function buildStationArchitecture(self: AnyRail): void {
   self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0x5bb4e6, roughness: 0.28, emissive: 0x163b54, emissiveIntensity: 1.2 }), vendingFronts);
   self.addStatic(box, new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2, emissive: 0xf3f8ff, emissiveIntensity: 2.4 }), fluorescent);
 
-  self.__citySimStationLightsV030 = lights;
+  self.__citySimStationLightsV032 = lights;
 }
 
 function updateStationLights(self: AnyRail): void {
-  const lights = self.__citySimStationLightsV030 as THREE.PointLight[] | undefined;
+  const lights = self.__citySimStationLightsV032 as THREE.PointLight[] | undefined;
   if (!lights?.length) return;
   const t = ((self.railTime as number) % 86400 + 86400) % 86400;
   const hour = t / 3600;
@@ -248,7 +291,7 @@ function updateStationLights(self: AnyRail): void {
 }
 
 proto.buildStations = function buildStationsWithArchitecture(this: AnyRail): void {
-  previousBuildStations.call(this);
+  withoutLegacyPlatformAndRoof(this, () => previousBuildStations.call(this));
   buildStationArchitecture(this);
 };
 

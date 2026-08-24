@@ -7,10 +7,9 @@ type TrainService = 'local' | 'rapid' | 'limited';
 type TrainState = 'depot' | 'dwell' | 'running' | 'signal' | 'schedule';
 type TrackLane = -1 | 0 | 1;
 
-interface PointXZ { x: number; z: number; }
-interface RailLineLike { id: number; kind: 'trunk' | 'spur'; stationIds: number[]; path?: PointXZ[]; }
+interface RailLineLike { id: number; kind: 'trunk' | 'spur'; stationIds: number[]; }
 interface StationLike { id: number; x: number; z: number; kind: RailStationKind; }
-interface SmoothLineLike { line: RailLineLike; path: PointXZ[]; length: number; stationDistances: number[]; }
+interface SmoothLineLike { line: RailLineLike; length: number; stationDistances: number[]; }
 interface TrainRunLike {
   id: number;
   lineId: number;
@@ -48,7 +47,6 @@ interface RailRuntime {
   laneTransitionActive: (run: TrainRunLike) => boolean;
   platformLength: (stationId: number) => number;
   stationDistanceForRun: (run: TrainRunLike, smooth: SmoothLineLike, stationIndex: number) => number;
-  sharedStationSafePath: (line: RailLineLike) => PointXZ[];
   buildPlatformRibbon: (
     smooth: SmoothLineLike, center: number, length: number, offset: number, width: number, includeSign: boolean, y: number,
     platforms: StaticPartLike[], roofs: StaticPartLike[], signs: StaticPartLike[], columns: StaticPartLike[], stairs: StaticPartLike[],
@@ -62,7 +60,7 @@ interface RailRuntime {
   parkInDepot: (run: TrainRunLike, terminalIndex: number) => void;
   trackSpeedLimit: (run: TrainRunLike, smooth: SmoothLineLike, distance: number) => number;
 }
-interface RailPrototype extends Partial<RailRuntime> { __citySimStationOpsV031?: boolean; }
+interface RailPrototype extends Partial<RailRuntime> { __citySimStationOpsV032?: boolean; }
 interface RailConstructorMutable { SIDING_OFFSET: number; TURNOUT_SPEED: number; SIDING_SPEED: number; }
 
 const TERMINAL_PLATFORM_LENGTH = 270;
@@ -72,10 +70,6 @@ const SIDING_SPEED = 70 / 3.6;
 const APPROACH_BRAKE = 4.2 / 3.6;
 const TURNOUT_APPROACH_OFFSET = 48;
 const APPROACH_MARGIN = 6;
-const STATION_STRAIGHTEN_SPAN = 108;
-const STATION_CHORD_MAX_OFFSET = 86;
-
-function dist(a: PointXZ, b: PointXZ): number { return Math.hypot(a.x - b.x, a.z - b.z); }
 
 function terminalIndex(rt: RailRuntime, run: TrainRunLike, stationIndex: number): boolean {
   const line = rt.rail.lines[run.lineId];
@@ -83,49 +77,6 @@ function terminalIndex(rt: RailRuntime, run: TrainRunLike, stationIndex: number)
   const stationId = line.stationIds[stationIndex] ?? -1;
   return stationId >= 0 && rt.rail.stations[stationId]?.kind === RailStationKind.Terminal
     && (stationIndex === 0 || stationIndex === line.stationIds.length - 1);
-}
-
-function projectToSegment(point: PointXZ, a: PointXZ, b: PointXZ): PointXZ | null {
-  const dx = b.x - a.x, dz = b.z - a.z, len2 = dx * dx + dz * dz;
-  if (len2 < 1) return null;
-  const t = THREE.MathUtils.clamp(((point.x - a.x) * dx + (point.z - a.z) * dz) / len2, 0.12, 0.88);
-  return { x: a.x + dx * t, z: a.z + dz * t };
-}
-
-/**
- * Stations sit inside a reserved civic/open-space envelope, so the station approach does not need to
- * follow every road-node kink. Replace roughly 100 m on each side of a non-terminal station with one
- * straight chord, while retaining the road-aligned route outside the station area.
- */
-function straightenStationApproaches(rt: RailRuntime, line: RailLineLike, input: PointXZ[]): PointXZ[] {
-  if (input.length < 5) return input.map((p) => ({ x: p.x, z: p.z }));
-  const out = input.map((p) => ({ x: p.x, z: p.z }));
-
-  for (const stationId of line.stationIds) {
-    const station = rt.rail.stations[stationId];
-    if (!station || station.kind === RailStationKind.Terminal || out.length < 5) continue;
-
-    let nearest = 1, nearestD = Infinity;
-    for (let i = 1; i < out.length - 1; i++) {
-      const d = (out[i].x - station.x) ** 2 + (out[i].z - station.z) ** 2;
-      if (d < nearestD) { nearestD = d; nearest = i; }
-    }
-
-    let left = nearest, travelled = 0;
-    while (left > 0 && travelled < STATION_STRAIGHTEN_SPAN) {
-      travelled += dist(out[left], out[left - 1]); left--;
-    }
-    let right = nearest; travelled = 0;
-    while (right < out.length - 1 && travelled < STATION_STRAIGHTEN_SPAN) {
-      travelled += dist(out[right], out[right + 1]); right++;
-    }
-    if (left >= nearest || right <= nearest || right - left < 2) continue;
-
-    const projected = projectToSegment(station, out[left], out[right]);
-    if (!projected || dist(projected, station) > STATION_CHORD_MAX_OFFSET) continue;
-    out.splice(left + 1, right - left - 1, projected);
-  }
-  return out;
 }
 
 function movePartY(parts: StaticPartLike[], start: number, delta: number): void {
@@ -163,8 +114,8 @@ function correctedPassingLoopLimit(
 /** Prepare station geometry, approach speed and non-revenue depot operation before RailRenderer.build(). */
 export function prepareRailStationOperationsTuning(): void {
   const proto = RailRenderer.prototype as unknown as RailPrototype;
-  if (proto.__citySimStationOpsV031) return;
-  proto.__citySimStationOpsV031 = true;
+  if (proto.__citySimStationOpsV032) return;
+  proto.__citySimStationOpsV032 = true;
 
   const ctor = RailRenderer as unknown as RailConstructorMutable;
   ctor.SIDING_OFFSET = SIDING_OFFSET;
@@ -190,15 +141,11 @@ export function prepareRailStationOperationsTuning(): void {
     };
   }
 
-  const baseSafePath = proto.sharedStationSafePath;
-  if (baseSafePath) {
-    proto.sharedStationSafePath = function (this: RailRuntime, line: RailLineLike): PointXZ[] {
-      return straightenStationApproaches(this, line, baseSafePath.call(this, line));
-    };
-  }
+  // Never straighten or pull the running path toward a station. The line geometry must remain on the
+  // road corridor; RailStationArchitecture independently renders a straight station shell/platform.
 
-  // RailStationArchitecture now owns the canopy. Keep the legacy platform slab/columns/sign path,
-  // but drop its old canopy pieces so old and new roof-generation rules cannot overlap.
+  // RailStationArchitecture owns the canopy and visible platform slab. Keep access/sign/column logic
+  // from the legacy ribbon, but discard the legacy canopy pieces so the two roof systems cannot overlap.
   const basePlatformRibbon = proto.buildPlatformRibbon;
   if (basePlatformRibbon) {
     proto.buildPlatformRibbon = function (
@@ -209,7 +156,7 @@ export function prepareRailStationOperationsTuning(): void {
       const roofStart = roofs.length, signStart = signs.length;
       basePlatformRibbon.call(this, smooth, center, length, offset, width, includeSign, y, platforms, roofs, signs, columns, stairs);
       roofs.splice(roofStart);
-      movePartY(signs, signStart, 0.55);
+      movePartY(signs, signStart, 0.20);
     };
   }
 

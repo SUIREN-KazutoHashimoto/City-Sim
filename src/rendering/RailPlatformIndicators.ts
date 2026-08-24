@@ -88,47 +88,47 @@ interface HsrBoard extends BoardVisual {
 const MAIN_OFFSET = 1.72;
 const SIDING_OFFSET = 10.0;
 const HSR_TRACK_OFFSET = 2.4;
-const BOARD_CENTER_HEIGHT = 3.82;
-const BOARD_ALONG_SHIFT = 18;
+const BOARD_CENTER_HEIGHT = 3.72;
+const BOARD_ALONG_SHIFT = 16;
 const BOARD_REFRESH_SECONDS = 1;
 
-/** Physical platform display: ceiling-hung metal housing with two live display faces. */
+/** Very small ceiling-hung departure display, mounted perpendicular to the platform axis. */
 function boardVisual(scene: THREE.Scene, heading: number): BoardVisual {
   const canvas = document.createElement('canvas');
-  canvas.width = 768;
-  canvas.height = 288;
+  canvas.width = 512;
+  canvas.height = 192;
   const texture = new THREE.CanvasTexture(canvas);
   texture.minFilter = THREE.LinearFilter;
   texture.magFilter = THREE.LinearFilter;
   texture.colorSpace = THREE.SRGBColorSpace;
 
   const group = new THREE.Group();
-  group.rotation.y = -heading;
+  group.rotation.y = -heading + Math.PI / 2;
 
   const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x22272d, roughness: 0.58, metalness: 0.55 });
-  const frame = new THREE.Mesh(new THREE.BoxGeometry(6.80, 2.55, 0.22), frameMaterial);
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(2.40, 0.78, 0.16), frameMaterial);
   frame.castShadow = true;
   group.add(frame);
 
   const displayMaterial = new THREE.MeshBasicMaterial({ map: texture, toneMapped: false });
-  const front = new THREE.Mesh(new THREE.PlaneGeometry(6.42, 2.17), displayMaterial);
-  front.position.z = 0.116;
+  const front = new THREE.Mesh(new THREE.PlaneGeometry(2.22, 0.64), displayMaterial);
+  front.position.z = 0.086;
   group.add(front);
 
-  const back = new THREE.Mesh(new THREE.PlaneGeometry(6.42, 2.17), displayMaterial.clone());
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(2.22, 0.64), displayMaterial.clone());
   back.rotation.y = Math.PI;
-  back.position.z = -0.116;
+  back.position.z = -0.086;
   group.add(back);
 
   const hangerMaterial = new THREE.MeshStandardMaterial({ color: 0x4a4f55, roughness: 0.52, metalness: 0.62 });
-  for (const x of [-2.76, 2.76]) {
-    const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.52, 0.12), hangerMaterial);
-    hanger.position.set(x, 1.48, 0);
+  for (const x of [-0.88, 0.88]) {
+    const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.26, 0.09), hangerMaterial);
+    hanger.position.set(x, 0.52, 0);
     hanger.castShadow = true;
     group.add(hanger);
   }
-  const ceilingBar = new THREE.Mesh(new THREE.BoxGeometry(6.00, 0.12, 0.16), hangerMaterial.clone());
-  ceilingBar.position.set(0, 1.73, 0);
+  const ceilingBar = new THREE.Mesh(new THREE.BoxGeometry(1.92, 0.09, 0.12), hangerMaterial.clone());
+  ceilingBar.position.set(0, 0.66, 0);
   ceilingBar.castShadow = true;
   group.add(ceilingBar);
 
@@ -166,58 +166,55 @@ function drawBoard(
   ctx.fillStyle = '#050708';
   ctx.fillRect(0, 0, board.canvas.width, board.canvas.height);
   ctx.strokeStyle = '#596068';
-  ctx.lineWidth = 8;
-  ctx.strokeRect(4, 4, board.canvas.width - 8, board.canvas.height - 8);
+  ctx.lineWidth = 6;
+  ctx.strokeRect(3, 3, board.canvas.width - 6, board.canvas.height - 6);
 
   const stateColor = state === '接近' ? '#ffb020' : state === '停車中' ? '#54f070' : state === '発車' ? '#55c8ff' : '#98a1aa';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#f0f4f7';
-  ctx.font = '700 31px ui-monospace, sans-serif';
-  ctx.fillText(`${board.trackNo}番線`, 24, 38);
-  ctx.fillStyle = '#aab4bd';
-  ctx.font = '600 22px ui-monospace, sans-serif';
-  ctx.fillText('発車案内', 180, 38);
+  ctx.font = '700 22px ui-monospace, sans-serif';
+  ctx.fillText(`${board.trackNo}番線`, 16, 24);
   ctx.fillStyle = stateColor;
-  ctx.font = '700 27px ui-monospace, sans-serif';
+  ctx.font = '700 20px ui-monospace, sans-serif';
   ctx.textAlign = 'right';
-  ctx.fillText(state, 742, 38);
+  ctx.fillText(state, 494, 24);
   ctx.textAlign = 'left';
 
   ctx.strokeStyle = '#30363c';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(18, 68);
-  ctx.lineTo(750, 68);
+  ctx.moveTo(12, 43);
+  ctx.lineTo(500, 43);
   ctx.stroke();
 
-  const rowHeight = 68;
+  const rowHeight = 46;
   for (let i = 0; i < 3; i++) {
-    const y = 101 + i * rowHeight;
+    const y = 66 + i * rowHeight;
     if (i > 0) {
       ctx.strokeStyle = '#20262b';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(18, y - 34);
-      ctx.lineTo(750, y - 34);
+      ctx.moveTo(12, y - 23);
+      ctx.lineTo(500, y - 23);
       ctx.stroke();
     }
     const row = rows[i];
     if (!row) {
       ctx.fillStyle = '#535b63';
-      ctx.font = '600 28px ui-monospace, sans-serif';
-      ctx.fillText('--:--', 24, y);
-      ctx.fillText('---', 160, y);
+      ctx.font = '600 18px ui-monospace, sans-serif';
+      ctx.fillText('--:--', 16, y);
+      ctx.fillText('---', 118, y);
       continue;
     }
     ctx.fillStyle = '#ffd65a';
-    ctx.font = '700 32px ui-monospace, sans-serif';
-    ctx.fillText(formatBoardTime(row.time), 24, y);
+    ctx.font = '700 20px ui-monospace, sans-serif';
+    ctx.fillText(formatBoardTime(row.time), 16, y);
     ctx.fillStyle = serviceColor(row.service);
-    ctx.font = '700 29px ui-monospace, sans-serif';
-    ctx.fillText(serviceLabel(row.service), 160, y);
+    ctx.font = '700 19px ui-monospace, sans-serif';
+    ctx.fillText(serviceLabel(row.service), 118, y);
     ctx.fillStyle = '#e7edf2';
-    ctx.font = '600 28px ui-monospace, sans-serif';
-    ctx.fillText(row.destination, 286, y);
+    ctx.font = '600 18px ui-monospace, sans-serif';
+    ctx.fillText(row.destination, 188, y);
   }
   board.texture.needsUpdate = true;
 }
@@ -308,6 +305,14 @@ function cityBoardState(rt: CityRuntime, board: CityBoard): BoardState {
   return departing ? '発車' : approaching ? '接近' : '待機';
 }
 
+function platformCenterOffset(rt: CityRuntime, line: RailLineLike, stationIndex: number, spec: { trackOffset: number }): number {
+  const side = spec.trackOffset >= 0 ? 1 : -1;
+  if (line.kind === 'trunk' && rt.lineStationHasPassingLoop(line.id, stationIndex)) {
+    return side * ((MAIN_OFFSET + SIDING_OFFSET) * 0.5);
+  }
+  return spec.trackOffset + side * 4.10;
+}
+
 function buildCityBoards(rt: CityRuntime): CityBoard[] {
   const boards: CityBoard[] = [];
   const trackCounter = new Map<number, number>();
@@ -317,7 +322,7 @@ function buildCityBoards(rt: CityRuntime): CityBoard[] {
     for (let stationIndex = 0; stationIndex < line.stationIds.length; stationIndex++) {
       const stationId = line.stationIds[stationIndex];
       const center = smooth.stationDistances[stationIndex] ?? 0;
-      const boardDistance = THREE.MathUtils.clamp(center + (stationIndex % 2 === 0 ? BOARD_ALONG_SHIFT : -BOARD_ALONG_SHIFT), 0, smooth.length);
+      const baseShift = stationIndex % 2 === 0 ? BOARD_ALONG_SHIFT : -BOARD_ALONG_SHIFT;
       const specs: Array<{ lane: TrackLane; mode: TrackMode; trackOffset: number }> = [];
       if (line.kind === 'trunk') {
         specs.push({ lane: -1, mode: 'main', trackOffset: -MAIN_OFFSET });
@@ -331,12 +336,18 @@ function buildCityBoards(rt: CityRuntime): CityBoard[] {
       }
 
       for (const spec of specs) {
-        const p = rt.sampleSmooth(smooth, boardDistance);
+        const modeShift = spec.mode === 'siding' ? 5 : -5;
+        const boardDistance = THREE.MathUtils.clamp(center + baseShift + modeShift, 0, smooth.length);
+        const p = rt.sampleSmooth(smooth, center);
         if (!p) continue;
-        const side = spec.trackOffset >= 0 ? 1 : -1;
-        const boardOffset = spec.trackOffset + side * 4.0;
+        const along = boardDistance - center;
+        const boardOffset = platformCenterOffset(rt, line, stationIndex, spec);
         const visual = boardVisual(rt.scene, p.heading);
-        visual.group.position.set(p.x - Math.sin(p.heading) * boardOffset, rt.lineTrackY(line.id) + BOARD_CENTER_HEIGHT, p.z + Math.cos(p.heading) * boardOffset);
+        visual.group.position.set(
+          p.x + Math.cos(p.heading) * along - Math.sin(p.heading) * boardOffset,
+          rt.lineTrackY(line.id) + BOARD_CENTER_HEIGHT,
+          p.z + Math.sin(p.heading) * along + Math.cos(p.heading) * boardOffset,
+        );
         const trackNo = (trackCounter.get(stationId) ?? 0) + 1;
         trackCounter.set(stationId, trackNo);
         const board: CityBoard = { ...visual, stationId, lineId: line.id, stationIndex, lane: spec.lane, mode: spec.mode, trackNo, lastSignature: '' };
@@ -375,7 +386,7 @@ function installHsrBoards(): void {
   for (const [index, direction] of ([1, -1] as const).entries()) {
     const trackOffset = direction > 0 ? HSR_TRACK_OFFSET : -HSR_TRACK_OFFSET;
     const side = trackOffset >= 0 ? 1 : -1;
-    const p = pointAt(route.centralPosition, trackOffset + side * 4.2);
+    const p = pointAt(route.centralPosition, trackOffset + side * 3.7);
     const visual = boardVisual(scene, route.heading);
     visual.group.position.set(p.x, route.trackY + BOARD_CENTER_HEIGHT, p.z);
     const board: HsrBoard = { ...visual, direction, trackNo: index + 1, lastSignature: '' };
@@ -391,11 +402,11 @@ function installHsrBoards(): void {
   source.syncMeshes();
 }
 
-/** Add one ceiling-hung live departure display per platform track. */
+/** Add one very small, perpendicular ceiling-hung live departure display per platform track. */
 export function installRailPlatformIndicators(renderer: RailRenderer): void {
-  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV031?: boolean };
-  if (rt.__citySimPlatformBoardsV031) return;
-  rt.__citySimPlatformBoardsV031 = true;
+  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV032?: boolean };
+  if (rt.__citySimPlatformBoardsV032) return;
+  rt.__citySimPlatformBoardsV032 = true;
   const boards = buildCityBoards(rt);
   const baseUpdate = rt.updateTrainMeshes.bind(rt);
   let lastRefreshBucket = -1;
