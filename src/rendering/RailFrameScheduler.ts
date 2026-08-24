@@ -20,6 +20,14 @@ export interface RailFrameProfile {
   backlogSeconds: number;
 }
 
+export interface RailFastForwardProfile {
+  operationsMs: number;
+  inputSeconds: number;
+  steps: number;
+  processedSeconds: number;
+  backlogSeconds: number;
+}
+
 /**
  * Cooperative high-speed scheduler for RailRenderer.
  *
@@ -87,6 +95,38 @@ export class RailFrameScheduler {
       steps,
       processedSeconds,
       averageStepSeconds: steps > 0 ? processedSeconds / steps : 0,
+      backlogSeconds: this.pendingSeconds,
+    };
+  }
+
+  /**
+   * Drain all completed rail time without touching meshes or issuing WebGL work. Runtime time-jump
+   * calls this alongside each renderless World batch, then the first normal frame performs one visual
+   * synchronization before rendering. Ten-second operational slices keep station/signal transitions
+   * materially finer than the scheduler's 60-second absolute high-speed cap.
+   */
+  fastForward(completedSimSeconds: number): RailFastForwardProfile {
+    const inputSeconds = Number.isFinite(completedSimSeconds) ? Math.max(0, completedSimSeconds) : 0;
+    if (inputSeconds > 0) this.pendingSeconds += inputSeconds;
+
+    const operationsStart = performance.now();
+    let steps = 0;
+    let processedSeconds = 0;
+    const maxStepSeconds = 10;
+
+    while (this.pendingSeconds > 1e-5) {
+      const stepSeconds = Math.min(maxStepSeconds, this.pendingSeconds);
+      this.runtime.stepOperations(stepSeconds);
+      this.pendingSeconds -= stepSeconds;
+      processedSeconds += stepSeconds;
+      steps++;
+    }
+
+    return {
+      operationsMs: performance.now() - operationsStart,
+      inputSeconds,
+      steps,
+      processedSeconds,
       backlogSeconds: this.pendingSeconds,
     };
   }

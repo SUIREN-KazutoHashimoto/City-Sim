@@ -26,14 +26,25 @@ export class SimulationClock {
   get speedEpoch(): number { return this._speedEpoch; }
 
   /**
-   * Set the initial world time before the runtime scheduler starts. Used by the boot pre-roll only;
+   * Discard only unprocessed scheduler target time while preserving completed simulation state.
+   * Runtime time-jump uses this after stopping the normal scheduler so old wall-time debt is not
+   * mixed into the explicitly requested jump interval.
+   */
+  clearPendingWork(): number {
+    const pending = Math.max(0, this._accumulator);
+    this._accumulator = 0;
+    this.stepDt = this.fixedStep;
+    return pending;
+  }
+
+  /**
+   * Set the initial world time before the runtime scheduler starts. Used by boot pre-roll only;
    * no completed simulation state is rewound and no runtime wall-time debt is created.
    */
   setBootstrapTime(totalSeconds: number): void {
     const next = Number.isFinite(totalSeconds) ? Math.max(0, totalSeconds) : 0;
     this._totalSeconds = next;
-    this._accumulator = 0;
-    this.stepDt = this.fixedStep;
+    this.clearPendingWork();
   }
 
   /**

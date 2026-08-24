@@ -14,7 +14,7 @@ import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
 import { reserveRailStationClearance } from './generation/RailStationClearance';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
 import { BootScreen } from './boot/BootScreen';
-import { BOOT_START_SECONDS, preRollWorld } from './boot/PreRoll';
+import { BOOT_START_SECONDS, fastForwardWorld, preRollWorld } from './boot/PreRoll';
 import { APP_VERSION } from './version';
 
 interface SchedulerSnapshot {
@@ -156,10 +156,12 @@ async function bootstrap(): Promise<void> {
   window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
 
   const inspector = new Inspector(world, gfx, railRenderer, camera, renderer.domElement);
-  const dashboard = new Dashboard(world, world.clock);
+  let timeJumping = false;
+  const dashboard = new Dashboard(world, world.clock, (seconds) => jumpTime(seconds));
   const performanceMonitor = new PerformanceMonitor(world, renderer);
   let paused = false;
   window.addEventListener('keydown', (e) => {
+    if (timeJumping) return;
     if (e.code === 'Tab') { e.preventDefault(); paused = !paused; }
     if (e.code === 'Space') e.preventDefault();
     if (e.code === 'KeyV') controller.toggleFollowView();
@@ -180,6 +182,13 @@ async function bootstrap(): Promise<void> {
   let wasFollowingForLod = false;
 
   function clockIcon(h: number): string { if (h >= 5 && h < 7) return '🌅'; if (h >= 7 && h < 17) return '☀️'; if (h >= 17 && h < 19) return '🌇'; if (h >= 19 && h < 22) return '🌆'; return '🌙'; }
+
+  function formatJumpClock(totalSeconds: number): string {
+    const day = Math.floor(totalSeconds / 86400);
+    const hh = String(Math.floor((totalSeconds / 3600) % 24)).padStart(2, '0');
+    const mm = String(Math.floor((totalSeconds / 60) % 60)).padStart(2, '0');
+    return `DAY ${day} ${hh}:${mm}`;
+  }
 
   function updateEnvironment(): void {
     const phase = world.clock.dayPhase;
@@ -299,11 +308,92 @@ async function bootstrap(): Promise<void> {
     },
   };
 
+  async function jumpTime(requestedSeconds: number): Promise<void> {
+    if (timeJumping || schedulerHold || !Number.isFinite(requestedSeconds) || requestedSeconds <= 0) return;
+
+    const jumpSeconds = Math.max(1, requestedSeconds);
+    const startSeconds = world.clock.totalSeconds;
+    const targetSeconds = startSeconds + jumpSeconds;
+    timeJumping = true;
+    schedulerHold = true;
+    rebasedRealSeconds += Math.max(0, pendingReal);
+    pendingReal = 0;
+
+    boot.show(
+      '時間を進めています',
+      `${formatJumpClock(startSeconds)} → ${formatJumpClock(targetSeconds)}`,
+      0,
+      '描画を停止し、通常と同じ都市シミュレーションだけを高速実行しています。',
+    );
+    await boot.paint();
+
+    try {
+      while (simBusy) await new Promise<void>((resolve) => window.setTimeout(resolve, 1));
+
+      const discardedClockSeconds = world.clock.clearPendingWork();
+      if (world.clock.timeScale > 0) rebasedRealSeconds += discardedClockSeconds / world.clock.timeScale;
+
+      // Catch rail operations up to already-completed World time before adding the explicit jump.
+      const railCatchup = railScheduler.fastForward(railPendingCompletedSeconds);
+      railProcessedSecondsTotal += railCatchup.processedSeconds;
+      railBacklogSeconds = railCatchup.backlogSeconds;
+      railPendingCompletedSeconds = 0;
+
+      const jumpStartedAt = performance.now();
+      const result = await fastForwardWorld(world, jumpSeconds, ({ progress, currentSeconds, batchSeconds, batches }) => {
+        const railFast = railScheduler.fastForward(batchSeconds);
+        completedSimSeconds += batchSeconds;
+        completedBatchCount++;
+        railInputSecondsTotal += batchSeconds;
+        railProcessedSecondsTotal += railFast.processedSeconds;
+        railBacklogSeconds = railFast.backlogSeconds;
+        dashboard.sample();
+
+        boot.update(
+          '時間を進めています',
+          `${formatJumpClock(currentSeconds)} / ${formatJumpClock(targetSeconds)}  batch ${batches}`,
+          progress,
+        );
+      });
+      console.info('[City-Sim] time jump complete', {
+        requestedSeconds: jumpSeconds,
+        simulatedSeconds: result.simulatedSeconds,
+        batches: result.batches,
+        wallMs: performance.now() - jumpStartedAt,
+      });
+      simMs = 0;
+      effectiveSimRate = 0;
+    } catch (err) {
+      console.error('[City-Sim] time jump failed', err);
+      const message = err instanceof Error ? err.message : String(err);
+      boot.update('時間ジャンプに失敗しました', message, 1);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 800));
+    } finally {
+      const now = performance.now();
+      prev = now;
+      lastRenderedAt = now;
+      lastStats = 0;
+      observedSpeedEpoch = world.clock.speedEpoch;
+      speedSampleAt = now;
+      speedSampleCompleted = effectiveCompletedSimSeconds;
+      schedulerHold = false;
+      timeJumping = false;
+      boot.hide();
+    }
+  }
+
   let prev = performance.now(), lastRenderedAt = prev;
   function frame(now: number): void {
     const wallDt = (now - prev) / 1000; prev = now;
 
     if (world.clock.speedEpoch !== observedSpeedEpoch) rebasePendingReal(now);
+
+    // Runtime time-jump keeps requestAnimationFrame alive only so the DOM progress overlay can paint.
+    // No scene synchronization or WebGL rendering is performed until the jump finishes.
+    if (timeJumping) {
+      requestAnimationFrame(frame);
+      return;
+    }
 
     if (!paused && !schedulerHold) {
       pendingReal += Math.min(Math.max(0, wallDt), 1.0);
@@ -386,7 +476,7 @@ async function bootstrap(): Promise<void> {
         const followText = controller.isFollowing
           ? controller.isFirstPerson ? `追跡中 ${followKind}一人称` : `追跡中 ${followKind} dist ${controller.followDistance.toFixed(0)}m`
           : `speed ${controller.moveSpeed.toFixed(0)} m/s`;
-        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ntarget ${world.clock.timeScale.toFixed(0)} sim-s/s  effective ${effectiveSimRate.toFixed(0)} sim-s/s  lag ${totalLag.toFixed(2)} real-s\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  列車${railRenderer.trainCount}編成  鉄道信号${railRenderer.signalCount}  信号待ち${railRenderer.waitingTrainCount}\n駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m  駅用除去 建物${railClearance.buildingsRemoved}/駐車${railClearance.parkingLotsRemoved}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}  batch ${completedBatchCount}\nRail input ${railInputSecondsTotal.toFixed(0)}s  processed ${railProcessedSecondsTotal.toFixed(0)}s  backlog ${railBacklogSeconds.toFixed(1)}s\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=追跡一人称/三人称  MMB=人/車/列車を追跡]`;
+        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ntarget ${world.clock.timeScale.toFixed(0)} sim-s/s  effective ${effectiveSimRate.toFixed(0)} sim-s/s  lag ${totalLag.toFixed(2)} real-s\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  列車${railRenderer.trainCount}編成  鉄道信号${railRenderer.signalCount}  信号待ち${railRenderer.waitingTrainCount}\n駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m  駅用除去 建物${railClearance.buildingsRemoved}/駐車${railClearance.parkingLotsRemoved}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}  batch ${completedBatchCount}\nRail input ${railInputSecondsTotal.toFixed(0)}s  processed ${railProcessedSecondsTotal.toFixed(0)}s  backlog ${railBacklogSeconds.toFixed(1)}s\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  J=+1h  P=perf  G=activity graph  V=追跡一人称/三人称  MMB=人/車/列車を追跡]`;
       }
     } catch (err) {
       console.error('[City-Sim] render frame failed; continuing next frame', err);
