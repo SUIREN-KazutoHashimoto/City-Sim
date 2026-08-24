@@ -5,10 +5,16 @@ import { installRailLeftHandRuntime, prepareRailLeftHandTraffic } from './RailLe
 import { prepareRailMotionTuning } from './RailMotionTuning';
 import { installHighSpeedSleeperSpacing, prepareRailSleeperSpacing } from './RailSleeperTuning';
 import { prepareRailCabCameraTuning } from './RailCabCameraTuning';
+import { prepareRailFormationTuning } from './RailFormationTuning';
+import { prepareRailCurveTuning } from './RailCurveTuning';
+import { installHighSpeedScheduleTuning } from './HighSpeedScheduleTuning';
+import { installRailPlatformIndicators } from './RailPlatformIndicators';
 
 prepareRailMotionTuning();
+prepareRailFormationTuning();
 prepareRailLeftHandTraffic();
 prepareRailSleeperSpacing();
+prepareRailCurveTuning();
 prepareRailCabCameraTuning();
 
 interface RailRuntimeInternals {
@@ -63,7 +69,9 @@ export class RailFrameScheduler {
     installRailInterlockingSafety(renderer);
     installRailLeftHandRuntime(renderer);
     installExternalRailConnection(renderer);
+    installHighSpeedScheduleTuning();
     installHighSpeedSleeperSpacing();
+    installRailPlatformIndicators(renderer);
     this.runtime = renderer as unknown as RailRuntimeInternals;
   }
 

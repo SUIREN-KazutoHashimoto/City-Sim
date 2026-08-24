@@ -44,8 +44,8 @@ interface FirstPersonRuntime {
 }
 
 const CITY_RAIL_CAR_LENGTH = 20.0;
-const CITY_CAB_SETBACK_FROM_FRONT = 1.5;
-const HSR_CAB_SETBACK_FROM_NOSE_TIP = 7.5;
+const CITY_CAMERA_AHEAD_OF_FRONT = 0.35;
+const HSR_CAMERA_AHEAD_OF_NOSE = 0.45;
 
 let prepared = false;
 
@@ -64,12 +64,10 @@ function setCabAnchor(target: TunedFollowTarget, x: number, y: number, z: number
 }
 
 /**
- * Put rail first-person cameras at the driver's cab instead of extrapolating past the consist nose.
- *
- * City trains need an exact leading-car pose because a long consist can be on a curve: projecting
- * half the consist length along the centre tangent moves the camera sideways off the track. HSR is a
- * straight dedicated line, so its cab can be placed from the consist centre with the 7.5 m nose/cab
- * setback while preserving the existing third-person centre target.
+ * Rail stock currently has exterior window/cabin geometry but no true cab interior. Put the
+ * first-person eye just beyond the leading exterior face so the window/stripe geometry cannot clip
+ * into view. City rail still uses the exact leading-car pose on curves; HSR is straight and can use
+ * its consist centre plus half-length. Third-person tracking continues to use the consist centre.
  */
 export function prepareRailCabCameraTuning(): void {
   if (prepared) return;
@@ -95,7 +93,7 @@ export function prepareRailCabCameraTuning(): void {
           ? rail.depotCarPose(run, smooth, leadCar)
           : rail.carPose(run, smooth, leadCar);
         if (pose) {
-          const forward = CITY_RAIL_CAR_LENGTH * 0.5 - CITY_CAB_SETBACK_FROM_FRONT;
+          const forward = CITY_RAIL_CAR_LENGTH * 0.5 + CITY_CAMERA_AHEAD_OF_FRONT;
           setCabAnchor(
             target,
             pose.x + Math.cos(pose.heading) * forward,
@@ -106,7 +104,7 @@ export function prepareRailCabCameraTuning(): void {
         }
       }
     } else if (target.kind === 'highSpeedTrain' && target.heading != null && target.length != null) {
-      const forward = Math.max(0, target.length * 0.5 - HSR_CAB_SETBACK_FROM_NOSE_TIP);
+      const forward = Math.max(0, target.length * 0.5 + HSR_CAMERA_AHEAD_OF_NOSE);
       setCabAnchor(
         target,
         target.position.x + Math.cos(target.heading) * forward,

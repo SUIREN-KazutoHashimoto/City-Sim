@@ -7,8 +7,8 @@ const CITY_RAIL_CAR_LENGTH = 20.0;
 const CITY_RAIL_WIDTH = 3.0;
 const CITY_RAIL_HEIGHT = 3.75;
 const CITY_RAIL_BODY_BOTTOM_CLEARANCE = 0.275;
-const CITY_RAIL_MIN_PLATFORM_LENGTH = 112;
-const CITY_RAIL_DEPOT_SLOT_SPACING = 116;
+const CITY_RAIL_MIN_PLATFORM_LENGTH = 240;
+const CITY_RAIL_DEPOT_SLOT_SPACING = 250;
 
 interface MutableRailRendererConstructor {
   ACCEL: number;
@@ -33,7 +33,7 @@ interface MutableRailRendererRuntime {
 }
 
 interface MutableRailRendererPrototype extends Partial<MutableRailRendererRuntime> {
-  __citySimDimensionsV024?: boolean;
+  __citySimDimensionsV027?: boolean;
 }
 
 let prepared = false;
@@ -41,9 +41,10 @@ let prepared = false;
 /**
  * Apply requested city-rail dynamics and exterior dimensions before railway construction.
  *
- * Five-car rapid/limited consists become roughly 103 m long after the 20 m car bodies are applied,
- * so the same patch also guarantees a 112 m platform and wider depot slot spacing. This prevents a
- * dimension-only change from making otherwise valid trains overlap or visibly overhang short stops.
+ * The longest regular consist is now the 11-car local: 11 x 20 m plus 10 inter-car gaps is roughly
+ * 227 m. Every passenger platform therefore gets at least 240 m usable length and depot slots are
+ * spaced at 250 m centres. Platform roofs, columns, sidings, crossovers and access geometry already
+ * derive from platformLength(), so they automatically follow the longer station footprint.
  */
 export function prepareRailMotionTuning(): void {
   if (prepared) return;
@@ -57,8 +58,8 @@ export function prepareRailMotionTuning(): void {
   ctor.DEPOT_SLOT_SPACING = CITY_RAIL_DEPOT_SLOT_SPACING;
 
   const proto = RailRenderer.prototype as unknown as MutableRailRendererPrototype;
-  if (proto.__citySimDimensionsV024) return;
-  proto.__citySimDimensionsV024 = true;
+  if (proto.__citySimDimensionsV027) return;
+  proto.__citySimDimensionsV027 = true;
 
   const basePlatformLength = proto.platformLength;
   if (basePlatformLength) {
