@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { FacilityRecord, FacilityType, ParkSpace } from '../generation/SpecialFacilityPlanner';
 
 interface Part { matrix: THREE.Matrix4; color?: THREE.Color; }
+type StationPark = ParkSpace & { stationSurface?: 'plaza' | 'park'; stationRelated?: boolean; stationId?: number };
 
 export function buildSpecialFacilityVisuals(scene: THREE.Scene, facilities: FacilityRecord[], parks: ParkSpace[]): void {
   buildParks(scene, parks);
@@ -10,15 +11,31 @@ export function buildSpecialFacilityVisuals(scene: THREE.Scene, facilities: Faci
 
 function buildParks(scene: THREE.Scene, parks: ParkSpace[]): void {
   if (parks.length === 0) return;
-  const grounds: Part[] = [], paths: Part[] = [], trunks: Part[] = [], crowns: Part[] = [];
-  for (const park of parks) {
-    const w = Math.max(12, park.width - 7), d = Math.max(12, park.depth - 7);
-    grounds.push({ matrix: matrix(park.x, 0.045, park.z, w, 0.09, d) });
-    const pathW = Math.max(1.8, Math.min(3.2, Math.min(w, d) * 0.022));
+  const greenGrounds: Part[] = [], concreteGrounds: Part[] = [], paths: Part[] = [], plazaBands: Part[] = [];
+  const trunks: Part[] = [], crowns: Part[] = [];
+  const stallBodies: Part[] = [], stallRoofs: Part[] = [], stallCounters: Part[] = [];
+
+  for (const rawPark of parks) {
+    const park = rawPark as StationPark;
+    const w = Math.max(10, park.width - (park.stationRelated ? 2 : 7));
+    const d = Math.max(10, park.depth - (park.stationRelated ? 2 : 7));
+
+    if (park.stationSurface === 'plaza') {
+      concreteGrounds.push({ matrix: matrix(park.x, 0.052, park.z, w, 0.10, d) });
+      const bandW = Math.max(0.7, Math.min(1.4, Math.min(w, d) * 0.025));
+      plazaBands.push({ matrix: matrix(park.x, 0.108, park.z, w * 0.86, 0.025, bandW) });
+      plazaBands.push({ matrix: matrix(park.x, 0.109, park.z, bandW, 0.026, d * 0.86) });
+      continue;
+    }
+
+    greenGrounds.push({ matrix: matrix(park.x, 0.045, park.z, w, 0.09, d) });
+    const pathW = Math.max(1.8, Math.min(3.2, Math.min(w, d) * 0.035));
     paths.push({ matrix: matrix(park.x, 0.10, park.z, w * 0.88, 0.045, pathW) });
     paths.push({ matrix: matrix(park.x, 0.10, park.z, pathW, 0.045, d * 0.88) });
 
-    const area = w * d, treeCount = Math.min(32, Math.max(4, Math.floor(area / 2400)));
+    const area = w * d;
+    const divisor = park.stationRelated ? 1300 : 2400;
+    const treeCount = Math.min(park.stationRelated ? 16 : 32, Math.max(4, Math.floor(area / divisor)));
     for (let i = 0; i < treeCount; i++) {
       const t = hash01(park.id * 97 + i * 31 + 11), u = hash01(park.id * 53 + i * 71 + 23);
       const edge = i & 3;
@@ -31,11 +48,32 @@ function buildParks(scene: THREE.Scene, parks: ParkSpace[]): void {
       trunks.push({ matrix: matrix(x, h * 0.28, z, 0.35, h * 0.56, 0.35) });
       crowns.push({ matrix: matrix(x, h * 0.73, z, 2.0 + h * 0.16, h * 0.72, 2.0 + h * 0.16) });
     }
+
+    if (park.stationRelated) {
+      const stallCount = Math.max(2, Math.min(5, Math.round(area / 950)));
+      for (let i = 0; i < stallCount; i++) {
+        const t = stallCount === 1 ? 0.5 : i / Math.max(1, stallCount - 1);
+        const x = park.x + (t - 0.5) * w * 0.64;
+        const z = park.z + d * 0.31;
+        const bodyColor = new THREE.Color().setHSL((0.05 + hash01(park.id * 31 + i * 19) * 0.14) % 1, 0.42, 0.50);
+        const roofColor = new THREE.Color().setHSL((0.56 + hash01(park.id * 47 + i * 13) * 0.12) % 1, 0.46, 0.42);
+        stallBodies.push({ matrix: matrix(x, 1.05, z, 2.35, 2.05, 2.1), color: bodyColor });
+        stallRoofs.push({ matrix: matrix(x, 2.18, z, 2.75, 0.22, 2.5), color: roofColor });
+        stallCounters.push({ matrix: matrix(x, 1.18, z - 1.18, 1.65, 0.16, 0.35), color: new THREE.Color(0xd5c39f) });
+      }
+    }
   }
-  add(scene, new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0x4f7b49, roughness: 1 }), grounds);
-  add(scene, new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0xb9ad91, roughness: 1 }), paths);
+
+  const box = new THREE.BoxGeometry(1, 1, 1);
+  add(scene, box, new THREE.MeshStandardMaterial({ color: 0x4f7b49, roughness: 1 }), greenGrounds);
+  add(scene, box, new THREE.MeshStandardMaterial({ color: 0xa8aaad, roughness: 0.93, metalness: 0.02 }), concreteGrounds);
+  add(scene, box, new THREE.MeshStandardMaterial({ color: 0xb9ad91, roughness: 1 }), paths);
+  add(scene, box, new THREE.MeshStandardMaterial({ color: 0xc7c9cb, roughness: 0.95 }), plazaBands);
   add(scene, new THREE.CylinderGeometry(1, 1, 1, 6), new THREE.MeshStandardMaterial({ color: 0x66503a, roughness: 1 }), trunks);
   add(scene, new THREE.IcosahedronGeometry(1, 1), new THREE.MeshStandardMaterial({ color: 0x3e7547, roughness: 1 }), crowns);
+  add(scene, box, new THREE.MeshStandardMaterial({ roughness: 0.75 }), stallBodies, true);
+  add(scene, box, new THREE.MeshStandardMaterial({ roughness: 0.68 }), stallRoofs, true);
+  add(scene, box, new THREE.MeshStandardMaterial({ roughness: 0.88 }), stallCounters, true);
 }
 
 function buildFacilityMarkers(scene: THREE.Scene, facilities: FacilityRecord[]): void {

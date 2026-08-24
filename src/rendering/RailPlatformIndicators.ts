@@ -33,10 +33,13 @@ interface CityRuntime {
   lineStationHasPassingLoop: (lineId: number, stationIndex: number) => boolean;
 }
 
-interface CityBoard {
-  sprite: THREE.Sprite;
+interface BoardVisual {
+  group: THREE.Group;
   canvas: HTMLCanvasElement;
   texture: THREE.CanvasTexture;
+}
+
+interface CityBoard extends BoardVisual {
   stationId: number;
   lineId: number;
   stationIndex: number;
@@ -60,10 +63,7 @@ interface HighSpeedSource {
   rt?: { scene: THREE.Scene };
 }
 interface HighSpeedAdapter { source?: HighSpeedSource; }
-interface HsrBoard {
-  sprite: THREE.Sprite;
-  canvas: HTMLCanvasElement;
-  texture: THREE.CanvasTexture;
+interface HsrBoard extends BoardVisual {
   direction: 1 | -1;
   trackNo: number;
   lastState: BoardState | '';
@@ -73,19 +73,46 @@ const MAIN_OFFSET = 1.72;
 const SIDING_OFFSET = 8.0;
 const HSR_TRACK_OFFSET = 2.4;
 
-function boardVisual(scene: THREE.Scene): { sprite: THREE.Sprite; canvas: HTMLCanvasElement; texture: THREE.CanvasTexture } {
+/** Physical platform display: metal housing + two textured faces + support posts. */
+function boardVisual(scene: THREE.Scene, heading: number): BoardVisual {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
   canvas.height = 128;
   const texture = new THREE.CanvasTexture(canvas);
   texture.minFilter = THREE.LinearFilter;
   texture.magFilter = THREE.LinearFilter;
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: false, depthTest: true, depthWrite: false });
-  const sprite = new THREE.Sprite(material);
-  sprite.scale.set(5.8, 1.45, 1);
-  sprite.renderOrder = 4;
-  scene.add(sprite);
-  return { sprite, canvas, texture };
+  texture.colorSpace = THREE.SRGBColorSpace;
+
+  const group = new THREE.Group();
+  group.rotation.y = -heading;
+
+  const frame = new THREE.Mesh(
+    new THREE.BoxGeometry(6.25, 1.70, 0.22),
+    new THREE.MeshStandardMaterial({ color: 0x22272d, roughness: 0.58, metalness: 0.55 }),
+  );
+  frame.castShadow = true;
+  group.add(frame);
+
+  const frontMaterial = new THREE.MeshBasicMaterial({ map: texture, toneMapped: false });
+  const front = new THREE.Mesh(new THREE.PlaneGeometry(5.85, 1.30), frontMaterial);
+  front.position.z = 0.116;
+  group.add(front);
+
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(5.85, 1.30), frontMaterial.clone());
+  back.rotation.y = Math.PI;
+  back.position.z = -0.116;
+  group.add(back);
+
+  const postMaterial = new THREE.MeshStandardMaterial({ color: 0x4a4f55, roughness: 0.52, metalness: 0.62 });
+  for (const x of [-2.55, 2.55]) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.13, 3.35, 0.13), postMaterial);
+    post.position.set(x, -2.48, 0);
+    post.castShadow = true;
+    group.add(post);
+  }
+
+  scene.add(group);
+  return { group, canvas, texture };
 }
 
 function drawBoard(board: { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; trackNo: number; lastState: BoardState | '' }, state: BoardState): void {
@@ -93,9 +120,9 @@ function drawBoard(board: { canvas: HTMLCanvasElement; texture: THREE.CanvasText
   board.lastState = state;
   const ctx = board.canvas.getContext('2d');
   if (!ctx) return;
-  ctx.fillStyle = '#090b0e';
+  ctx.fillStyle = '#07090b';
   ctx.fillRect(0, 0, board.canvas.width, board.canvas.height);
-  ctx.strokeStyle = '#777';
+  ctx.strokeStyle = '#5f646a';
   ctx.lineWidth = 8;
   ctx.strokeRect(4, 4, board.canvas.width - 8, board.canvas.height - 8);
   const color = state === '接近' ? '#ffb020' : state === '停車中' ? '#54f070' : state === '発車' ? '#55c8ff' : '#88909a';
@@ -157,8 +184,8 @@ function buildCityBoards(rt: CityRuntime): CityBoard[] {
         if (!p) continue;
         const side = spec.trackOffset >= 0 ? 1 : -1;
         const boardOffset = spec.trackOffset + side * 4.0;
-        const visual = boardVisual(rt.scene);
-        visual.sprite.position.set(
+        const visual = boardVisual(rt.scene, p.heading);
+        visual.group.position.set(
           p.x - Math.sin(p.heading) * boardOffset,
           rt.lineTrackY(line.id) + 4.5,
           p.z + Math.cos(p.heading) * boardOffset,
@@ -202,8 +229,8 @@ function installHsrBoards(): void {
     const trackOffset = direction > 0 ? HSR_TRACK_OFFSET : -HSR_TRACK_OFFSET;
     const side = trackOffset >= 0 ? 1 : -1;
     const p = pointAt(route.centralPosition, trackOffset + side * 4.2);
-    const visual = boardVisual(scene);
-    visual.sprite.position.set(p.x, route.trackY + 5.0, p.z);
+    const visual = boardVisual(scene, route.heading);
+    visual.group.position.set(p.x, route.trackY + 5.0, p.z);
     const board: HsrBoard = { ...visual, direction, trackNo: index + 1, lastState: '' };
     drawBoard(board, '待機');
     boards.push(board);
@@ -217,11 +244,11 @@ function installHsrBoards(): void {
   source.syncMeshes();
 }
 
-/** Add one simple live approach/dwell/departure display per physical platform track. */
+/** Add one physical live approach/dwell/departure display per platform track. */
 export function installRailPlatformIndicators(renderer: RailRenderer): void {
-  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV027?: boolean };
-  if (rt.__citySimPlatformBoardsV027) return;
-  rt.__citySimPlatformBoardsV027 = true;
+  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV029?: boolean };
+  if (rt.__citySimPlatformBoardsV029) return;
+  rt.__citySimPlatformBoardsV029 = true;
   const boards = buildCityBoards(rt);
   const baseUpdate = rt.updateTrainMeshes.bind(rt);
   rt.updateTrainMeshes = () => {
