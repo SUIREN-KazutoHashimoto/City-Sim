@@ -6,7 +6,8 @@ export interface PathGraph { nodes: { x: number; z: number; edges: number[] }[];
  * Hot-path optimizations:
  * - reset only nodes touched by the previous search instead of filling every work array,
  * - keep a bounded LRU of completed routes because commute/bus requests frequently repeat
- *   the same node pairs on a static graph.
+ *   the same node pairs on a static graph,
+ * - keep heap positions so decrease-key remains O(log n).
  */
 export class AStar {
   private g: Float64Array;
@@ -15,6 +16,7 @@ export class AStar {
   private closed: Uint8Array;
   private openFlag: Uint8Array;
   private touchedFlag: Uint8Array;
+  private heapPos: Int32Array;
   private touched: number[] = [];
   private heap: number[] = [];
   private readonly routeCache = new Map<string, number[]>();
@@ -28,6 +30,8 @@ export class AStar {
     this.closed = new Uint8Array(n);
     this.openFlag = new Uint8Array(n);
     this.touchedFlag = new Uint8Array(n);
+    this.heapPos = new Int32Array(n);
+    this.heapPos.fill(-1);
     this.routeCacheLimit = Math.max(0, routeCacheLimit | 0);
   }
 
@@ -38,7 +42,6 @@ export class AStar {
     const cacheKey = `${start}:${goal}`;
     const cached = this.routeCache.get(cacheKey);
     if (cached !== undefined) {
-      // Refresh insertion order to make Map act as a small LRU.
       this.routeCache.delete(cacheKey);
       this.routeCache.set(cacheKey, cached);
       return cached;
@@ -72,7 +75,7 @@ export class AStar {
           const h = this.mode === 'walk' ? net.heuristic(nb, goal) : net.heuristic(nb, goal) / 27;
           this.f[nb] = tentative + h;
           if (!this.openFlag[nb]) this.push(nb);
-          else this.fixHeapNode(nb);
+          else this.bubbleUp(this.heapPos[nb]);
         }
       }
     }
@@ -92,6 +95,7 @@ export class AStar {
     this.cameFrom[node] = -1;
     this.closed[node] = 0;
     this.openFlag[node] = 0;
+    this.heapPos[node] = -1;
   }
 
   private resetTouched(): void {
@@ -117,17 +121,15 @@ export class AStar {
 
   private push(node: number): void {
     this.openFlag[node] = 1;
+    this.heapPos[node] = this.heap.length;
     this.heap.push(node);
     this.bubbleUp(this.heap.length - 1);
   }
 
-  /** Re-establish heap order after an already-open node receives a lower f score. */
-  private fixHeapNode(node: number): void {
-    for (let i = 0; i < this.heap.length; i++) {
-      if (this.heap[i] !== node) continue;
-      this.bubbleUp(i);
-      return;
-    }
+  private swapHeap(a: number, b: number): void {
+    const na = this.heap[a], nb = this.heap[b];
+    this.heap[a] = nb; this.heap[b] = na;
+    this.heapPos[na] = b; this.heapPos[nb] = a;
   }
 
   private bubbleUp(index: number): void {
@@ -135,7 +137,7 @@ export class AStar {
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (this.f[this.heap[p]] <= this.f[this.heap[i]]) break;
-      [this.heap[p], this.heap[i]] = [this.heap[i], this.heap[p]];
+      this.swapHeap(p, i);
       i = p;
     }
   }
@@ -143,8 +145,10 @@ export class AStar {
   private pop(): number {
     const top = this.heap[0], last = this.heap.pop()!;
     this.openFlag[top] = 0;
+    this.heapPos[top] = -1;
     if (this.heap.length) {
       this.heap[0] = last;
+      this.heapPos[last] = 0;
       let i = 0;
       const n = this.heap.length;
       for (;;) {
@@ -153,7 +157,7 @@ export class AStar {
         if (l < n && this.f[this.heap[l]] < this.f[this.heap[s]]) s = l;
         if (r < n && this.f[this.heap[r]] < this.f[this.heap[s]]) s = r;
         if (s === i) break;
-        [this.heap[s], this.heap[i]] = [this.heap[i], this.heap[s]];
+        this.swapHeap(s, i);
         i = s;
       }
     }
