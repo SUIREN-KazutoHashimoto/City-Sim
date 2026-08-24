@@ -201,7 +201,7 @@ export class PedestrianWorkerPool {
 
   private async waitForDone(expectedEpoch: number): Promise<void> {
     const fn = (Atomics as unknown as AtomicsWithWaitAsync).waitAsync;
-    if (typeof fn !== 'function') return;
+    if (typeof fn !== 'function') throw new Error('Atomics.waitAsync unavailable after atomics completion was selected');
     const result = fn(this.control, DONE_EPOCH, expectedEpoch);
     if (result.async) await result.value;
   }
