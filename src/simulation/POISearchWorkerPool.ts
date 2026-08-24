@@ -8,6 +8,9 @@ interface WorkerReply { type: 'result'; jobId: number; offset: number; results: 
 /**
  * 読み取り専用POI検索を複数Web Workerへ分配する。
  * occupancyだけSharedArrayBufferで共有し、reserve/release自体はCoordinator側に残す。
+ *
+ * Runtime query batches are converted to compact TypedArrays and transferred to workers.
+ * This avoids structured-cloning hundreds of small JS objects on every simulation step.
  */
 export class POISearchWorkerPool {
   private readonly workers: Worker[] = [];
@@ -66,8 +69,17 @@ export class POISearchWorkerPool {
     return new Promise<Int32Array>((resolve, reject) => {
       this.pending.set(jobId, { remaining: used, results, resolve, reject });
       for (let w = 0; w < used; w++) {
-        const begin = Math.floor((queries.length * w) / used), end = Math.floor((queries.length * (w + 1)) / used);
-        this.workers[w].postMessage({ type: 'search', kind, jobId, offset: begin, queries: queries.slice(begin, end) });
+        const begin = Math.floor((queries.length * w) / used), end = Math.floor((queries.length * (w + 1)) / used), count = end - begin;
+        const categories = new Uint8Array(count), xs = new Float32Array(count), zs = new Float32Array(count), wealth = new Float32Array(count);
+        for (let i = 0; i < count; i++) {
+          const q = queries[begin + i];
+          categories[i] = q.category; xs[i] = q.x; zs[i] = q.z;
+          wealth[i] = 'wealth' in q ? q.wealth : 0;
+        }
+        this.workers[w].postMessage(
+          { type: 'search', kind, jobId, offset: begin, categories, xs, zs, wealth },
+          [categories.buffer, xs.buffer, zs.buffer, wealth.buffer],
+        );
       }
     });
   }
