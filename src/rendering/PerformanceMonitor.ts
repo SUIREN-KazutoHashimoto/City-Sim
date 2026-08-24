@@ -24,6 +24,9 @@ interface SimProfile {
   pedWorkerAvoidMoveMs: number;
   pedWorkerBarrierMs: number;
   pedWorkerCoreMs: number;
+  pedWorkerWakeMs: number;
+  pedWorkerReturnMs: number;
+  pedWorkerRounds: number;
   agentMs: number;
   pedBlocksMs: number;
   trafficMs: number;
@@ -73,7 +76,7 @@ interface HistorySample {
 }
 
 interface TimerExt { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number; }
-interface PedTiming { prepMs: number; indexMs: number; avoidMoveMs: number; barrierMs: number; totalMs: number; }
+interface PedTiming { prepMs: number; indexMs: number; avoidMoveMs: number; barrierMs: number; totalMs: number; wakeMs: number; returnMs: number; }
 
 interface WorldInternals {
   stepCore: (dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean) => void;
@@ -87,7 +90,7 @@ interface WorldInternals {
   walkAstar: { findPath: (start: number, goal: number) => number[] };
   agentWorkers: { updateAgentBatch: (dt: number, now: number, count?: number) => Promise<void> };
   poiWorkers: { findBestBatch: (queries: readonly unknown[]) => Promise<Int32Array> };
-  pedWorkers: { flush: (dt: number) => Promise<void>; readonly latestTiming: PedTiming };
+  pedWorkers: { flush: (dt: number) => Promise<void>; readonly latestTiming: PedTiming; readonly completionMode: 'atomics' | 'message' };
 }
 
 interface TrafficInternals { astar: { findPath: (start: number, goal: number) => number[] }; }
@@ -95,6 +98,7 @@ interface TrafficInternals { astar: { findPath: (start: number, goal: number) =>
 const emptySim = (): SimProfile => ({
   totalMs: 0, workerMs: 0, poiWorkerMs: 0, pedWorkerMs: 0,
   pedWorkerPrepMs: 0, pedWorkerIndexMs: 0, pedWorkerAvoidMoveMs: 0, pedWorkerBarrierMs: 0, pedWorkerCoreMs: 0,
+  pedWorkerWakeMs: 0, pedWorkerReturnMs: 0, pedWorkerRounds: 0,
   agentMs: 0, pedBlocksMs: 0, trafficMs: 0, signalsMs: 0, busMs: 0, logisticsMs: 0,
   pedIndexMs: 0, pedestrianMs: 0, arrivalsMs: 0, activityMs: 0, poiFindBestMs: 0, poiParkingMs: 0, poiMutationMs: 0, otherMs: 0, steps: 0,
   decisions: 0, tripStarts: 0, poiFindBestCount: 0, poiParkingCount: 0, poiMutationCount: 0,
@@ -140,7 +144,6 @@ class SimulationProfiler {
       try { await originalBatch(dtSec, steps); }
       finally {
         this.current.totalMs = performance.now() - started;
-        // Ped worker internal timing is nested in pedestrianMs and is diagnostic only.
         const covered = this.current.workerMs + this.current.poiWorkerMs + this.current.agentMs + this.current.pedBlocksMs + this.current.trafficMs +
           this.current.busMs + this.current.logisticsMs + this.current.pedIndexMs + this.current.pedestrianMs + this.current.arrivalsMs + this.current.activityMs + this.current.signalsMs;
         this.current.otherMs = Math.max(0, this.current.totalMs - covered);
@@ -191,12 +194,15 @@ class SimulationProfiler {
       const t = performance.now(); await originalPedWorker(dt);
       if (this.inBatch) {
         this.current.pedWorkerMs += performance.now() - t;
+        this.current.pedWorkerRounds++;
         const m = w.pedWorkers.latestTiming;
         this.current.pedWorkerPrepMs += m.prepMs;
         this.current.pedWorkerIndexMs += m.indexMs;
         this.current.pedWorkerAvoidMoveMs += m.avoidMoveMs;
         this.current.pedWorkerBarrierMs += m.barrierMs;
         this.current.pedWorkerCoreMs += m.totalMs;
+        this.current.pedWorkerWakeMs += m.wakeMs;
+        this.current.pedWorkerReturnMs += m.returnMs;
       }
     };
 
@@ -305,12 +311,16 @@ export class PerformanceMonitor {
     const pedPrepMs = Math.max(0, p.pedestrianMs - p.pedWorkerMs), actMs = p.arrivalsMs + p.activityMs;
     const pedUsPerStep = activePedestrians > 0 && p.steps > 0 ? ((pedMs * 1000) / (activePedestrians * p.steps)).toFixed(2) : '-';
     const dispatchGap = Math.max(0, p.pedWorkerMs - p.pedWorkerCoreMs);
+    const measuredGap = p.pedWorkerWakeMs + p.pedWorkerReturnMs;
+    const otherGap = Math.max(0, dispatchGap - measuredGap);
+    const completionMode = (this.world as unknown as WorldInternals).pedWorkers.completionMode;
     this.summary.textContent =
 `FRAME ${this.latestFrameMs.toFixed(1)}ms  FPS ${this.latestFps.toFixed(0)}  GPU ${gpuText}  backlog ${(this.latestBacklog * 1000).toFixed(0)}ms ${this.latestSimBusy ? 'BUSY' : ''}
 RENDER ${r.totalMs.toFixed(1)}ms  LOD ${r.lodMs.toFixed(1)}  Agent ${r.agentsMs.toFixed(1)}  Vehicle ${r.vehiclesMs.toFixed(1)}  Signal ${r.signalsMs.toFixed(1)}  Light ${r.lightingMs.toFixed(1)}  WebGL ${r.webglMs.toFixed(1)}
 SIM ${p.totalMs.toFixed(1)}ms/${p.steps}step  AgentW ${p.workerMs.toFixed(1)}  POIW ${p.poiWorkerMs.toFixed(1)}  Agent ${p.agentMs.toFixed(1)}  Traffic ${p.trafficMs.toFixed(1)}
 PED total ${pedMs.toFixed(1)}  Block ${p.pedBlocksMs.toFixed(1)}  MainIndex ${p.pedIndexMs.toFixed(1)}  Path/Signal ${pedPrepMs.toFixed(1)}  WorkerWall ${p.pedWorkerMs.toFixed(1)}
-    Worker Prep ${p.pedWorkerPrepMs.toFixed(1)}  Index ${p.pedWorkerIndexMs.toFixed(1)}  Avoid+Move ${p.pedWorkerAvoidMoveMs.toFixed(1)}  Barrier ${p.pedWorkerBarrierMs.toFixed(1)}  DispatchGap ${dispatchGap.toFixed(1)}
+    Worker Prep ${p.pedWorkerPrepMs.toFixed(1)}  Index ${p.pedWorkerIndexMs.toFixed(1)}  Avoid+Move ${p.pedWorkerAvoidMoveMs.toFixed(1)}  Barrier ${p.pedWorkerBarrierMs.toFixed(1)}
+    Wake ${p.pedWorkerWakeMs.toFixed(1)}  Return ${p.pedWorkerReturnMs.toFixed(1)}  OtherGap ${otherGap.toFixed(1)}  DispatchGap ${dispatchGap.toFixed(1)}  rounds ${p.pedWorkerRounds} ${completionMode}
     ${pedUsPerStep}us/ped/step  peds ${activePedestrians}
 POI WorkerSearch ${p.poiWorkerMs.toFixed(1)}  MainSearch ${p.poiFindBestMs.toFixed(1)}/${p.poiFindBestCount}  Parking ${p.poiParkingMs.toFixed(1)}/${p.poiParkingCount}
     Reserve/Release ${p.poiMutationMs.toFixed(1)}/${p.poiMutationCount}  Activity+Arrival ${actMs.toFixed(1)}
