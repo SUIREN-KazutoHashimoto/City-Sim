@@ -1,4 +1,5 @@
 import { RailRenderer } from './RailRenderer';
+import { installExternalRailConnection } from './ExternalRailConnection';
 import { installRailInterlockingSafety } from './RailInterlockingSafety';
 
 interface RailRuntimeInternals {
@@ -47,6 +48,9 @@ export class RailFrameScheduler {
   private pendingSeconds = 0;
 
   constructor(renderer: RailRenderer) {
+    // Add external services before safety captures the operational callbacks so the new trains use
+    // exactly the same platform/crossover interlocking as the resident fleet.
+    installExternalRailConnection(renderer);
     installRailInterlockingSafety(renderer);
     this.runtime = renderer as unknown as RailRuntimeInternals;
   }
