@@ -68,6 +68,32 @@ export class World {
   get pedestrianWorkerCount(): number { return this.pedWorkers.workerCount; }
   get sharedAgentMemory(): boolean { return this.store.sharedMemory; }
 
+  /**
+   * Visit moving pedestrians in the same ascending agent-id order as the old full JS scan.
+   * Three native TypedArray searches advance independently, so non-moving spans are skipped without
+   * maintaining a second mutable active-index structure.
+   */
+  private forEachMovingPedestrian(fn: (agent: number) => void): void {
+    const state = this.store.state, count = this.store.count;
+    let traveling = state.indexOf(AgentState.Traveling, 0);
+    let toVehicle = state.indexOf(AgentState.ToVehicle, 0);
+    let toBusStop = state.indexOf(AgentState.ToBusStop, 0);
+
+    while (true) {
+      let next = count;
+      if (traveling >= 0 && traveling < next) next = traveling;
+      if (toVehicle >= 0 && toVehicle < next) next = toVehicle;
+      if (toBusStop >= 0 && toBusStop < next) next = toBusStop;
+      if (next >= count) break;
+
+      fn(next);
+      const from = next + 1;
+      if (traveling === next) traveling = state.indexOf(AgentState.Traveling, from);
+      if (toVehicle === next) toVehicle = state.indexOf(AgentState.ToVehicle, from);
+      if (toBusStop === next) toBusStop = state.indexOf(AgentState.ToBusStop, from);
+    }
+  }
+
   private assignOccupation(): { occ: Occupation; start: number; end: number } {
     const r = this.rng();
     if (r < 0.25) return { occ: Occupation.Office, start: 9, end: 18 };
@@ -143,17 +169,17 @@ export class World {
 
   private stepCore(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): void {
     this.workerPedStep = false;
-    const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
-    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, false); }
+    const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions);
+    this.forEachMovingPedestrian((i) => this.walkStep(i, dtSec, false));
     this.stepAfterPed(now, updateActivities, dtSec);
   }
 
   private async stepCoreAsync(dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean): Promise<void> {
     this.workerPedStep = true;
     try {
-      const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions), s = this.store;
+      const now = this.stepBeforePed(dtSec, updateNeeds, updateDecisions);
       this.pedWorkers.begin();
-      for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.walkStep(i, dtSec, true); }
+      this.forEachMovingPedestrian((i) => this.walkStep(i, dtSec, true));
       await this.pedWorkers.flush(dtSec);
       this.stepAfterPed(now, updateActivities, dtSec);
     } finally { this.workerPedStep = false; }
@@ -261,14 +287,13 @@ export class World {
     this.pedBlockedNodes.length = 0; this.vehBlockedNodes.length = 0;
 
     const s = this.store, net = this.city.net;
-    for (let i = 0; i < s.count; i++) {
-      const roadNode = this.pedCrossingRoadNode[i]; if (roadNode < 0) continue;
-      const st = s.state[i]; if (st !== AgentState.Traveling && st !== AgentState.ToVehicle && st !== AgentState.ToBusStop) continue;
+    this.forEachMovingPedestrian((i) => {
+      const roadNode = this.pedCrossingRoadNode[i]; if (roadNode < 0) return;
       const rn = net.nodes[roadNode];
       if (rn && (s.posX[i] - rn.x) ** 2 + (s.posZ[i] - rn.z) ** 2 < 16 * 16 && this.pedBlock[roadNode] === 0) {
         this.pedBlock[roadNode] = 1; this.pedBlockedNodes.push(roadNode);
       }
-    }
+    });
     const vs = this.vehicles;
     for (let v = 0; v < vs.count; v++) {
       if (vs.state[v] !== VehicleState.Driving || vs.speed[v] < 1) continue;
@@ -350,7 +375,7 @@ export class World {
   private buildTravelerIndex(): void {
     if (this.workerPedStep) return;
     this.grid.clear(); const s = this.store;
-    for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.grid.insert(i, s.posX[i], s.posZ[i]); }
+    this.forEachMovingPedestrian((i) => this.grid.insert(i, s.posX[i], s.posZ[i]));
   }
 
   private walkStep(i: number, dt: number, deferMovement: boolean): void {
