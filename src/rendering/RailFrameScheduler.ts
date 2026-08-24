@@ -1,4 +1,5 @@
 import { RailRenderer } from './RailRenderer';
+import { installRailInterlockingSafety } from './RailInterlockingSafety';
 
 interface RailRuntimeInternals {
   stepOperations: (dt: number) => void;
@@ -46,6 +47,7 @@ export class RailFrameScheduler {
   private pendingSeconds = 0;
 
   constructor(renderer: RailRenderer) {
+    installRailInterlockingSafety(renderer);
     this.runtime = renderer as unknown as RailRuntimeInternals;
   }
 
@@ -102,8 +104,9 @@ export class RailFrameScheduler {
   /**
    * Drain all completed rail time without touching meshes or issuing WebGL work. Runtime time-jump
    * calls this alongside each renderless World batch, then the first normal frame performs one visual
-   * synchronization before rendering. Ten-second operational slices keep station/signal transitions
-   * materially finer than the scheduler's 60-second absolute high-speed cap.
+   * synchronization before rendering. Two-second operational slices are intentionally finer than the
+   * general high-speed scheduler so station/platform and crossover interlocking cannot be skipped by
+   * a coarse renderless jump.
    */
   fastForward(completedSimSeconds: number): RailFastForwardProfile {
     const inputSeconds = Number.isFinite(completedSimSeconds) ? Math.max(0, completedSimSeconds) : 0;
@@ -112,7 +115,7 @@ export class RailFrameScheduler {
     const operationsStart = performance.now();
     let steps = 0;
     let processedSeconds = 0;
-    const maxStepSeconds = 10;
+    const maxStepSeconds = 2;
 
     while (this.pendingSeconds > 1e-5) {
       const stepSeconds = Math.min(maxStepSeconds, this.pendingSeconds);
