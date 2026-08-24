@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RailRenderer, TrainService } from './RailRenderer';
 import '../generation/RailPlanningEnhancements';
+import '../generation/RailParkStationPlacement';
 import './RailRendererEnhancements';
 import './RailDepotPlacement';
 import './RailRightHandOperation';
@@ -8,6 +9,7 @@ import './RailSignalPlatformClearance';
 import './RailLightingAndIndicators';
 import './RailSupportClearance';
 import './RailStationArchitecture';
+import './RailStationPolish';
 import './PedestrianSignalOrientation';
 import './RailPassengerStationAccess';
 import '../world/RailPassengerAutoAttach';

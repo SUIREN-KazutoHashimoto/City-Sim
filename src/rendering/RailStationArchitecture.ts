@@ -73,11 +73,11 @@ function pushFacadeRange(
     const rb = self.offsetPoint(smooth, e, roofOffset) as { x: number; z: number; heading: number } | null;
     if (!a || !b || !ra || !rb) continue;
 
-    // 壁は薄板として外周だけに置く。駅内部を埋める箱にはしない。
+    // 車両屋根(約+3.45m)とホーム照明(+4.38m)を包める高さへ駅シェルを統一する。
     self.pushRibbonSegment(a, b, spec.y + 1.04, 0.92, 0.18, lowerWalls);
-    self.pushRibbonSegment(a, b, spec.y + 2.18, 1.18, 0.12, glass);
-    self.pushRibbonSegment(a, b, spec.y + 3.18, 0.42, 0.22, fascia);
-    self.pushRibbonSegment(ra, rb, spec.y + 3.52, 0.16, spec.width * 0.92, roofCaps);
+    self.pushRibbonSegment(a, b, spec.y + 2.62, 1.84, 0.12, glass);
+    self.pushRibbonSegment(a, b, spec.y + 4.05, 0.52, 0.22, fascia);
+    self.pushRibbonSegment(ra, rb, spec.y + 4.58, 0.18, spec.width * 0.92, roofCaps);
   }
 }
 
@@ -108,7 +108,7 @@ function buildPlatformShell(
     if (Math.abs(s - spec.center) < centerGap + 0.8) continue;
     const p = self.offsetPoint(smooth, s, outer) as { x: number; z: number; heading: number } | null;
     if (!p) continue;
-    frames.push({ matrix: self.matrix(p.x, spec.y + 2.02, p.z, 0.20, 2.95, 0.20) });
+    frames.push({ matrix: self.matrix(p.x, spec.y + 2.28, p.z, 0.20, 4.20, 0.20) });
   }
 
   // 妻面は上部だけにして、ホーム端の通行と線路側を塞がない。
@@ -116,12 +116,12 @@ function buildPlatformShell(
     const p = self.offsetPoint(smooth, d, spec.offset) as { x: number; z: number; heading: number } | null;
     if (!p) continue;
     const endWidth = Math.max(1.8, spec.width * 0.78);
-    frames.push({ matrix: self.matrix(p.x, spec.y + 3.18, p.z, endWidth, 0.38, 0.22, -p.heading + Math.PI / 2) });
+    frames.push({ matrix: self.matrix(p.x, spec.y + 4.06, p.z, endWidth, 0.44, 0.22, -p.heading + Math.PI / 2) });
   }
 
   const signPoint = self.offsetPoint(smooth, spec.center, outer) as { x: number; z: number; heading: number } | null;
   if (signPoint) {
-    signs.push({ matrix: self.matrix(signPoint.x, spec.y + 2.95, signPoint.z, 5.2, 0.72, 0.16, -signPoint.heading) });
+    signs.push({ matrix: self.matrix(signPoint.x, spec.y + 3.30, signPoint.z, 5.2, 0.72, 0.16, -signPoint.heading) });
   }
 }
 
