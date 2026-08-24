@@ -5,14 +5,16 @@ export class SimulationClock {
   readonly fixedStep = 1 / 30;
   maxSubSteps = 40;
   stepDt = 1 / 30;
+  private readonly maxAdaptiveStep = 1.5;
 
   /**
    * Convert real elapsed time into simulation work without silently discarding elapsed time.
    *
-   * The caller owns long-pause protection. Runtime scheduling may intentionally pass more than
-   * 0.1 real seconds when it is catching up after a slow batch, so this layer must not clamp the
-   * delta. When more than maxSubSteps fixed steps are needed we preserve the requested simulated
-   * duration by widening stepDt, matching the existing high-speed simulation-LOD behaviour.
+   * Runtime scheduling may intentionally pass more than 0.1 real seconds when it is catching up
+   * after a slow batch. That requested time is accumulated as simulation debt. A single simulation
+   * step is capped at 1.5s because pedestrian path-node/signal transitions are still coordinated on
+   * the main thread; much larger dt values can jump across the current target node. Excess debt is
+   * retained for later batches rather than being dropped.
    */
   advance(realDeltaSec: number): number {
     const real = Number.isFinite(realDeltaSec) ? Math.max(0, realDeltaSec) : 0;
@@ -31,13 +33,18 @@ export class SimulationClock {
       return steps;
     }
 
-    const total = this._accumulator;
-    this.stepDt = total / this.maxSubSteps;
-    this._totalSeconds += total;
-    this._accumulator = 0;
+    const processable = Math.min(this._accumulator, this.maxSubSteps * this.maxAdaptiveStep);
+    this.stepDt = processable / this.maxSubSteps;
+    this._totalSeconds += processable;
+    this._accumulator -= processable;
     return this.maxSubSteps;
   }
 
+  get pendingSimSeconds(): number { return Math.max(0, this._accumulator); }
+  get pendingRealSeconds(): number {
+    const scale = Math.max(0, this.timeScale);
+    return scale > 0 ? this.pendingSimSeconds / scale : 0;
+  }
   get totalSeconds(): number { return this._totalSeconds; }
   get hour(): number { return Math.floor((this._totalSeconds / 3600) % 24); }
   get minute(): number { return Math.floor((this._totalSeconds / 60) % 60); }
