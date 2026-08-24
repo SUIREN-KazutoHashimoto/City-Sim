@@ -4,6 +4,8 @@ let cellSize = 200, invCell = 1 / 200;
 let x = new Float32Array(0), z = new Float32Array(0), priceTier = new Float32Array(0);
 let capacity = new Int32Array(0), category = new Uint8Array(0), occupancy = new Int32Array(0);
 
+type WorkerMessenger = { postMessage(message: unknown, transfer: ArrayBuffer[]): void };
+
 // Dense category/cell linked lists. For a 10km city at 200m cells this is only a few
 // tens of thousands of Int32 heads and is substantially cheaper to traverse than nested Maps.
 let minCx = 0, minCz = 0, gridWidth = 0, gridHeight = 0, cellsPerCategory = 0, categoryCount = 0;
@@ -98,5 +100,5 @@ self.onmessage = (ev: MessageEvent) => {
       ? findBest(categories[i], xs[i], zs[i], wealth[i])
       : findNearest(categories[i], xs[i], zs[i]);
   }
-  postMessage({ type: 'result', jobId: m.jobId, offset: m.offset, results }, [results.buffer]);
+  (self as unknown as WorkerMessenger).postMessage({ type: 'result', jobId: m.jobId, offset: m.offset, results }, [results.buffer]);
 };
