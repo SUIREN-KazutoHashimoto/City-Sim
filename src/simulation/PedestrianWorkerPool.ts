@@ -13,13 +13,20 @@ interface WorkerReply { type: 'done'; jobId: number; timing: PedestrianWorkerTim
 
 const ZERO_TIMING: PedestrianWorkerTiming = { prepMs: 0, indexMs: 0, avoidMoveMs: 0, barrierMs: 0, totalMs: 0 };
 const METRIC_STRIDE = 5;
+const JOB_EPOCH = 4;
+const JOB_ID = 5;
+const JOB_ACTIVE_COUNT = 6;
+const JOB_MOVE_COUNT = 7;
+const JOB_DT_MICROS = 8;
+const CONTROL_SIZE = 9;
 
 /**
  * Pedestrian spatial index / avoidance / movement integration worker pool.
  *
- * One message is dispatched to each worker per simulation step. Workers synchronize with
- * Atomics.wait/notify barriers internally, so the main thread no longer performs a separate
- * index dispatch/await followed by a movement dispatch/await.
+ * Workers are initialized once and then sleep on a SharedArrayBuffer job epoch. A simulation
+ * step is dispatched with Atomics.store/notify rather than one postMessage per worker. This
+ * leaves only the final completion postMessage on the hot path and substantially reduces
+ * browser task-delivery/scheduling overhead (DispatchGap).
  *
  * Each step:
  * 1. clears only cells used by the previous step and snapshots active pedestrian positions,
@@ -61,11 +68,9 @@ export class PedestrianWorkerPool {
     this.desiredX = f32(); this.desiredZ = f32();
     this.activeIds = i32(); this.moveIds = i32();
     this.snapshotX = f32(); this.snapshotZ = f32(); this.nextInCell = i32(); this.usedCells = i32();
-    this.control = new Int32Array(alloc(4 * Int32Array.BYTES_PER_ELEMENT));
+    this.control = new Int32Array(alloc(CONTROL_SIZE * Int32Array.BYTES_PER_ELEMENT));
     this.metrics = new Float32Array(alloc(desiredWorkerCount * METRIC_STRIDE * Float32Array.BYTES_PER_ELEMENT));
 
-    // 32m padding on each side. At a 10km city this is about 1.58M Int32 cells (~6.3MB),
-    // but only cells touched by pedestrians are cleared on the next step.
     this.gridWidth = Math.max(8, Math.ceil((worldSizeMeters - this.gridOrigin + 32) / this.cellSize) + 1);
     this.cellHead = new Int32Array(alloc(this.gridWidth * this.gridWidth * Int32Array.BYTES_PER_ELEMENT));
     this.cellHead.fill(-1);
@@ -117,20 +122,18 @@ export class PedestrianWorkerPool {
 
   begin(): void { this.activeCount = 0; this.moveCount = 0; }
 
-  /** Include a pedestrian in neighbor avoidance even when it is currently waiting/stopped. */
   include(agent: number): void {
     if (this.activeCount >= this.activeIds.length) return;
     this.activeIds[this.activeCount++] = agent;
   }
 
-  /** Queue the base desired direction. Separation is added in the Worker. */
   queue(agent: number, desiredX: number, desiredZ: number): void {
     if (this.moveCount >= this.moveIds.length) return;
     this.desiredX[agent] = desiredX; this.desiredZ[agent] = desiredZ;
     this.moveIds[this.moveCount++] = agent;
   }
 
-  /** One main-thread dispatch per worker; all index/movement phase synchronization stays inside workers. */
+  /** Wake all persistent workers through the shared job epoch; no per-step worker postMessage. */
   flush(dt: number): Promise<void> {
     if (!this.active || this.activeCount <= 0 || this.moveCount <= 0 || dt <= 0) {
       this.latestTimingState = { ...ZERO_TIMING };
@@ -140,9 +143,12 @@ export class PedestrianWorkerPool {
     const jobId = this.nextJobId++;
     return new Promise<void>((resolve, reject) => {
       this.pending.set(jobId, { resolve, reject });
-      for (const worker of this.workers) {
-        worker.postMessage({ type: 'step', jobId, activeCount: this.activeCount, moveCount: this.moveCount, dt });
-      }
+      Atomics.store(this.control, JOB_ID, jobId);
+      Atomics.store(this.control, JOB_ACTIVE_COUNT, this.activeCount);
+      Atomics.store(this.control, JOB_MOVE_COUNT, this.moveCount);
+      Atomics.store(this.control, JOB_DT_MICROS, Math.max(1, Math.min(0x7fffffff, Math.round(dt * 1_000_000))));
+      Atomics.add(this.control, JOB_EPOCH, 1);
+      Atomics.notify(this.control, JOB_EPOCH, this.workers.length);
     });
   }
 
