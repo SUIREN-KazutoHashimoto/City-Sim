@@ -29,7 +29,7 @@ export interface RailFrameProfile {
  * This scheduler preserves the 0.5s slice at normal speed, but uses a bounded multirate slice
  * at accelerated speeds and caps each RAF to at most six operation passes plus a small CPU
  * budget. Unprocessed simulation seconds stay in a backlog and are consumed by later frames.
- * Visual mesh/signal synchronization still happens once per RAF.
+ * Visual mesh/signal synchronization still happens once per rendered frame.
  *
  * The internal-method adapter is intentionally isolated here. TypeScript `private` methods are
  * normal prototype methods at runtime in the current build; keeping this coupling in one file
@@ -45,7 +45,10 @@ export class RailFrameScheduler {
 
   update(realDt: number, timeScale: number, paused: boolean): RailFrameProfile {
     const totalStart = performance.now();
-    const frameDt = Math.max(0, Math.min(realDt, 0.05));
+    // High-speed simulation may deliberately render at 10-30 FPS to leave the main thread free
+    // for Worker continuations. Preserve those longer rendered-frame intervals instead of the
+    // old 50ms clamp, otherwise rail time would run slow whenever render throttling is active.
+    const frameDt = Math.max(0, Math.min(realDt, 0.1));
     const scale = Number.isFinite(timeScale) ? Math.max(0, timeScale) : 0;
 
     if (!paused && frameDt > 0 && scale > 0) {
