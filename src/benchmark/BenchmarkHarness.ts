@@ -6,6 +6,8 @@ import type { World } from '../world/World';
 import { APP_VERSION } from '../version';
 
 const AUTO_PARAM = 'citysim-benchmark';
+const BENCHMARK_SEED_PARAM = 'citysim-seed';
+const STANDARD_BENCHMARK_SEED = 3024482710;
 const SAMPLE_INTERVAL_MS = 250;
 
 interface PhaseSpec { label: string; speedLabel: string; scale: number; durationMs: number; }
@@ -77,7 +79,8 @@ interface BenchmarkSample {
 interface NumericStats { n: number; mean: number; min: number; p50: number; p95: number; max: number; }
 
 const benchWindow = window as BenchWindow;
-const autoRequested = new URL(window.location.href).searchParams.get(AUTO_PARAM) === '1';
+const initialUrl = new URL(window.location.href);
+const autoRequested = initialUrl.searchParams.get(AUTO_PARAM) === '1';
 if (autoRequested) benchWindow.__CITY_SIM_BENCH_HOLD__ = true;
 
 let latestFrame: LatestFrame | null = null;
@@ -134,7 +137,7 @@ class BenchmarkHarness {
 
     this.root.style.cssText = 'position:fixed;left:8px;bottom:36px;z-index:31;display:flex;align-items:center;gap:7px;font:11px/1.2 ui-monospace,monospace;color:#cdd7e5;background:rgba(8,12,18,.78);border:1px solid rgba(52,68,91,.72);border-radius:6px;padding:5px 7px;user-select:none';
     this.button.textContent = 'BENCH';
-    this.button.title = 'Fresh standard benchmark with isolated speed phases; downloads one JSON report.';
+    this.button.title = `Fresh standard benchmark; fixed seed ${STANDARD_BENCHMARK_SEED}; downloads one JSON report.`;
     this.button.style.cssText = 'padding:3px 8px;font:600 11px ui-monospace,monospace;cursor:pointer;border-radius:4px;border:1px solid #4d6685;background:#21344d;color:#e7eef8';
     this.status.textContent = '100s standard'; this.status.style.opacity = '.72';
     this.root.append(this.button, this.status); document.body.appendChild(this.root);
@@ -151,14 +154,17 @@ class BenchmarkHarness {
   private requestFreshRun(): void {
     const url = new URL(window.location.href);
     url.searchParams.set(AUTO_PARAM, '1');
+    url.searchParams.set(BENCHMARK_SEED_PARAM, String(STANDARD_BENCHMARK_SEED));
     window.location.href = url.toString();
   }
 
   private async waitAndRun(): Promise<void> {
-    this.status.textContent = 'preparing…';
+    this.status.textContent = `preparing seed ${STANDARD_BENCHMARK_SEED}…`;
     const deadline = performance.now() + 15_000;
     while ((!latestFrame || !this.findSpeedButton('1m/s') || !schedulerControl()) && performance.now() < deadline) await sleep(50);
     if (!latestFrame || !schedulerControl()) { this.status.textContent = 'failed: benchmark control unavailable'; return; }
+    const seedParam = new URL(window.location.href).searchParams.get(BENCHMARK_SEED_PARAM);
+    if (seedParam !== String(STANDARD_BENCHMARK_SEED)) { this.status.textContent = 'failed: benchmark seed mismatch'; return; }
     await this.run();
   }
 
@@ -323,9 +329,9 @@ class BenchmarkHarness {
 
     const finalScheduler = control.snapshot();
     const report = {
-      schema: 'city-sim-benchmark-v2', appVersion: APP_VERSION, startedAt: this.startedAt, finishedAt: new Date().toISOString(),
+      schema: 'city-sim-benchmark-v3', appVersion: APP_VERSION, startedAt: this.startedAt, finishedAt: new Date().toISOString(),
       aborted: this.cancelled, plan: PHASES, environment: this.environment(latestFrame!),
-      scenario: { requestedPopulation: finalScheduler.requestedPopulation, actualPopulation: finalScheduler.actualPopulation },
+      scenario: { benchmarkSeed: STANDARD_BENCHMARK_SEED, requestedPopulation: finalScheduler.requestedPopulation, actualPopulation: finalScheduler.actualPopulation },
       initial: { hudText: initialHud, worldStats: initialWorldStats, activity: initialActivity, scheduler: initialScheduler },
       final: { hudText: document.getElementById('hud')?.textContent ?? '', worldStats: monitor.world.stats(), activity: monitor.world.activitySnapshot(), states: this.countStates(monitor.world), scheduler: finalScheduler },
       phaseSummaries: this.phaseSummaries, samples: this.samples,

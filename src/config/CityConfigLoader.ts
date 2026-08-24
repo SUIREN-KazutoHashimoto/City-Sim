@@ -24,6 +24,8 @@ const DEFAULT_CONFIG: RuntimeCityConfig = {
   planning: { ...DEFAULT_CITY_PLANNING },
 };
 
+const BENCHMARK_SEED_PARAM = 'citysim-seed';
+
 function requireFinite(name: string, value: number, min: number, max: number): number {
   if (!Number.isFinite(value) || value < min || value > max) {
     throw new Error(`${name} must be between ${min} and ${max}. actual=${value}`);
@@ -68,7 +70,17 @@ export async function loadCityConfig(url = '/config/city.json'): Promise<Runtime
   return cfg;
 }
 
+function querySeedOverride(): number | null {
+  if (typeof globalThis.location === 'undefined') return null;
+  const raw = new URLSearchParams(globalThis.location.search).get(BENCHMARK_SEED_PARAM);
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff ? value >>> 0 : null;
+}
+
 export function resolveCitySeed(setting: CitySeedSetting): number {
+  const override = querySeedOverride();
+  if (override !== null) return override;
   if (setting !== 'random') return Math.trunc(setting) >>> 0;
 
   if (globalThis.crypto?.getRandomValues) {
