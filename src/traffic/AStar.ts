@@ -7,6 +7,7 @@ export interface PathGraph { nodes: { x: number; z: number; edges: number[] }[];
  * - reset only nodes touched by the previous search instead of filling every work array,
  * - keep a bounded LRU of completed routes because commute/bus requests frequently repeat
  *   the same node pairs on a static graph,
+ * - use an allocation-free numeric route-cache key instead of `${start}:${goal}` strings,
  * - keep heap positions so decrease-key remains O(log n).
  */
 export class AStar {
@@ -19,10 +20,11 @@ export class AStar {
   private heapPos: Int32Array;
   private touched: number[] = [];
   private heap: number[] = [];
-  private readonly routeCache = new Map<string, number[]>();
+  private readonly routeCache = new Map<number, number[]>();
   private readonly routeCacheLimit: number;
+  private readonly routeKeyStride: number;
 
-  constructor(private net: PathGraph, private mode: 'drive' | 'walk' = 'drive', routeCacheLimit = 4096) {
+  constructor(private net: PathGraph, private mode: 'drive' | 'walk' = 'drive', routeCacheLimit = 8192) {
     const n = net.nodes.length;
     this.g = new Float64Array(n);
     this.f = new Float64Array(n);
@@ -33,13 +35,16 @@ export class AStar {
     this.heapPos = new Int32Array(n);
     this.heapPos.fill(-1);
     this.routeCacheLimit = Math.max(0, routeCacheLimit | 0);
+    this.routeKeyStride = Math.max(1, n);
   }
 
   findPath(start: number, goal: number): number[] {
     if (start < 0 || goal < 0 || start >= this.net.nodes.length || goal >= this.net.nodes.length) return [];
     if (start === goal) return [start];
 
-    const cacheKey = `${start}:${goal}`;
+    // start/goal are integer node IDs. With practical city graph sizes this stays far below
+    // Number.MAX_SAFE_INTEGER while avoiding a temporary string allocation on every search.
+    const cacheKey = start * this.routeKeyStride + goal;
     const cached = this.routeCache.get(cacheKey);
     if (cached !== undefined) {
       this.routeCache.delete(cacheKey);
@@ -103,11 +108,11 @@ export class AStar {
     this.touched.length = 0;
   }
 
-  private remember(key: string, path: number[]): void {
+  private remember(key: number, path: number[]): void {
     if (this.routeCacheLimit <= 0) return;
     this.routeCache.set(key, path);
     if (this.routeCache.size <= this.routeCacheLimit) return;
-    const oldest = this.routeCache.keys().next().value as string | undefined;
+    const oldest = this.routeCache.keys().next().value as number | undefined;
     if (oldest !== undefined) this.routeCache.delete(oldest);
   }
 
