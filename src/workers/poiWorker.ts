@@ -4,21 +4,12 @@ let cellSize = 200, invCell = 1 / 200;
 let x = new Float32Array(0), z = new Float32Array(0), priceTier = new Float32Array(0);
 let capacity = new Int32Array(0), category = new Uint8Array(0), occupancy = new Int32Array(0);
 
+type WorkerMessenger = { postMessage(message: unknown, transfer: ArrayBuffer[]): void };
+
 // Dense category/cell linked lists. For a 10km city at 200m cells this is only a few
 // tens of thousands of Int32 heads and is substantially cheaper to traverse than nested Maps.
 let minCx = 0, minCz = 0, gridWidth = 0, gridHeight = 0, cellsPerCategory = 0, categoryCount = 0;
 let cellHead = new Int32Array(0), nextInCell = new Int32Array(0);
-
-const JOB_EPOCH = 0;
-const JOB_ID = 1;
-const JOB_KIND = 2;
-const DONE_COUNT = 4;
-const DONE_EPOCH = 5;
-const KIND_BEST = 0;
-
-let workerId = 0, workerCount = 1, completionByAtomics = false;
-let control!: Int32Array, ranges!: Int32Array, queryCategories!: Uint8Array;
-let queryXs!: Float32Array, queryZs!: Float32Array, queryWealth!: Float32Array, results!: Int32Array;
 
 const occupied = (id: number): number => typeof SharedArrayBuffer !== 'undefined' && occupancy.buffer instanceof SharedArrayBuffer ? Atomics.load(occupancy, id) : occupancy[id];
 
@@ -93,47 +84,21 @@ function findNearest(cat: number, qx: number, qz: number): number {
   return bestId;
 }
 
-function runRange(begin: number, end: number, kind: number): void {
-  for (let i = begin; i < end; i++) {
-    results[i] = kind === KIND_BEST
-      ? findBest(queryCategories[i], queryXs[i], queryZs[i], queryWealth[i])
-      : findNearest(queryCategories[i], queryXs[i], queryZs[i]);
-  }
-}
-
-function finish(jobId: number): void {
-  const done = Atomics.add(control, DONE_COUNT, 1) + 1;
-  if (done !== workerCount) return;
-  Atomics.add(control, DONE_EPOCH, 1);
-  Atomics.notify(control, DONE_EPOCH, 1);
-  if (!completionByAtomics) postMessage({ type: 'done', jobId });
-}
-
-function runLoop(): never {
-  let seenEpoch = 0;
-  for (;;) {
-    let epoch = Atomics.load(control, JOB_EPOCH);
-    if (epoch === seenEpoch) {
-      Atomics.wait(control, JOB_EPOCH, seenEpoch);
-      epoch = Atomics.load(control, JOB_EPOCH);
-      if (epoch === seenEpoch) continue;
-    }
-    seenEpoch = epoch;
-    const jobId = Atomics.load(control, JOB_ID), kind = Atomics.load(control, JOB_KIND);
-    runRange(ranges[workerId * 2], ranges[workerId * 2 + 1], kind);
-    finish(jobId);
-  }
-}
-
 self.onmessage = (ev: MessageEvent) => {
   const m = ev.data;
-  if (m.type !== 'init') return;
-  workerId = m.workerId; workerCount = m.workerCount; completionByAtomics = m.completionByAtomics;
-  cellSize = m.cellSize; invCell = 1 / cellSize;
-  x = m.x; z = m.z; priceTier = m.priceTier; capacity = m.capacity; category = m.category; occupancy = m.occupancy;
-  control = new Int32Array(m.shared.control); ranges = new Int32Array(m.shared.ranges);
-  queryCategories = new Uint8Array(m.shared.categories); queryXs = new Float32Array(m.shared.xs); queryZs = new Float32Array(m.shared.zs);
-  queryWealth = new Float32Array(m.shared.wealth); results = new Int32Array(m.shared.results);
-  buildIndex();
-  runLoop();
+  if (m.type === 'init') {
+    cellSize = m.cellSize; invCell = 1 / cellSize;
+    x = m.x; z = m.z; priceTier = m.priceTier; capacity = m.capacity; category = m.category; occupancy = m.occupancy;
+    buildIndex(); return;
+  }
+  if (m.type !== 'search') return;
+
+  const categories = m.categories as Uint8Array, xs = m.xs as Float32Array, zs = m.zs as Float32Array, wealth = m.wealth as Float32Array;
+  const results = new Int32Array(categories.length);
+  for (let i = 0; i < categories.length; i++) {
+    results[i] = m.kind === 'best'
+      ? findBest(categories[i], xs[i], zs[i], wealth[i])
+      : findNearest(categories[i], xs[i], zs[i]);
+  }
+  (self as unknown as WorkerMessenger).postMessage({ type: 'result', jobId: m.jobId, offset: m.offset, results }, [results.buffer]);
 };
