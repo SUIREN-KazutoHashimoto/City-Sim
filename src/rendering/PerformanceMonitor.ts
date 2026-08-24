@@ -26,6 +26,9 @@ interface SimProfile {
   totalMs: number;
   workerMs: number;
   poiWorkerMs: number;
+  poiWorkerComputeMs: number;
+  poiWorkerReturnMs: number;
+  poiWorkerRounds: number;
   pedWorkerMs: number;
   pedWorkerPrepMs: number;
   pedWorkerIndexMs: number;
@@ -86,6 +89,7 @@ interface HistorySample {
 
 interface TimerExt { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number; }
 interface PedTiming { prepMs: number; indexMs: number; avoidMoveMs: number; barrierMs: number; totalMs: number; wakeMs: number; returnMs: number; }
+interface POITiming { totalMs: number; computeMs: number; returnMs: number; workers: number; }
 
 interface WorldInternals {
   stepCore: (dtSec: number, updateNeeds: boolean, updateActivities: boolean, updateDecisions: boolean) => void;
@@ -98,14 +102,14 @@ interface WorldInternals {
   brain: { plan: (...args: unknown[]) => unknown };
   walkAstar: { findPath: (start: number, goal: number) => number[] };
   agentWorkers: { updateAgentBatch: (dt: number, now: number, count?: number) => Promise<void> };
-  poiWorkers: { findBestBatch: (queries: readonly unknown[]) => Promise<Int32Array> };
+  poiWorkers: { findBestBatch: (queries: readonly unknown[]) => Promise<Int32Array>; readonly latestTiming: POITiming };
   pedWorkers: { flush: (dt: number) => Promise<void>; readonly latestTiming: PedTiming; readonly completionMode: 'atomics' | 'message' };
 }
 
 interface TrafficInternals { astar: { findPath: (start: number, goal: number) => number[] }; }
 
 const emptySim = (): SimProfile => ({
-  totalMs: 0, workerMs: 0, poiWorkerMs: 0, pedWorkerMs: 0,
+  totalMs: 0, workerMs: 0, poiWorkerMs: 0, poiWorkerComputeMs: 0, poiWorkerReturnMs: 0, poiWorkerRounds: 0, pedWorkerMs: 0,
   pedWorkerPrepMs: 0, pedWorkerIndexMs: 0, pedWorkerAvoidMoveMs: 0, pedWorkerBarrierMs: 0, pedWorkerCoreMs: 0,
   pedWorkerWakeMs: 0, pedWorkerReturnMs: 0, pedWorkerRounds: 0,
   agentMs: 0, pedBlocksMs: 0, trafficMs: 0, signalsMs: 0, busMs: 0, logisticsMs: 0,
@@ -196,7 +200,15 @@ class SimulationProfiler {
     };
     const originalPoiWorker = w.poiWorkers.findBestBatch.bind(w.poiWorkers);
     w.poiWorkers.findBestBatch = async (queries: readonly unknown[]): Promise<Int32Array> => {
-      const t = performance.now(); const out = await originalPoiWorker(queries); if (this.inBatch) this.current.poiWorkerMs += performance.now() - t; return out;
+      const t = performance.now(); const out = await originalPoiWorker(queries);
+      if (this.inBatch) {
+        this.current.poiWorkerMs += performance.now() - t;
+        const m = w.poiWorkers.latestTiming;
+        this.current.poiWorkerComputeMs += m.computeMs;
+        this.current.poiWorkerReturnMs += m.returnMs;
+        this.current.poiWorkerRounds++;
+      }
+      return out;
     };
     const originalPedWorker = w.pedWorkers.flush.bind(w.pedWorkers);
     w.pedWorkers.flush = async (dt: number): Promise<void> => {
@@ -338,8 +350,9 @@ PED total ${pedMs.toFixed(1)}  Block ${p.pedBlocksMs.toFixed(1)}  MainIndex ${p.
     Worker Prep ${p.pedWorkerPrepMs.toFixed(1)}  Index ${p.pedWorkerIndexMs.toFixed(1)}  Avoid+Move ${p.pedWorkerAvoidMoveMs.toFixed(1)}  Barrier ${p.pedWorkerBarrierMs.toFixed(1)}
     Wake ${p.pedWorkerWakeMs.toFixed(1)}  Return ${p.pedWorkerReturnMs.toFixed(1)}  OtherGap ${otherGap.toFixed(1)}  DispatchGap ${dispatchGap.toFixed(1)}  rounds ${p.pedWorkerRounds} ${completionMode}
     ${pedUsPerStep}us/ped/step  peds ${activePedestrians}
-POI WorkerSearch ${p.poiWorkerMs.toFixed(1)}  MainSearch ${p.poiFindBestMs.toFixed(1)}/${p.poiFindBestCount}  Parking ${p.poiParkingMs.toFixed(1)}/${p.poiParkingCount}
-    Reserve/Release ${p.poiMutationMs.toFixed(1)}/${p.poiMutationCount}  Activity+Arrival ${actMs.toFixed(1)}
+POI WorkerSearch ${p.poiWorkerMs.toFixed(1)}  Compute ${p.poiWorkerComputeMs.toFixed(1)}  Return ${p.poiWorkerReturnMs.toFixed(1)}  rounds ${p.poiWorkerRounds}
+    MainSearch ${p.poiFindBestMs.toFixed(1)}/${p.poiFindBestCount}  Parking ${p.poiParkingMs.toFixed(1)}/${p.poiParkingCount}  Reserve/Release ${p.poiMutationMs.toFixed(1)}/${p.poiMutationCount}
+    Activity+Arrival ${actMs.toFixed(1)}
 SYS Bus ${p.busMs.toFixed(1)}  Logistics ${p.logisticsMs.toFixed(1)}  Signals ${p.signalsMs.toFixed(1)}  Other ${p.otherMs.toFixed(1)}
 A* walk ${p.astarWalkMs.toFixed(1)}ms/${p.astarWalkCount} max ${p.astarWalkMaxMs.toFixed(2)}ms   vehicle ${p.astarVehicleMs.toFixed(1)}ms/${p.astarVehicleCount} max ${p.astarVehicleMaxMs.toFixed(2)}ms
 LOAD visible A ${this.latestLod.agents.join('/')}  V ${this.latestLod.vehicles.join('/')}  B ${this.latestLod.buildings.join('/')}  ped ${activePedestrians}  engaged ${engaged}  driving ${drivingVehicles}`;

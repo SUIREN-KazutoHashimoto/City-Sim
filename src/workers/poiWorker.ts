@@ -95,10 +95,12 @@ self.onmessage = (ev: MessageEvent) => {
 
   const categories = m.categories as Uint8Array, xs = m.xs as Float32Array, zs = m.zs as Float32Array, wealth = m.wealth as Float32Array;
   const results = new Int32Array(categories.length);
+  const startedAt = performance.now();
   for (let i = 0; i < categories.length; i++) {
     results[i] = m.kind === 'best'
       ? findBest(categories[i], xs[i], zs[i], wealth[i])
       : findNearest(categories[i], xs[i], zs[i]);
   }
-  (self as unknown as WorkerMessenger).postMessage({ type: 'result', jobId: m.jobId, offset: m.offset, results }, [results.buffer]);
+  const computeMs = performance.now() - startedAt;
+  (self as unknown as WorkerMessenger).postMessage({ type: 'result', jobId: m.jobId, offset: m.offset, results, computeMs }, [results.buffer]);
 };
