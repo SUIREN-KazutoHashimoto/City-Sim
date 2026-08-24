@@ -4,10 +4,12 @@ import { installRailInterlockingSafety } from './RailInterlockingSafety';
 import { installRailLeftHandRuntime, prepareRailLeftHandTraffic } from './RailLeftHandTraffic';
 import { prepareRailMotionTuning } from './RailMotionTuning';
 import { installHighSpeedSleeperSpacing, prepareRailSleeperSpacing } from './RailSleeperTuning';
+import { prepareRailCabCameraTuning } from './RailCabCameraTuning';
 
 prepareRailMotionTuning();
 prepareRailLeftHandTraffic();
 prepareRailSleeperSpacing();
+prepareRailCabCameraTuning();
 
 interface RailRuntimeInternals {
   stepOperations: (dt: number) => void;
