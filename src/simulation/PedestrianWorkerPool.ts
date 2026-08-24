@@ -23,6 +23,7 @@ const M_AVOID_MOVE = 2;
 const M_BARRIER = 3;
 const M_TOTAL = 4;
 const M_WAKE = 5;
+const USED_CELL_COUNT = 2;
 const JOB_EPOCH = 4;
 const JOB_ID = 5;
 const JOB_ACTIVE_COUNT = 6;
@@ -34,6 +35,11 @@ const DONE_TIME_MS = 11;
 const CONTROL_SIZE = 12;
 const TIME_MASK = 0x3fffffff;
 
+// Below this active-pedestrian count, BENCH data shows Worker compute is tiny compared with
+// Worker -> main continuation latency. Run the same snapshot/index/avoidance integration on the
+// Coordinator thread and keep the 4-worker path for dense crowds/cold-start bursts.
+const SYNC_ACTIVE_THRESHOLD = 4096;
+
 const nowMs32 = (): number => Date.now() & TIME_MASK;
 const elapsedMs32 = (start: number, end: number): number => (end - start + TIME_MASK + 1) & TIME_MASK;
 
@@ -44,6 +50,10 @@ const elapsedMs32 = (start: number, end: number): number => (end - start + TIME_
  * directions avoid Worker message delivery when Atomics.waitAsync is available:
  * - main -> workers: JOB_EPOCH + Atomics.notify
  * - workers -> main: DONE_EPOCH + Atomics.notify / Atomics.waitAsync
+ *
+ * Sparse settled steps use a synchronous path with the same snapshot/index/avoidance equations
+ * to avoid paying an event-loop roundtrip that is much larger than the actual computation.
+ * Dense steps still use the persistent Worker pool.
  *
  * postMessage remains only as a compatibility fallback for browsers without Atomics.waitAsync.
  */
@@ -68,11 +78,12 @@ export class PedestrianWorkerPool {
   private activeCount = 0;
   private moveCount = 0;
   private readonly cellSize = 8;
+  private readonly invCellSize = 1 / 8;
   private readonly gridOrigin = -32;
   private readonly gridWidth: number;
   private latestTimingState: PedestrianWorkerTiming = { ...ZERO_TIMING };
 
-  constructor(store: AgentStore, worldSizeMeters: number) {
+  constructor(private readonly store: AgentStore, worldSizeMeters: number) {
     const shared = store.sharedMemory && typeof SharedArrayBuffer !== 'undefined';
     const waitAsync = (Atomics as unknown as AtomicsWithWaitAsync).waitAsync;
     this.useAtomicsCompletion = shared && typeof waitAsync === 'function';
@@ -152,10 +163,15 @@ export class PedestrianWorkerPool {
     this.moveIds[this.moveCount++] = agent;
   }
 
-  /** Wake persistent workers and await completion without a Worker message when supported. */
+  /** Use the Coordinator for sparse work, otherwise wake persistent workers and await completion. */
   async flush(dt: number): Promise<void> {
     if (!this.active || this.activeCount <= 0 || this.moveCount <= 0 || dt <= 0) {
       this.latestTimingState = { ...ZERO_TIMING };
+      return;
+    }
+
+    if (this.activeCount <= SYNC_ACTIVE_THRESHOLD) {
+      this.flushSynchronous(dt);
       return;
     }
 
@@ -187,6 +203,91 @@ export class PedestrianWorkerPool {
       this.pending.set(jobId, { resolve, reject });
       this.dispatch(jobId, dt);
     });
+  }
+
+  private cellOf(x: number, z: number): number {
+    const cx = Math.floor((x - this.gridOrigin) * this.invCellSize);
+    const cz = Math.floor((z - this.gridOrigin) * this.invCellSize);
+    if (cx < 0 || cz < 0 || cx >= this.gridWidth || cz >= this.gridWidth) return -1;
+    return cz * this.gridWidth + cx;
+  }
+
+  /**
+   * Single-thread equivalent of pedestrianWorker.runStep for sparse settled traffic.
+   * Worker threads are sleeping while this runs, so shared work buffers are safe to reuse.
+   */
+  private flushSynchronous(dt: number): void {
+    const totalStart = performance.now();
+    const s = this.store;
+
+    const prepStart = performance.now();
+    const previousUsed = Atomics.load(this.control, USED_CELL_COUNT);
+    for (let n = 0; n < previousUsed; n++) this.cellHead[this.usedCells[n]] = -1;
+    Atomics.store(this.control, USED_CELL_COUNT, 0);
+    for (let n = 0; n < this.activeCount; n++) {
+      const agent = this.activeIds[n];
+      this.snapshotX[agent] = s.posX[agent];
+      this.snapshotZ[agent] = s.posZ[agent];
+    }
+    const prepMs = performance.now() - prepStart;
+
+    const indexStart = performance.now();
+    let usedCount = 0;
+    for (let n = 0; n < this.activeCount; n++) {
+      const agent = this.activeIds[n];
+      const cell = this.cellOf(this.snapshotX[agent], this.snapshotZ[agent]);
+      if (cell < 0) { this.nextInCell[agent] = -1; continue; }
+      const previous = this.cellHead[cell];
+      this.cellHead[cell] = agent;
+      this.nextInCell[agent] = previous;
+      if (previous === -1) this.usedCells[usedCount++] = cell;
+    }
+    Atomics.store(this.control, USED_CELL_COUNT, usedCount);
+    const indexMs = performance.now() - indexStart;
+
+    const moveStart = performance.now();
+    const radius = 2, radius2 = radius * radius;
+    for (let n = 0; n < this.moveCount; n++) {
+      const agent = this.moveIds[n];
+      const px = this.snapshotX[agent], pz = this.snapshotZ[agent];
+      let desX = this.desiredX[agent], desZ = this.desiredZ[agent], sepX = 0, sepZ = 0, neighbors = 0;
+
+      const minCx = Math.max(0, Math.floor((px - radius - this.gridOrigin) * this.invCellSize));
+      const maxCx = Math.min(this.gridWidth - 1, Math.floor((px + radius - this.gridOrigin) * this.invCellSize));
+      const minCz = Math.max(0, Math.floor((pz - radius - this.gridOrigin) * this.invCellSize));
+      const maxCz = Math.min(this.gridWidth - 1, Math.floor((pz + radius - this.gridOrigin) * this.invCellSize));
+
+      for (let cz = minCz; cz <= maxCz; cz++) for (let cx = minCx; cx <= maxCx; cx++) {
+        let other = this.cellHead[cz * this.gridWidth + cx];
+        while (other >= 0) {
+          if (other !== agent) {
+            const dx = px - this.snapshotX[other], dz = pz - this.snapshotZ[other], d2 = dx * dx + dz * dz;
+            if (d2 > 0 && d2 < radius2) {
+              const inv = 1 / Math.sqrt(d2); sepX += dx * inv; sepZ += dz * inv; neighbors++;
+            }
+          }
+          other = this.nextInCell[other];
+        }
+      }
+
+      if (neighbors > 0) { desX += (sepX / neighbors) * 0.6; desZ += (sepZ / neighbors) * 0.6; }
+      const mag = Math.hypot(desX, desZ) || 1, sp = s.maxSpeed[agent];
+      const vx = (desX / mag) * sp, vz = (desZ / mag) * sp;
+      s.velX[agent] = vx; s.velZ[agent] = vz;
+      s.posX[agent] += vx * dt; s.posZ[agent] += vz * dt; s.heading[agent] = Math.atan2(vz, vx);
+      s.energy[agent] = Math.max(0, s.energy[agent] - (1 / (2.5 * 3600)) * dt);
+    }
+    const avoidMoveMs = performance.now() - moveStart;
+
+    this.latestTimingState = {
+      prepMs,
+      indexMs,
+      avoidMoveMs,
+      barrierMs: 0,
+      totalMs: performance.now() - totalStart,
+      wakeMs: 0,
+      returnMs: 0,
+    };
   }
 
   private dispatch(jobId: number, dt: number): void {
