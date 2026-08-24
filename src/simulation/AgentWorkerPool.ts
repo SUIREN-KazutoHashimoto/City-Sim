@@ -6,9 +6,21 @@ interface PendingJob { remaining: number; resolve: () => void; reject: (reason?:
 export class AgentWorkerPool {
   private readonly workers: Worker[] = [];
   private readonly pending = new Map<number, PendingJob>();
+  private readonly exitIds: Int32Array;
+  private readonly exitCount: Int32Array;
   private nextJobId = 1;
 
   constructor(private readonly store: AgentStore) {
+    const shared = store.sharedMemory && typeof SharedArrayBuffer !== 'undefined';
+    const exitIdsBuffer: ArrayBufferLike = shared
+      ? new SharedArrayBuffer(store.capacity * Int32Array.BYTES_PER_ELEMENT)
+      : new ArrayBuffer(store.capacity * Int32Array.BYTES_PER_ELEMENT);
+    const exitCountBuffer: ArrayBufferLike = shared
+      ? new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+      : new ArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    this.exitIds = new Int32Array(exitIdsBuffer);
+    this.exitCount = new Int32Array(exitCountBuffer);
+
     if (!store.sharedMemory || typeof Worker === 'undefined') return;
     const hc = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 4) : 4;
     const count = Math.max(1, Math.min(8, hc - 2));
@@ -23,9 +35,10 @@ export class AgentWorkerPool {
       goalCategory: store.goalCategory.buffer as SharedArrayBuffer,
       dwellUntil: store.dwellUntil.buffer as SharedArrayBuffer,
       activityExit: store.activityExit.buffer as SharedArrayBuffer,
+      exitIds: this.exitIds.buffer as SharedArrayBuffer,
+      exitCount: this.exitCount.buffer as SharedArrayBuffer,
     };
     for (let i = 0; i < count; i++) {
-      // ViteはWorkerOptionsを静的解析するため、動的なname指定は付けない。
       const worker = new Worker(new URL('../workers/agentWorker.ts', import.meta.url), { type: 'module' });
       worker.onmessage = (ev: MessageEvent<{ type: string; jobId: number }>) => {
         if (ev.data.type !== 'done') return;
@@ -46,6 +59,7 @@ export class AgentWorkerPool {
 
   updateAgentBatch(dt: number, now: number, count = this.store.count): Promise<void> {
     if (!this.active || count <= 0 || dt <= 0) return Promise.resolve();
+    Atomics.store(this.exitCount, 0, 0);
     const used = Math.min(this.workers.length, count), jobId = this.nextJobId++;
     return new Promise<void>((resolve, reject) => {
       this.pending.set(jobId, { remaining: used, resolve, reject });
@@ -54,6 +68,12 @@ export class AgentWorkerPool {
         this.workers[w].postMessage({ type: 'agent-batch', jobId, begin, end, dt, now });
       }
     });
+  }
+
+  /** IDs flagged by the last completed worker batch. Returned view is copied before the next batch. */
+  drainActivityExits(): Int32Array {
+    const count = Math.min(this.store.count, Math.max(0, Atomics.load(this.exitCount, 0)));
+    return this.exitIds.slice(0, count);
   }
 
   dispose(): void {
