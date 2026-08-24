@@ -1,8 +1,10 @@
 import type { World } from '../world/World';
 
-export const BOOT_START_SECONDS = 7.5 * 3600;
+// Begin well before the morning meal/work window so the initially-all-Idle population can settle
+// into sleep/home states and wake up over time before the visible 08:00 start.
+export const BOOT_START_SECONDS = 5 * 3600;
 export const PLAY_START_SECONDS = 8 * 3600;
-const PRE_ROLL_CHUNK_SECONDS = 30;
+const PRE_ROLL_CHUNK_SECONDS = 60;
 
 export interface PreRollProgress {
   progress: number;
@@ -13,9 +15,10 @@ export interface PreRollProgress {
 
 /**
  * Advance the real simulation before the first visible frame so the city does not expose the
- * one-time all-Idle routing/A* burst to the player. This uses the normal World batch pipeline and
- * stays within SimulationClock's supported adaptive-step range; it does not accumulate wall-time
- * debt because the runtime scheduler has not started yet.
+ * one-time all-Idle routing/A* burst or the synchronized morning transition to the player. This
+ * uses the normal World batch pipeline and stays within SimulationClock's supported 1.5s maximum
+ * adaptive step; it does not accumulate wall-time debt because the runtime scheduler has not
+ * started yet.
  */
 export async function preRollWorld(
   world: World,
