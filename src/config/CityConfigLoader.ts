@@ -26,6 +26,10 @@ const DEFAULT_CONFIG: RuntimeCityConfig = {
 
 const BENCHMARK_SEED_PARAM = 'citysim-seed';
 
+interface BenchmarkSeedGlobal {
+  __CITY_SIM_BENCH_HOLD__?: boolean;
+}
+
 function requireFinite(name: string, value: number, min: number, max: number): number {
   if (!Number.isFinite(value) || value < min || value > max) {
     throw new Error(`${name} must be between ${min} and ${max}. actual=${value}`);
@@ -70,10 +74,31 @@ export async function loadCityConfig(url = '/config/city.json'): Promise<Runtime
   return cfg;
 }
 
+function benchmarkSeedOverrideEnabled(): boolean {
+  return (globalThis as typeof globalThis & BenchmarkSeedGlobal).__CITY_SIM_BENCH_HOLD__ === true;
+}
+
+function removeStaleBenchmarkSeedParam(): void {
+  if (typeof globalThis.location === 'undefined' || typeof globalThis.history === 'undefined') return;
+  const url = new URL(globalThis.location.href);
+  if (!url.searchParams.has(BENCHMARK_SEED_PARAM)) return;
+  url.searchParams.delete(BENCHMARK_SEED_PARAM);
+  globalThis.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
 function querySeedOverride(): number | null {
   if (typeof globalThis.location === 'undefined') return null;
   const raw = new URLSearchParams(globalThis.location.search).get(BENCHMARK_SEED_PARAM);
-  if (raw === null || !/^\d+$/.test(raw)) return null;
+  if (raw === null) return null;
+
+  // citysim-seed is benchmark-only. BenchmarkHarness sets this sentinel before main.ts runs.
+  // A stale seed left in the URL after a benchmark must never affect a normal city launch.
+  if (!benchmarkSeedOverrideEnabled()) {
+    removeStaleBenchmarkSeedParam();
+    return null;
+  }
+
+  if (!/^\d+$/.test(raw)) return null;
   const value = Number(raw);
   return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff ? value >>> 0 : null;
 }
