@@ -26,8 +26,8 @@ export class InstancedRenderer {
     [POICategory.Food]: new THREE.Color(0xc98b5a), [POICategory.Retail]: new THREE.Color(0xb9a06a), [POICategory.Leisure]: new THREE.Color(0x7cba8f),
   };
   private readonly carColors = [0xd94f4f, 0x4f7fd9, 0xe0e0e0, 0x2b2b2b, 0xd9b64f, 0x54b07a, 0x8a6fd9].map((c) => new THREE.Color(c));
-  private readonly busColor = new THREE.Color(0x2f9e44);
-  private readonly truckColor = new THREE.Color(0xc26b2a);
+  private readonly baseBusColor = new THREE.Color(0x2f9e44);
+  private readonly baseTruckColor = new THREE.Color(0xc26b2a);
   constructor(private scene: THREE.Scene) {}
   get buildings(): THREE.InstancedMesh { return this.buildingMesh; }
   get agents(): THREE.InstancedMesh { return this.agentMesh; }
@@ -160,7 +160,7 @@ export class InstancedRenderer {
       this.dummy.position.set(vs.posX[v], 0, vs.posZ[v]); this.dummy.rotation.set(0, -vs.heading[v], 0);
       if (vs.isBus[v]) this.dummy.scale.set(2.6, 1.6, 1.15); else if (vs.isTruck[v]) this.dummy.scale.set(2.1, 1.9, 1.25); else this.dummy.scale.setScalar(1);
       this.dummy.updateMatrix(); mesh.setMatrixAt(n, this.dummy.matrix);
-      mesh.setColorAt(n, vs.isBus[v] ? this.busColor : vs.isTruck[v] ? this.truckColor : this.carColors[vs.colorIdx[v] % this.carColors.length]);
+      mesh.setColorAt(n, vs.isBus[v] ? this.baseBusColor : vs.isTruck[v] ? this.baseTruckColor : this.carColors[vs.colorIdx[v] % this.carColors.length]);
       this.vehicleMap[n] = v; n++;
     }
     mesh.count = n; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
