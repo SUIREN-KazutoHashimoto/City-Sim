@@ -13,13 +13,16 @@ type InitMessage = {
   type: 'init'; workerId: number; workerCount: number;
   cellSize: number; gridOrigin: number; gridWidth: number; buffers: Buffers;
 };
-type StepMessage = { type: 'step'; jobId: number; activeCount: number; moveCount: number; dt: number };
-type Message = InitMessage | StepMessage;
 
 const BARRIER_COUNT = 0;
 const BARRIER_EPOCH = 1;
 const USED_CELL_COUNT = 2;
 const DONE_COUNT = 3;
+const JOB_EPOCH = 4;
+const JOB_ID = 5;
+const JOB_ACTIVE_COUNT = 6;
+const JOB_MOVE_COUNT = 7;
+const JOB_DT_MICROS = 8;
 const METRIC_STRIDE = 5;
 const M_PREP = 0;
 const M_INDEX = 1;
@@ -41,7 +44,6 @@ const cellOf = (x: number, z: number): number => {
   return cz * gridWidth + cx;
 };
 
-/** Worker-only barrier. Atomics.wait never blocks the browser main thread. */
 function barrier(resetUsedCellCount: boolean): void {
   const epoch = Atomics.load(control, BARRIER_EPOCH);
   const arrived = Atomics.add(control, BARRIER_COUNT, 1) + 1;
@@ -141,45 +143,62 @@ function finishStep(jobId: number, prepMs: number, indexMs: number, avoidMoveMs:
   postMessage({ type: 'done', jobId, timing: { prepMs: maxPrep, indexMs: maxIndex, avoidMoveMs: maxAvoidMove, barrierMs: maxBarrier, totalMs: maxTotal } });
 }
 
-function runStep(msg: StepMessage): void {
+function runStep(jobId: number, activeCount: number, moveCount: number, dt: number): void {
   const totalStart = performance.now();
 
   const prepStart = performance.now();
-  clearAndSnapshot(msg.activeCount);
+  clearAndSnapshot(activeCount);
   const prepMs = performance.now() - prepStart;
 
   let barrierMs = 0;
   let waitStart = performance.now(); barrier(true); barrierMs += performance.now() - waitStart;
 
   const indexStart = performance.now();
-  buildIndex(msg.activeCount);
+  buildIndex(activeCount);
   const indexMs = performance.now() - indexStart;
 
   waitStart = performance.now(); barrier(false); barrierMs += performance.now() - waitStart;
 
-  const moveBegin = Math.floor((msg.moveCount * workerId) / workerCount);
-  const moveEnd = Math.floor((msg.moveCount * (workerId + 1)) / workerCount);
+  const moveBegin = Math.floor((moveCount * workerId) / workerCount);
+  const moveEnd = Math.floor((moveCount * (workerId + 1)) / workerCount);
   const moveStart = performance.now();
-  moveRange(moveBegin, moveEnd, msg.dt);
+  moveRange(moveBegin, moveEnd, dt);
   const avoidMoveMs = performance.now() - moveStart;
 
-  finishStep(msg.jobId, prepMs, indexMs, avoidMoveMs, barrierMs, performance.now() - totalStart);
+  finishStep(jobId, prepMs, indexMs, avoidMoveMs, barrierMs, performance.now() - totalStart);
 }
 
-self.onmessage = (ev: MessageEvent<Message>) => {
-  const msg = ev.data;
-  if (msg.type === 'init') {
-    workerId = msg.workerId; workerCount = msg.workerCount;
-    cellSize = msg.cellSize; invCell = 1 / cellSize; gridOrigin = msg.gridOrigin; gridWidth = msg.gridWidth;
-    posX = new Float32Array(msg.buffers.posX); posZ = new Float32Array(msg.buffers.posZ);
-    velX = new Float32Array(msg.buffers.velX); velZ = new Float32Array(msg.buffers.velZ);
-    heading = new Float32Array(msg.buffers.heading); maxSpeed = new Float32Array(msg.buffers.maxSpeed); energy = new Float32Array(msg.buffers.energy);
-    desiredX = new Float32Array(msg.buffers.desiredX); desiredZ = new Float32Array(msg.buffers.desiredZ);
-    activeIds = new Int32Array(msg.buffers.activeIds); moveIds = new Int32Array(msg.buffers.moveIds);
-    snapshotX = new Float32Array(msg.buffers.snapshotX); snapshotZ = new Float32Array(msg.buffers.snapshotZ);
-    cellHead = new Int32Array(msg.buffers.cellHead); nextInCell = new Int32Array(msg.buffers.nextInCell);
-    usedCells = new Int32Array(msg.buffers.usedCells); control = new Int32Array(msg.buffers.control); metrics = new Float32Array(msg.buffers.metrics);
-    return;
+/** Persistent worker loop. Main thread only advances JOB_EPOCH and Atomics.notify(). */
+function runLoop(): never {
+  let seenEpoch = 0;
+  for (;;) {
+    let epoch = Atomics.load(control, JOB_EPOCH);
+    if (epoch === seenEpoch) {
+      Atomics.wait(control, JOB_EPOCH, seenEpoch);
+      epoch = Atomics.load(control, JOB_EPOCH);
+      if (epoch === seenEpoch) continue;
+    }
+    seenEpoch = epoch;
+    const jobId = Atomics.load(control, JOB_ID);
+    const activeCount = Atomics.load(control, JOB_ACTIVE_COUNT);
+    const moveCount = Atomics.load(control, JOB_MOVE_COUNT);
+    const dt = Atomics.load(control, JOB_DT_MICROS) / 1_000_000;
+    runStep(jobId, activeCount, moveCount, dt);
   }
-  runStep(msg);
+}
+
+self.onmessage = (ev: MessageEvent<InitMessage>) => {
+  const msg = ev.data;
+  if (msg.type !== 'init') return;
+  workerId = msg.workerId; workerCount = msg.workerCount;
+  cellSize = msg.cellSize; invCell = 1 / cellSize; gridOrigin = msg.gridOrigin; gridWidth = msg.gridWidth;
+  posX = new Float32Array(msg.buffers.posX); posZ = new Float32Array(msg.buffers.posZ);
+  velX = new Float32Array(msg.buffers.velX); velZ = new Float32Array(msg.buffers.velZ);
+  heading = new Float32Array(msg.buffers.heading); maxSpeed = new Float32Array(msg.buffers.maxSpeed); energy = new Float32Array(msg.buffers.energy);
+  desiredX = new Float32Array(msg.buffers.desiredX); desiredZ = new Float32Array(msg.buffers.desiredZ);
+  activeIds = new Int32Array(msg.buffers.activeIds); moveIds = new Int32Array(msg.buffers.moveIds);
+  snapshotX = new Float32Array(msg.buffers.snapshotX); snapshotZ = new Float32Array(msg.buffers.snapshotZ);
+  cellHead = new Int32Array(msg.buffers.cellHead); nextInCell = new Int32Array(msg.buffers.nextInCell);
+  usedCells = new Int32Array(msg.buffers.usedCells); control = new Int32Array(msg.buffers.control); metrics = new Float32Array(msg.buffers.metrics);
+  runLoop();
 };
