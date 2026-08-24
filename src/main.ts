@@ -8,6 +8,7 @@ import { PerformanceMonitor, type RenderProfileSample } from './rendering/Perfor
 import { buildAlignedBusStops } from './rendering/BusStopRenderer';
 import { buildSpecialFacilityVisuals } from './rendering/SpecialFacilityRenderer';
 import { RailRenderer } from './rendering/RailRenderer';
+import { RailFrameScheduler } from './rendering/RailFrameScheduler';
 import { TrainLiveryOverlay } from './rendering/TrainLiveryOverlay';
 import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
 import { reserveRailStationClearance } from './generation/RailStationClearance';
@@ -65,6 +66,7 @@ async function bootstrap(): Promise<void> {
   gfx.buildStatic(world.city.buildings, world.city.net, world.sidewalk, world.city.parkingLots);
   buildSpecialFacilityVisuals(scene, world.city.facilities, world.city.parks);
   const railRenderer = new RailRenderer(scene, rail, world.city.net); railRenderer.build();
+  const railScheduler = new RailFrameScheduler(railRenderer);
   const trainLivery = new TrainLiveryOverlay(scene, railRenderer);
   gfx.buildAgents(world.store.capacity);
   gfx.buildings.visible = false; gfx.agents.visible = false;
@@ -146,16 +148,20 @@ async function bootstrap(): Promise<void> {
     const dt = (now - prev) / 1000; prev = now; fps += (1 / Math.max(dt, 1e-4) - fps) * 0.1;
     if (!paused) { pendingReal = Math.min(0.5, pendingReal + Math.min(dt, 0.1)); void runSimulationBatch(); }
 
+    let mark = performance.now();
     vehicleVisuals.update(world.vehicles, dt); vehicleVisuals.apply(world.vehicles);
+    const vehicleVisualMs = performance.now() - mark;
     try {
       const renderDt = Math.min(dt, 0.1);
-      railRenderer.update(renderDt, world.clock.timeScale, paused);
-      trainLivery.sync(renderDt);
+      const railProfile = railScheduler.update(renderDt, world.clock.timeScale, paused);
+      mark = performance.now(); trainLivery.sync(renderDt); const liveryMs = performance.now() - mark;
+      mark = performance.now();
       const followTarget = inspector.getFollowTarget();
       controller.setFollowTarget(followTarget); controller.update(dt); dashboard.draw();
+      const preRenderOtherMs = performance.now() - mark;
 
       const renderStarted = performance.now();
-      let mark = renderStarted;
+      mark = renderStarted;
       const followingNow = controller.isFollowing;
       const followChanged = followingNow !== wasFollowingForLod;
       const shouldUpdateLod = !followingNow || followChanged || now - lastFollowLodMs >= 500;
@@ -174,7 +180,18 @@ async function bootstrap(): Promise<void> {
       mark = performance.now(); gfx.syncSignals(world.signals); const signalsMs = performance.now() - mark;
       mark = performance.now(); updateEnvironment(); gfx.updateNightLighting(world.clock.hourF, camera.position, world.vehicles); const lightingMs = performance.now() - mark;
       performanceMonitor.beginGpu(); mark = performance.now(); renderer.render(scene, camera); const webglMs = performance.now() - mark; performanceMonitor.endGpu();
-      const renderProfile: RenderProfileSample = { totalMs: performance.now() - renderStarted, lodMs, agentsMs, vehiclesMs, signalsMs, lightingMs, webglMs };
+      const renderProfile: RenderProfileSample = {
+        totalMs: performance.now() - renderStarted,
+        lodMs, agentsMs, vehiclesMs, signalsMs, lightingMs, webglMs,
+        railOpsMs: railProfile.operationsMs,
+        railVisualMs: railProfile.visualsMs,
+        railSteps: railProfile.steps,
+        railStepSeconds: railProfile.averageStepSeconds,
+        railBacklogSec: railProfile.backlogSeconds,
+        liveryMs,
+        vehicleVisualMs,
+        preRenderOtherMs,
+      };
       const lod = gfx.getLodStats();
       performanceMonitor.update(now, dt * 1000, fps, renderProfile, lod, pendingReal, simBusy);
 
