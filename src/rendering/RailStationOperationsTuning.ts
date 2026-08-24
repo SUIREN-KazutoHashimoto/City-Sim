@@ -19,6 +19,7 @@ interface TrainRunLike {
   direction: 1 | -1;
   lane: TrackLane;
   speed: number;
+  cruiseSpeed: number;
   distance: number;
   currentStationIndex: number;
   originStationIndex: number;
@@ -30,6 +31,7 @@ interface TrainRunLike {
   retireAtTerminal: boolean;
   reserve: boolean;
   depotEnd: 0 | 1;
+  blocked: boolean;
   deadhead?: boolean;
 }
 interface StaticPartLike { matrix: THREE.Matrix4; }
@@ -60,13 +62,16 @@ interface RailRuntime {
   parkInDepot: (run: TrainRunLike, terminalIndex: number) => void;
   trackSpeedLimit: (run: TrainRunLike, smooth: SmoothLineLike, distance: number) => number;
 }
-interface RailPrototype extends Partial<RailRuntime> { __citySimStationOpsV030?: boolean; }
+interface RailPrototype extends Partial<RailRuntime> { __citySimStationOpsV031?: boolean; }
 interface RailConstructorMutable { SIDING_OFFSET: number; TURNOUT_SPEED: number; SIDING_SPEED: number; }
 
 const TERMINAL_PLATFORM_LENGTH = 270;
 const SIDING_OFFSET = 10.0;
 const TURNOUT_SPEED = 50 / 3.6;
 const SIDING_SPEED = 70 / 3.6;
+const APPROACH_BRAKE = 4.2 / 3.6;
+const TURNOUT_APPROACH_OFFSET = 48;
+const APPROACH_MARGIN = 6;
 const STATION_STRAIGHTEN_SPAN = 108;
 const STATION_CHORD_MAX_OFFSET = 86;
 
@@ -127,11 +132,39 @@ function movePartY(parts: StaticPartLike[], start: number, delta: number): void 
   for (let i = start; i < parts.length; i++) parts[i].matrix.elements[13] += delta;
 }
 
+function correctedPassingLoopLimit(
+  rt: RailRuntime,
+  run: TrainRunLike,
+  smooth: SmoothLineLike,
+  distance: number,
+  curve: number,
+): number | null {
+  let best: number | null = null;
+  for (let i = 1; i < smooth.stationDistances.length - 1; i++) {
+    if (!rt.lineStationHasPassingLoop(run.lineId, i)) continue;
+    const stationDistance = smooth.stationDistances[i];
+    const half = rt.platformLength(smooth.line.stationIds[i]) * 0.5;
+    const profile = rt.sidingProfile(Math.abs(distance - stationDistance), half);
+    if (profile >= 0.96) return Math.min(curve, SIDING_SPEED);
+    if (profile > 0.04) return Math.min(curve, TURNOUT_SPEED);
+
+    const signedRemaining = (stationDistance - distance) * run.direction;
+    if (signedRemaining <= 0) continue;
+    const remainingToTurnout = signedRemaining - (half + TURNOUT_APPROACH_OFFSET);
+    if (remainingToTurnout < 0) continue;
+    const brakingRoom = Math.max(0, remainingToTurnout - APPROACH_MARGIN);
+    const approachLimit = Math.sqrt(TURNOUT_SPEED * TURNOUT_SPEED + 2 * APPROACH_BRAKE * brakingRoom);
+    const corrected = Math.min(curve, approachLimit);
+    best = best == null ? corrected : Math.min(best, corrected);
+  }
+  return best;
+}
+
 /** Prepare station geometry, approach speed and non-revenue depot operation before RailRenderer.build(). */
 export function prepareRailStationOperationsTuning(): void {
   const proto = RailRenderer.prototype as unknown as RailPrototype;
-  if (proto.__citySimStationOpsV030) return;
-  proto.__citySimStationOpsV030 = true;
+  if (proto.__citySimStationOpsV031) return;
+  proto.__citySimStationOpsV031 = true;
 
   const ctor = RailRenderer as unknown as RailConstructorMutable;
   ctor.SIDING_OFFSET = SIDING_OFFSET;
@@ -164,8 +197,8 @@ export function prepareRailStationOperationsTuning(): void {
     };
   }
 
-  // Existing platform canopies were authored before 3.75 m-tall cars. Lift those base roofs and signs;
-  // RailStationArchitecture adds the full-height shell/amenities on top of this corrected baseline.
+  // RailStationArchitecture now owns the canopy. Keep the legacy platform slab/columns/sign path,
+  // but drop its old canopy pieces so old and new roof-generation rules cannot overlap.
   const basePlatformRibbon = proto.buildPlatformRibbon;
   if (basePlatformRibbon) {
     proto.buildPlatformRibbon = function (
@@ -175,8 +208,8 @@ export function prepareRailStationOperationsTuning(): void {
     ): void {
       const roofStart = roofs.length, signStart = signs.length;
       basePlatformRibbon.call(this, smooth, center, length, offset, width, includeSign, y, platforms, roofs, signs, columns, stairs);
-      movePartY(roofs, roofStart, 2.15);
-      movePartY(signs, signStart, 1.05);
+      roofs.splice(roofStart);
+      movePartY(signs, signStart, 0.55);
     };
   }
 
@@ -186,14 +219,9 @@ export function prepareRailStationOperationsTuning(): void {
       let limit = baseTrackSpeed.call(this, run, smooth, distance);
       if (run.service !== 'local' || smooth.line.kind !== 'trunk' || this.laneTransitionActive(run)) return limit;
       const curve = this.curveSpeedLimit(smooth, distance);
-      for (let i = 1; i < smooth.stationDistances.length - 1; i++) {
-        if (!this.lineStationHasPassingLoop(run.lineId, i)) continue;
-        const half = this.platformLength(smooth.line.stationIds[i]) * 0.5;
-        const profile = this.sidingProfile(Math.abs(distance - smooth.stationDistances[i]), half);
-        if (profile >= 0.96) limit = Math.max(limit, Math.min(curve, SIDING_SPEED));
-        else if (profile > 0.04) limit = Math.max(limit, Math.min(curve, TURNOUT_SPEED));
-      }
-      return Math.min(run.cruiseSpeed ?? Infinity, curve, limit);
+      const corrected = correctedPassingLoopLimit(this, run, smooth, distance, curve);
+      if (corrected != null) limit = Math.max(limit, corrected);
+      return Math.min(run.cruiseSpeed, curve, limit);
     } as RailRuntime['trackSpeedLimit'];
   }
 

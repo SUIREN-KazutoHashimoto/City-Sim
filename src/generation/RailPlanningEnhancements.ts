@@ -13,6 +13,20 @@ DEFAULT_RAIL_PLANNING.railTrunkLines = Math.max(3, DEFAULT_RAIL_PLANNING.railTru
 
 type AnyRailPlan = RailNetworkPlan & Record<string, any>;
 
+interface RailStationOpenSpace {
+  x: number;
+  z: number;
+  width: number;
+  depth: number;
+}
+
+let stationOpenSpaces: readonly RailStationOpenSpace[] = [];
+
+/** Provide already-generated parks/open spaces before rail alignment is finalized. */
+export function setRailStationOpenSpaces(spaces: readonly RailStationOpenSpace[]): void {
+  stationOpenSpaces = spaces;
+}
+
 const proto = RailNetworkPlan.prototype as unknown as Record<string, any>;
 
 interface PolylineCut {
@@ -29,6 +43,14 @@ function pointSegmentDistance(p: RailPoint, a: RailPoint, b: RailPoint): number 
   const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2));
   const qx = a.x + dx * t, qz = a.z + dz * t;
   return Math.hypot(p.x - qx, p.z - qz);
+}
+
+function insideStationOpenSpace(x: number, z: number): boolean {
+  for (const space of stationOpenSpaces) {
+    const margin = Math.max(14, Math.min(24, Math.min(space.width, space.depth) * 0.12));
+    if (Math.abs(x - space.x) <= space.width * 0.5 + margin && Math.abs(z - space.z) <= space.depth * 0.5 + margin) return true;
+  }
+  return false;
 }
 
 /**
@@ -92,19 +114,19 @@ function cubicBezier(a: RailPoint, b: RailPoint, c: RailPoint, d: RailPoint, t: 
 }
 
 /**
- * 終端駅を道路脇の土地へ逃がす区間を、道路接続点で急折させず長いS字曲線へする。
- * 終端側と道路回廊側の接線をほぼ平行にし、横移動を200m超へ分散する。
+ * 道路回廊から外した駅へ入る区間を、道路接続点で急折させず長いS字曲線へする。
+ * 終端駅だけでなく、公園内に残した通過駅にも同じ接続を使う。
  */
-function smoothTerminalStart(raw: RailPoint[], terminal: RailPoint, desiredLength: number): RailPoint[] {
-  if (raw.length < 2) return [terminal, ...raw];
+function smoothOffRoadStart(raw: RailPoint[], station: RailPoint, desiredLength: number): RailPoint[] {
+  if (raw.length < 2) return [station, ...raw];
   const total = polylineLength(raw);
   const approach = Math.min(desiredLength, Math.max(90, total * 0.55));
   const cut = cutFromStart(raw, approach);
-  if (!cut) return [terminal, ...raw];
+  if (!cut) return [station, ...raw];
 
-  const chord = Math.hypot(cut.point.x - terminal.x, cut.point.z - terminal.z);
+  const chord = Math.hypot(cut.point.x - station.x, cut.point.z - station.z);
   const handle = Math.min(100, Math.max(42, chord * 0.38));
-  const p0 = terminal;
+  const p0 = station;
   const p1 = { x: p0.x + cut.tangentX * handle, z: p0.z + cut.tangentZ * handle };
   const p3 = cut.point;
   const p2 = { x: p3.x - cut.tangentX * handle, z: p3.z - cut.tangentZ * handle };
@@ -120,35 +142,36 @@ function smoothTerminalStart(raw: RailPoint[], terminal: RailPoint, desiredLengt
   return out;
 }
 
-function applyTerminalApproaches(
+function applyOffRoadApproaches(
   raw: RailPoint[],
-  startTerminal: RailPoint | null,
-  endTerminal: RailPoint | null,
+  startStation: RailPoint | null,
+  endStation: RailPoint | null,
   desiredLength: number,
 ): RailPoint[] {
   let out = raw.slice();
-  if (startTerminal) out = smoothTerminalStart(out, startTerminal, desiredLength);
-  if (endTerminal) {
+  if (startStation) out = smoothOffRoadStart(out, startStation, desiredLength);
+  if (endStation) {
     const reversed = out.slice().reverse();
-    out = smoothTerminalStart(reversed, endTerminal, desiredLength).reverse();
+    out = smoothOffRoadStart(reversed, endStation, desiredLength).reverse();
   }
   return out;
 }
 
 /**
- * 駅は道路沿いに置き、線路も道路A*の大まかな回廊へ沿わせる。
- * ただし道路Nodeを1個ずつ忠実に追従せず、細かな折れを長い直線へまとめる。
- * 大きな方向転換だけを残し、RailRenderer側で必要な曲線へ丸める。
+ * 線路は道路A*の大まかな回廊へ沿わせるが、既存公園・広場に計画された通過駅は
+ * 道路中心線へ強制スナップせず計画位置へ残す。道路Nodeは接続点として保持する。
  */
 proto.alignToRoadNetwork = function corridorRailAlignment(this: AnyRailPlan, net: RoadNetwork): void {
   if (this.stations.length === 0 || net.nodes.length === 0) return;
 
+  const offRoadStations = new Set<number>();
   for (const station of this.stations) {
     const node = this.nearestSurfaceNode(net, station.plannedX, station.plannedZ) as number;
     station.roadNode = node;
     if (node < 0) {
       station.x = station.plannedX;
       station.z = station.plannedZ;
+      offRoadStations.add(station.id);
       continue;
     }
 
@@ -156,8 +179,12 @@ proto.alignToRoadNetwork = function corridorRailAlignment(this: AnyRailPlan, net
       const land = this.terminalLandPoint(station, net, node) as RailPoint;
       station.x = land.x;
       station.z = land.z;
+      offRoadStations.add(station.id);
+    } else if (insideStationOpenSpace(station.plannedX, station.plannedZ)) {
+      station.x = station.plannedX;
+      station.z = station.plannedZ;
+      offRoadStations.add(station.id);
     } else {
-      // 通過駅は道路沿いへ戻す。線路の簡略化は駅間経路側で行う。
       station.x = net.nodes[node].x;
       station.z = net.nodes[node].z;
     }
@@ -176,7 +203,7 @@ proto.alignToRoadNetwork = function corridorRailAlignment(this: AnyRailPlan, net
   for (const line of this.lines) {
     const points: RailPoint[] = [];
     const tolerance = line.kind === 'trunk' ? 38 : 28;
-    const terminalApproach = line.kind === 'trunk' ? 240 : 190;
+    const stationApproach = line.kind === 'trunk' ? 240 : 190;
 
     for (let i = 0; i < line.stationIds.length - 1; i++) {
       const a = this.stations[line.stationIds[i]], b = this.stations[line.stationIds[i + 1]];
@@ -197,18 +224,18 @@ proto.alignToRoadNetwork = function corridorRailAlignment(this: AnyRailPlan, net
       }
 
       let segment = simplifyRoadCorridor(raw, tolerance);
-      segment = applyTerminalApproaches(
+      segment = applyOffRoadApproaches(
         segment,
-        a.kind === RailStationKind.Terminal ? { x: a.x, z: a.z } : null,
-        b.kind === RailStationKind.Terminal ? { x: b.x, z: b.z } : null,
-        terminalApproach,
+        offRoadStations.has(a.id) ? { x: a.x, z: a.z } : null,
+        offRoadStations.has(b.id) ? { x: b.x, z: b.z } : null,
+        stationApproach,
       );
 
       if (points.length && segment.length && this.samePoint(points[points.length - 1], segment[0])) segment = segment.slice(1);
       points.push(...segment);
     }
 
-    // 最後にほぼ一直線の折れだけもう一段削る。終端S字の曲線点は角度があるので維持される。
+    // 最後にほぼ一直線の折れだけもう一段削る。S字の曲線点は角度があるので維持される。
     line.path = this.compressCollinear(points) as RailPoint[];
     this.rebuildMetrics(line);
   }

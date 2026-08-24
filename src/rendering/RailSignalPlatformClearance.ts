@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RailRenderer } from './RailRenderer';
+import './RailStationOperationsTuning';
 
 type AnyRail = Record<string, any>;
 type TrackLane = -1 | 0 | 1;
@@ -18,7 +19,6 @@ function insidePlatform(self: AnyRail, smooth: AnyRail, line: AnyRail, distance:
     const stationId = line.stationIds[i];
     const length = self.platformLength(stationId) as number;
     if (!Number.isFinite(length) || length <= 0) continue;
-    // platform ribbonの端まで含め、信号柱がホーム端へ食い込むのも避ける。
     if (Math.abs(distance - center) <= length * 0.5 + 2.0) return true;
   }
   return false;
@@ -33,14 +33,11 @@ proto.buildRailSignals = function platformClearRailSignals(this: AnyRail): void 
     const line = this.rail.lines[block.lineId]; if (!line) continue;
     const smooth = this.smoothLines.get(block.lineId) as AnyRail | undefined; if (!smooth) continue;
 
-    // lane -1 はpath正方向の右側、lane +1 はpath逆方向の右側。
     const normalDirection: 1 | -1 = line.kind === 'trunk' ? (block.lane < 0 ? 1 : -1) : 1;
     const directions: (1 | -1)[] = line.kind === 'trunk' ? [normalDirection] : [1, -1];
 
     for (const direction of directions) {
       const d = direction > 0 ? block.startD : block.endD;
-
-      // 閉塞そのものはblocks側に残す。ここではホーム内の物理信号だけ生成しない。
       if (insidePlatform(this, smooth, line, d)) continue;
 
       const p = this.sampleSmooth(smooth, d); if (!p) continue;
@@ -54,18 +51,7 @@ proto.buildRailSignals = function platformClearRailSignals(this: AnyRail): void 
       heads.push({ matrix: this.matrix(x, y + 3.45, z, 0.82, 2.08, 0.68, -p.heading + Math.PI / 2) });
 
       const nextBlockId = this.nextBlockAfter(block.id, direction) as number;
-      this.railSignals.push({
-        lineId: block.lineId,
-        lane: block.lane,
-        direction,
-        blockId: block.id,
-        nextBlockId,
-        instanceIndex: this.railSignals.length,
-        x,
-        y,
-        z,
-        heading: p.heading,
-      });
+      this.railSignals.push({ lineId: block.lineId, lane: block.lane, direction, blockId: block.id, nextBlockId, instanceIndex: this.railSignals.length, x, y, z, heading: p.heading });
     }
   }
 
@@ -76,7 +62,6 @@ proto.buildRailSignals = function platformClearRailSignals(this: AnyRail): void 
   const count = this.railSignals.length as number;
   if (!count) return;
   const sphere = new THREE.SphereGeometry(1, 10, 8);
-  // RailRendererEnhancementsの両面灯器setSignalLampと合わせて2面分確保する。
   this.signalRed = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0xff3030 }), count * 2);
   this.signalYellow = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0xffd23c }), count * 2);
   this.signalGreen = new THREE.InstancedMesh(sphere, new THREE.MeshBasicMaterial({ color: 0x39ef73 }), count * 2);

@@ -5,25 +5,34 @@ import { latestHighSpeedRailInspectionSource } from './HighSpeedRailRegistry';
 type TrackLane = -1 | 0 | 1;
 type TrackMode = 'main' | 'siding';
 type BoardState = '接近' | '停車中' | '発車' | '待機';
+type TrainService = 'local' | 'rapid' | 'limited';
 
 interface RailLineLike { id: number; kind: 'trunk' | 'spur'; stationIds: number[]; }
+interface StationLike { id?: number; name?: string; }
 interface SmoothLineLike { length: number; stationDistances: number[]; }
 interface TrainRunLike {
   id: number;
   lineId: number;
-  service: 'local' | 'rapid' | 'limited';
+  service: TrainService;
   state: 'depot' | 'dwell' | 'running' | 'signal' | 'schedule';
   direction: 1 | -1;
+  speed: number;
+  cruiseSpeed: number;
   distance: number;
   lane: TrackLane;
   currentStationIndex: number;
   originStationIndex: number;
   nextStationIndex: number;
+  dwellRemaining: number;
+  scheduledDepartureAt: number;
+  scheduledArrivalAt: number;
+  deadhead?: boolean;
 }
 
 interface CityRuntime {
   scene: THREE.Scene;
-  rail: { lines: RailLineLike[]; stations: Array<{ id?: number } | undefined> };
+  railTime: number;
+  rail: { lines: RailLineLike[]; stations: Array<StationLike | undefined> };
   trainRuns: TrainRunLike[];
   smoothLines: Map<number, SmoothLineLike>;
   updateTrainMeshes: () => void;
@@ -31,12 +40,19 @@ interface CityRuntime {
   sampleSmooth: (smooth: SmoothLineLike, distance: number) => { x: number; z: number; heading: number } | null;
   sharedSpurOffset: (smooth: SmoothLineLike, distance: number) => number;
   lineStationHasPassingLoop: (lineId: number, stationIndex: number) => boolean;
+  shouldStop: (run: TrainRunLike, stationIndex: number) => boolean;
 }
 
 interface BoardVisual {
   group: THREE.Group;
   canvas: HTMLCanvasElement;
   texture: THREE.CanvasTexture;
+}
+
+interface BoardDeparture {
+  time: number;
+  service: TrainService;
+  destination: string;
 }
 
 interface CityBoard extends BoardVisual {
@@ -46,7 +62,7 @@ interface CityBoard extends BoardVisual {
   lane: TrackLane;
   mode: TrackMode;
   trackNo: number;
-  lastState: BoardState | '';
+  lastSignature: string;
 }
 
 interface HighSpeedTrainLike {
@@ -66,18 +82,21 @@ interface HighSpeedAdapter { source?: HighSpeedSource; }
 interface HsrBoard extends BoardVisual {
   direction: 1 | -1;
   trackNo: number;
-  lastState: BoardState | '';
+  lastSignature: string;
 }
 
 const MAIN_OFFSET = 1.72;
-const SIDING_OFFSET = 8.0;
+const SIDING_OFFSET = 10.0;
 const HSR_TRACK_OFFSET = 2.4;
+const BOARD_CENTER_HEIGHT = 3.82;
+const BOARD_ALONG_SHIFT = 18;
+const BOARD_REFRESH_SECONDS = 1;
 
-/** Physical platform display: metal housing + two textured faces + support posts. */
+/** Physical platform display: ceiling-hung metal housing with two live display faces. */
 function boardVisual(scene: THREE.Scene, heading: number): BoardVisual {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 128;
+  canvas.width = 768;
+  canvas.height = 288;
   const texture = new THREE.CanvasTexture(canvas);
   texture.minFilter = THREE.LinearFilter;
   texture.magFilter = THREE.LinearFilter;
@@ -86,70 +105,201 @@ function boardVisual(scene: THREE.Scene, heading: number): BoardVisual {
   const group = new THREE.Group();
   group.rotation.y = -heading;
 
-  const frame = new THREE.Mesh(
-    new THREE.BoxGeometry(6.25, 1.70, 0.22),
-    new THREE.MeshStandardMaterial({ color: 0x22272d, roughness: 0.58, metalness: 0.55 }),
-  );
+  const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x22272d, roughness: 0.58, metalness: 0.55 });
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(6.80, 2.55, 0.22), frameMaterial);
   frame.castShadow = true;
   group.add(frame);
 
-  const frontMaterial = new THREE.MeshBasicMaterial({ map: texture, toneMapped: false });
-  const front = new THREE.Mesh(new THREE.PlaneGeometry(5.85, 1.30), frontMaterial);
+  const displayMaterial = new THREE.MeshBasicMaterial({ map: texture, toneMapped: false });
+  const front = new THREE.Mesh(new THREE.PlaneGeometry(6.42, 2.17), displayMaterial);
   front.position.z = 0.116;
   group.add(front);
 
-  const back = new THREE.Mesh(new THREE.PlaneGeometry(5.85, 1.30), frontMaterial.clone());
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(6.42, 2.17), displayMaterial.clone());
   back.rotation.y = Math.PI;
   back.position.z = -0.116;
   group.add(back);
 
-  const postMaterial = new THREE.MeshStandardMaterial({ color: 0x4a4f55, roughness: 0.52, metalness: 0.62 });
-  for (const x of [-2.55, 2.55]) {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.13, 3.35, 0.13), postMaterial);
-    post.position.set(x, -2.48, 0);
-    post.castShadow = true;
-    group.add(post);
+  const hangerMaterial = new THREE.MeshStandardMaterial({ color: 0x4a4f55, roughness: 0.52, metalness: 0.62 });
+  for (const x of [-2.76, 2.76]) {
+    const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.52, 0.12), hangerMaterial);
+    hanger.position.set(x, 1.48, 0);
+    hanger.castShadow = true;
+    group.add(hanger);
   }
+  const ceilingBar = new THREE.Mesh(new THREE.BoxGeometry(6.00, 0.12, 0.16), hangerMaterial.clone());
+  ceilingBar.position.set(0, 1.73, 0);
+  ceilingBar.castShadow = true;
+  group.add(ceilingBar);
 
   scene.add(group);
   return { group, canvas, texture };
 }
 
-function drawBoard(board: { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; trackNo: number; lastState: BoardState | '' }, state: BoardState): void {
-  if (board.lastState === state) return;
-  board.lastState = state;
+function serviceLabel(service: TrainService): string {
+  return service === 'limited' ? '特急' : service === 'rapid' ? '快速' : '普通';
+}
+
+function serviceColor(service: TrainService): string {
+  return service === 'limited' ? '#ff8966' : service === 'rapid' ? '#64c8ff' : '#f1f5f8';
+}
+
+function formatBoardTime(seconds: number): string {
+  const day = ((Math.floor(seconds) % 86400) + 86400) % 86400;
+  const h = Math.floor(day / 3600);
+  const m = Math.floor((day % 3600) / 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function drawBoard(
+  board: { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; trackNo: number; lastSignature: string },
+  state: BoardState,
+  departures: BoardDeparture[] = [],
+): void {
+  const rows = departures.slice(0, 3);
+  const signature = `${state}|${rows.map((row) => `${formatBoardTime(row.time)}:${row.service}:${row.destination}`).join('|')}`;
+  if (board.lastSignature === signature) return;
+  board.lastSignature = signature;
+
   const ctx = board.canvas.getContext('2d');
   if (!ctx) return;
-  ctx.fillStyle = '#07090b';
+  ctx.fillStyle = '#050708';
   ctx.fillRect(0, 0, board.canvas.width, board.canvas.height);
-  ctx.strokeStyle = '#5f646a';
+  ctx.strokeStyle = '#596068';
   ctx.lineWidth = 8;
   ctx.strokeRect(4, 4, board.canvas.width - 8, board.canvas.height - 8);
-  const color = state === '接近' ? '#ffb020' : state === '停車中' ? '#54f070' : state === '発車' ? '#55c8ff' : '#88909a';
-  ctx.fillStyle = '#dfe7ef';
-  ctx.font = 'bold 42px sans-serif';
+
+  const stateColor = state === '接近' ? '#ffb020' : state === '停車中' ? '#54f070' : state === '発車' ? '#55c8ff' : '#98a1aa';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`${board.trackNo}番線`, 28, 64);
-  ctx.fillStyle = color;
-  ctx.font = 'bold 48px sans-serif';
-  ctx.fillText(state, 220, 64);
+  ctx.fillStyle = '#f0f4f7';
+  ctx.font = '700 31px ui-monospace, sans-serif';
+  ctx.fillText(`${board.trackNo}番線`, 24, 38);
+  ctx.fillStyle = '#aab4bd';
+  ctx.font = '600 22px ui-monospace, sans-serif';
+  ctx.fillText('発車案内', 180, 38);
+  ctx.fillStyle = stateColor;
+  ctx.font = '700 27px ui-monospace, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(state, 742, 38);
+  ctx.textAlign = 'left';
+
+  ctx.strokeStyle = '#30363c';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(18, 68);
+  ctx.lineTo(750, 68);
+  ctx.stroke();
+
+  const rowHeight = 68;
+  for (let i = 0; i < 3; i++) {
+    const y = 101 + i * rowHeight;
+    if (i > 0) {
+      ctx.strokeStyle = '#20262b';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(18, y - 34);
+      ctx.lineTo(750, y - 34);
+      ctx.stroke();
+    }
+    const row = rows[i];
+    if (!row) {
+      ctx.fillStyle = '#535b63';
+      ctx.font = '600 28px ui-monospace, sans-serif';
+      ctx.fillText('--:--', 24, y);
+      ctx.fillText('---', 160, y);
+      continue;
+    }
+    ctx.fillStyle = '#ffd65a';
+    ctx.font = '700 32px ui-monospace, sans-serif';
+    ctx.fillText(formatBoardTime(row.time), 24, y);
+    ctx.fillStyle = serviceColor(row.service);
+    ctx.font = '700 29px ui-monospace, sans-serif';
+    ctx.fillText(serviceLabel(row.service), 160, y);
+    ctx.fillStyle = '#e7edf2';
+    ctx.font = '600 28px ui-monospace, sans-serif';
+    ctx.fillText(row.destination, 286, y);
+  }
   board.texture.needsUpdate = true;
+}
+
+function runModeAtStation(rt: CityRuntime, run: TrainRunLike, stationIndex: number): TrackMode {
+  return run.service === 'local' && rt.lineStationHasPassingLoop(run.lineId, stationIndex) ? 'siding' : 'main';
+}
+
+function runMatchesBoard(rt: CityRuntime, board: CityBoard, run: TrainRunLike): boolean {
+  if (run.lineId !== board.lineId || run.state === 'depot' || run.deadhead) return false;
+  const line = rt.rail.lines[board.lineId];
+  if (!line || runModeAtStation(rt, run, board.stationIndex) !== board.mode) return false;
+  return line.kind !== 'trunk' || run.lane === board.lane;
+}
+
+function runStopsAt(rt: CityRuntime, run: TrainRunLike, stationIndex: number): boolean {
+  return rt.shouldStop(run, stationIndex);
+}
+
+function destinationForRun(rt: CityRuntime, run: TrainRunLike): string {
+  const line = rt.rail.lines[run.lineId];
+  if (!line || line.stationIds.length === 0) return '行先未定';
+  const terminalIndex = run.direction > 0 ? line.stationIds.length - 1 : 0;
+  const stationId = line.stationIds[terminalIndex];
+  const name = rt.rail.stations[stationId]?.name ?? `第${stationId + 1}駅`;
+  return `${name} 行`;
+}
+
+function estimatedDepartureAt(rt: CityRuntime, board: CityBoard, run: TrainRunLike): number | null {
+  const smooth = rt.smoothLines.get(board.lineId);
+  if (!smooth || !runStopsAt(rt, run, board.stationIndex)) return null;
+
+  if (run.currentStationIndex === board.stationIndex && (run.state === 'dwell' || run.state === 'schedule')) {
+    if (run.scheduledDepartureAt > rt.railTime - 2) return Math.max(rt.railTime, run.scheduledDepartureAt);
+    return rt.railTime + Math.max(0, run.dwellRemaining);
+  }
+  if (run.state !== 'running') return null;
+
+  const targetDistance = smooth.stationDistances[board.stationIndex] ?? 0;
+  const remaining = (targetDistance - run.distance) * run.direction;
+  if (remaining < -4) return null;
+
+  let arrival = 0;
+  if (run.nextStationIndex === board.stationIndex && run.scheduledArrivalAt > 0) {
+    arrival = Math.max(rt.railTime, run.scheduledArrivalAt);
+  } else {
+    const estimateSpeed = Math.max(8, Math.min(run.cruiseSpeed || 22, Math.max(run.speed, 14)) * 0.88);
+    arrival = rt.railTime + Math.max(0, remaining) / estimateSpeed;
+    if (run.nextStationIndex >= 0 && run.nextStationIndex !== board.stationIndex) {
+      let intermediateStops = 0;
+      for (let i = run.nextStationIndex; i !== board.stationIndex; i += run.direction) {
+        if (i < 0 || i >= smooth.stationDistances.length) break;
+        if (runStopsAt(rt, run, i)) intermediateStops++;
+      }
+      arrival += intermediateStops * 18;
+    }
+  }
+  const stationDwell = run.service === 'limited' ? 12 : run.service === 'rapid' ? 15 : 18;
+  return arrival + stationDwell;
+}
+
+function cityBoardDepartures(rt: CityRuntime, board: CityBoard): BoardDeparture[] {
+  const departures: BoardDeparture[] = [];
+  for (const run of rt.trainRuns) {
+    if (!runMatchesBoard(rt, board, run)) continue;
+    const time = estimatedDepartureAt(rt, board, run);
+    if (time == null || time < rt.railTime - 3) continue;
+    departures.push({ time, service: run.service, destination: destinationForRun(rt, run) });
+  }
+  departures.sort((a, b) => a.time - b.time || serviceLabel(a.service).localeCompare(serviceLabel(b.service)));
+  return departures.slice(0, 3);
 }
 
 function cityBoardState(rt: CityRuntime, board: CityBoard): BoardState {
   const smooth = rt.smoothLines.get(board.lineId);
-  const line = rt.rail.lines[board.lineId];
-  if (!smooth || !line) return '待機';
+  if (!smooth) return '待機';
   const stationD = smooth.stationDistances[board.stationIndex] ?? 0;
   let approaching = false;
   let departing = false;
 
   for (const run of rt.trainRuns) {
-    if (run.lineId !== board.lineId || run.state === 'depot') continue;
-    const runMode: TrackMode = run.service === 'local' && rt.lineStationHasPassingLoop(run.lineId, board.stationIndex) ? 'siding' : 'main';
-    if (runMode !== board.mode) continue;
-    if (line.kind === 'trunk' && run.lane !== board.lane) continue;
-
+    if (!runMatchesBoard(rt, board, run)) continue;
     if (run.currentStationIndex === board.stationIndex && (run.state === 'dwell' || run.state === 'schedule')) return '停車中';
     const delta = Math.abs(run.distance - stationD);
     if (run.originStationIndex === board.stationIndex && run.currentStationIndex < 0 && run.state === 'running' && delta <= 320) departing = true;
@@ -167,6 +317,7 @@ function buildCityBoards(rt: CityRuntime): CityBoard[] {
     for (let stationIndex = 0; stationIndex < line.stationIds.length; stationIndex++) {
       const stationId = line.stationIds[stationIndex];
       const center = smooth.stationDistances[stationIndex] ?? 0;
+      const boardDistance = THREE.MathUtils.clamp(center + (stationIndex % 2 === 0 ? BOARD_ALONG_SHIFT : -BOARD_ALONG_SHIFT), 0, smooth.length);
       const specs: Array<{ lane: TrackLane; mode: TrackMode; trackOffset: number }> = [];
       if (line.kind === 'trunk') {
         specs.push({ lane: -1, mode: 'main', trackOffset: -MAIN_OFFSET });
@@ -180,19 +331,15 @@ function buildCityBoards(rt: CityRuntime): CityBoard[] {
       }
 
       for (const spec of specs) {
-        const p = rt.sampleSmooth(smooth, center);
+        const p = rt.sampleSmooth(smooth, boardDistance);
         if (!p) continue;
         const side = spec.trackOffset >= 0 ? 1 : -1;
         const boardOffset = spec.trackOffset + side * 4.0;
         const visual = boardVisual(rt.scene, p.heading);
-        visual.group.position.set(
-          p.x - Math.sin(p.heading) * boardOffset,
-          rt.lineTrackY(line.id) + 4.5,
-          p.z + Math.cos(p.heading) * boardOffset,
-        );
+        visual.group.position.set(p.x - Math.sin(p.heading) * boardOffset, rt.lineTrackY(line.id) + BOARD_CENTER_HEIGHT, p.z + Math.cos(p.heading) * boardOffset);
         const trackNo = (trackCounter.get(stationId) ?? 0) + 1;
         trackCounter.set(stationId, trackNo);
-        const board: CityBoard = { ...visual, stationId, lineId: line.id, stationIndex, lane: spec.lane, mode: spec.mode, trackNo, lastState: '' };
+        const board: CityBoard = { ...visual, stationId, lineId: line.id, stationIndex, lane: spec.lane, mode: spec.mode, trackNo, lastSignature: '' };
         drawBoard(board, '待機');
         boards.push(board);
       }
@@ -230,8 +377,8 @@ function installHsrBoards(): void {
     const side = trackOffset >= 0 ? 1 : -1;
     const p = pointAt(route.centralPosition, trackOffset + side * 4.2);
     const visual = boardVisual(scene, route.heading);
-    visual.group.position.set(p.x, route.trackY + 5.0, p.z);
-    const board: HsrBoard = { ...visual, direction, trackNo: index + 1, lastState: '' };
+    visual.group.position.set(p.x, route.trackY + BOARD_CENTER_HEIGHT, p.z);
+    const board: HsrBoard = { ...visual, direction, trackNo: index + 1, lastSignature: '' };
     drawBoard(board, '待機');
     boards.push(board);
   }
@@ -244,16 +391,20 @@ function installHsrBoards(): void {
   source.syncMeshes();
 }
 
-/** Add one physical live approach/dwell/departure display per platform track. */
+/** Add one ceiling-hung live departure display per platform track. */
 export function installRailPlatformIndicators(renderer: RailRenderer): void {
-  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV029?: boolean };
-  if (rt.__citySimPlatformBoardsV029) return;
-  rt.__citySimPlatformBoardsV029 = true;
+  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV031?: boolean };
+  if (rt.__citySimPlatformBoardsV031) return;
+  rt.__citySimPlatformBoardsV031 = true;
   const boards = buildCityBoards(rt);
   const baseUpdate = rt.updateTrainMeshes.bind(rt);
+  let lastRefreshBucket = -1;
   rt.updateTrainMeshes = () => {
     baseUpdate();
-    for (const board of boards) drawBoard(board, cityBoardState(rt, board));
+    const bucket = Math.floor(rt.railTime / BOARD_REFRESH_SECONDS);
+    if (bucket === lastRefreshBucket) return;
+    lastRefreshBucket = bucket;
+    for (const board of boards) drawBoard(board, cityBoardState(rt, board), cityBoardDepartures(rt, board));
   };
   rt.updateTrainMeshes();
   installHsrBoards();
