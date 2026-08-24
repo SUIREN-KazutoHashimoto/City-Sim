@@ -3,9 +3,11 @@ import { installExternalRailConnection } from './ExternalRailConnection';
 import { installRailInterlockingSafety } from './RailInterlockingSafety';
 import { installRailLeftHandRuntime, prepareRailLeftHandTraffic } from './RailLeftHandTraffic';
 import { prepareRailMotionTuning } from './RailMotionTuning';
+import { installHighSpeedSleeperSpacing, prepareRailSleeperSpacing } from './RailSleeperTuning';
 
 prepareRailMotionTuning();
 prepareRailLeftHandTraffic();
+prepareRailSleeperSpacing();
 
 interface RailRuntimeInternals {
   stepOperations: (dt: number) => void;
@@ -59,6 +61,7 @@ export class RailFrameScheduler {
     installRailInterlockingSafety(renderer);
     installRailLeftHandRuntime(renderer);
     installExternalRailConnection(renderer);
+    installHighSpeedSleeperSpacing();
     this.runtime = renderer as unknown as RailRuntimeInternals;
   }
 
