@@ -26,6 +26,17 @@ export class SimulationClock {
   get speedEpoch(): number { return this._speedEpoch; }
 
   /**
+   * Set the initial world time before the runtime scheduler starts. Used by the boot pre-roll only;
+   * no completed simulation state is rewound and no runtime wall-time debt is created.
+   */
+  setBootstrapTime(totalSeconds: number): void {
+    const next = Number.isFinite(totalSeconds) ? Math.max(0, totalSeconds) : 0;
+    this._totalSeconds = next;
+    this._accumulator = 0;
+    this.stepDt = this.fixedStep;
+  }
+
+  /**
    * Convert real elapsed time into simulation work without silently discarding elapsed time.
    *
    * Runtime scheduling may intentionally pass more than 0.1 real seconds when it is catching up

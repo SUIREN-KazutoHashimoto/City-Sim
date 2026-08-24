@@ -13,6 +13,8 @@ import { TrainLiveryOverlay } from './rendering/TrainLiveryOverlay';
 import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
 import { reserveRailStationClearance } from './generation/RailStationClearance';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
+import { BootScreen } from './boot/BootScreen';
+import { BOOT_START_SECONDS, preRollWorld } from './boot/PreRoll';
 import { APP_VERSION } from './version';
 
 interface SchedulerSnapshot {
@@ -46,13 +48,19 @@ declare global {
 
 const versionEl = document.getElementById('app-version');
 if (versionEl) versionEl.textContent = `City Sim v${APP_VERSION}`;
+const boot = new BootScreen();
 
 async function bootstrap(): Promise<void> {
+  boot.update('設定を読み込んでいます', '都市サイズ・人口・道路計画を確認しています', 0.03);
+  await boot.paint();
+
   const runtime = await loadCityConfig();
   const seed = resolveCitySeed(runtime.seed);
   const SIZE = Math.sqrt(runtime.areaKm2 * 1_000_000);
 
   console.info('[City-Sim] city config', { ...runtime, resolvedSeed: seed, sizeMeters: SIZE });
+  boot.update('都市を生成しています', `道路・建物・POIを生成中  seed ${seed}`, 0.10);
+  await boot.paint();
 
   const world = new World(
     { seed, sizeMeters: SIZE, urbanRatioTarget: runtime.urbanRatioTarget, blockSize: runtime.blockSize, planning: runtime.planning },
@@ -64,7 +72,26 @@ async function bootstrap(): Promise<void> {
   const railClearance = reserveRailStationClearance(world.city, rail);
   console.info('[City-Sim] rail station clearance', railClearance);
   world.bus.addRailStationFeeders(rail.stations);
+
+  boot.update('市民を配置しています', `${runtime.population.toLocaleString()}人の住居・職場・所有車を割り当てています`, 0.28);
+  await boot.paint();
   world.populate(runtime.population);
+
+  // Start earlier than the visible game clock and run the real simulation while the loading screen
+  // is visible. This consumes the one-time all-Idle decision/routing burst before the first frame.
+  world.clock.setBootstrapTime(BOOT_START_SECONDS);
+  await preRollWorld(world, ({ progress, currentSeconds, batches }) => {
+    const hh = String(Math.floor((currentSeconds / 3600) % 24)).padStart(2, '0');
+    const mm = String(Math.floor((currentSeconds / 60) % 60)).padStart(2, '0');
+    boot.update(
+      '都市を安定化しています',
+      `内部シミュレーション ${hh}:${mm} → 08:00  batch ${batches}`,
+      0.34 + progress * 0.42,
+    );
+  });
+
+  boot.update('描画データを構築しています', '建物・道路・鉄道・車両の表示データを準備しています', 0.80);
+  await boot.paint();
 
   const app = document.getElementById('app')!;
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -113,6 +140,9 @@ async function bootstrap(): Promise<void> {
   buildAlignedBusStops(scene, world.bus.stops);
   gfx.buildGates(world.city.gateNodes.map((n) => ({ x: world.city.net.nodes[n].x, z: world.city.net.nodes[n].z })));
   gfx.updateLod(camera.position, true);
+
+  boot.update('操作系を準備しています', 'HUD・追跡カメラ・性能モニタを初期化しています', 0.93);
+  await boot.paint();
 
   const controller = new FirstPersonController(camera, renderer.domElement, 0, -0.9);
   controller.setPosition(SIZE / 2, SPAWN_ALT, SIZE / 2);
@@ -365,14 +395,18 @@ async function bootstrap(): Promise<void> {
     }
     requestAnimationFrame(frame);
   }
+
+  boot.finish();
+  window.dispatchEvent(new Event('citysim-ready'));
   requestAnimationFrame(frame);
 }
 
 bootstrap().catch((err: unknown) => {
   console.error('[City-Sim] startup failed', err);
+  const message = err instanceof Error ? err.message : String(err);
+  boot.fail(message);
   const app = document.getElementById('app');
   if (app) {
-    const message = err instanceof Error ? err.message : String(err);
     app.innerHTML = `<pre style="padding:24px;color:#ffb4b4;background:#1a1111;white-space:pre-wrap">City-Sim startup failed\n${message}</pre>`;
   }
 });
