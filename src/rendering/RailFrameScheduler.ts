@@ -2,7 +2,9 @@ import { RailRenderer } from './RailRenderer';
 import { installExternalRailConnection } from './ExternalRailConnection';
 import { installRailInterlockingSafety } from './RailInterlockingSafety';
 import { installRailLeftHandRuntime, prepareRailLeftHandTraffic } from './RailLeftHandTraffic';
+import { prepareRailMotionTuning } from './RailMotionTuning';
 
+prepareRailMotionTuning();
 prepareRailLeftHandTraffic();
 
 interface RailRuntimeInternals {

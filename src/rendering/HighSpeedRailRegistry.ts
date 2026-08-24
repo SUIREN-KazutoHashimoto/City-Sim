@@ -46,6 +46,36 @@ function matrixBox(
   return o.matrix.clone();
 }
 
+/**
+ * Unit triangular prism whose longitudinal axis is +X.
+ *
+ * Seen from the side it is a right triangle: the rear face at x=-0.5 has full body height, the
+ * bottom stays level, and the roof slopes down to the forward tip at x=+0.5. Extruding that triangle
+ * across Z gives a Shinkansen-like horizontal wedge rather than the previous four-sided pyramid.
+ */
+function makeHorizontalTriangularPrism(): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([
+    -0.5, -0.5, -0.5, // 0 rear-bottom-left
+    -0.5,  0.5, -0.5, // 1 rear-top-left
+     0.5, -0.5, -0.5, // 2 front-tip-left
+    -0.5, -0.5,  0.5, // 3 rear-bottom-right
+    -0.5,  0.5,  0.5, // 4 rear-top-right
+     0.5, -0.5,  0.5, // 5 front-tip-right
+  ], 3));
+  geometry.setIndex([
+    0, 1, 2,       // left triangular side
+    3, 5, 4,       // right triangular side
+    0, 3, 4, 0, 4, 1, // rear vertical face
+    0, 2, 5, 0, 5, 3, // flat bottom
+    1, 4, 5, 1, 5, 2, // sloped roof
+  ]);
+  const hard = geometry.toNonIndexed();
+  geometry.dispose();
+  hard.computeVertexNormals();
+  return hard;
+}
+
 class HighSpeedInspectionAdapter implements HighSpeedRailInspectionSource {
   private readonly hitMesh: THREE.InstancedMesh;
   private readonly noseMesh: THREE.InstancedMesh;
@@ -63,10 +93,8 @@ class HighSpeedInspectionAdapter implements HighSpeedRailInspectionSource {
     this.hitMesh.count = 0;
     this.hitMesh.updateMatrixWorld(true);
 
-    const noseGeometry = new THREE.ConeGeometry(0.5, 1, 4, 1, false, Math.PI / 4);
-    noseGeometry.rotateZ(-Math.PI / 2);
     this.noseMesh = new THREE.InstancedMesh(
-      noseGeometry,
+      makeHorizontalTriangularPrism(),
       new THREE.MeshStandardMaterial({ color: 0xf4f7f9, roughness: 0.28, metalness: 0.16 }),
       NOSE_CAPACITY,
     );
@@ -91,7 +119,15 @@ class HighSpeedInspectionAdapter implements HighSpeedRailInspectionSource {
   }
 
   trainStatus(id: number): HighSpeedTrainStatusSnapshot | null {
-    return this.source.trainStatus(id);
+    const snapshot = this.source.trainStatus(id);
+    if (!snapshot) return null;
+    return {
+      ...snapshot,
+      firstPersonForwardOffset: Math.max(
+        snapshot.firstPersonForwardOffset,
+        snapshot.consistLength * 0.5 + NOSE_LENGTH + 0.5,
+      ),
+    };
   }
 
   dispose(): void {
