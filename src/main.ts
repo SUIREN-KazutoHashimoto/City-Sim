@@ -14,6 +14,10 @@ import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
 import { reserveRailStationClearance } from './generation/RailStationClearance';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
 
+const APP_VERSION = '0.1.1';
+const versionEl = document.getElementById('version');
+if (versionEl) versionEl.textContent = `City Sim v${APP_VERSION}`;
+
 async function bootstrap(): Promise<void> {
   const runtime = await loadCityConfig();
   const seed = resolveCitySeed(runtime.seed);
@@ -139,12 +143,23 @@ async function bootstrap(): Promise<void> {
   }
 
   function renderIntervalMs(): number {
-    if (paused || !simBusy || totalRealLagSeconds() < 0.05) return 0;
+    if (paused) return 0;
+    const lag = totalRealLagSeconds();
+    if (lag < 0.05) return 0;
+
+    // High-speed presets retain their explicit render caps, while lower speeds now also yield
+    // progressively when simulation debt builds. This changes rendering cadence only; simulation
+    // step ordering, dt, decisions, path finding, traffic, and pedestrian behavior are untouched.
     const scale = world.clock.timeScale;
-    if (scale >= 1800) return 100;
-    if (scale >= 600) return 1000 / 15;
-    if (scale >= 180) return 1000 / 30;
-    return 0;
+    let interval = 0;
+    if (scale >= 1800) interval = 100;
+    else if (scale >= 600) interval = 1000 / 15;
+    else if (scale >= 180) interval = 1000 / 30;
+
+    if (lag >= 5) interval = Math.max(interval, 1000 / 15);
+    else if (lag >= 1) interval = Math.max(interval, 1000 / 20);
+    else if (lag >= 0.1) interval = Math.max(interval, 1000 / 30);
+    return interval;
   }
 
   async function runSimulationBatch(): Promise<void> {
