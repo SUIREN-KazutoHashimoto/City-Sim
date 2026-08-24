@@ -1,4 +1,5 @@
 import { AgentStore } from '../agents/AgentStore';
+import { resolveSimulationWorkerTopology } from './WorkerTopology';
 
 export interface PedestrianWorkerTiming {
   prepMs: number;
@@ -79,8 +80,7 @@ export class PedestrianWorkerPool {
     const alloc = (bytes: number): ArrayBufferLike => shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
     const f32 = () => new Float32Array(alloc(store.capacity * Float32Array.BYTES_PER_ELEMENT));
     const i32 = () => new Int32Array(alloc(store.capacity * Int32Array.BYTES_PER_ELEMENT));
-    const hc = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 4) : 4;
-    const desiredWorkerCount = Math.max(1, Math.min(4, hc - 2));
+    const desiredWorkerCount = resolveSimulationWorkerTopology().pedestrianWorkers;
 
     this.desiredX = f32(); this.desiredZ = f32();
     this.activeIds = i32(); this.moveIds = i32();
