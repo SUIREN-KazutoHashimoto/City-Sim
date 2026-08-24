@@ -16,7 +16,9 @@ import { LogisticsSystem } from '../traffic/LogisticsSystem';
 import { AStar } from '../traffic/AStar';
 import { POICategory } from './POI';
 import { makeRng } from '../core/math';
+
 const EMPTY_PATH = new Int32Array(0);
+interface BusWaitQueue { ids: number[]; head: number; }
 
 export class World {
   readonly clock = new SimulationClock();
@@ -27,8 +29,15 @@ export class World {
   private readonly needs = new NeedSystem(); private readonly brain: UtilityBrain; private readonly walkAstar: AStar;
   private readonly agentWorkers: AgentWorkerPool; private readonly poiWorkers: POISearchWorkerPool; private readonly pedWorkers: PedestrianWorkerPool;
   private walkPaths: Int32Array[]; private rng = makeRng(999);
-  driveThreshold = 180; private decideCursor = 0; private workerPedStep = false;
-  private pedBlock: Uint8Array; private vehBlock!: Uint8Array;
+  driveThreshold = 180;
+  private decideCursor = 0;
+  private routingCursor = 0;
+  private readonly routingBudget = 384;
+  private workerPedStep = false;
+  private pedBlock: Uint8Array; private vehBlock: Uint8Array;
+  private readonly pedBlockedNodes: number[] = [];
+  private readonly vehBlockedNodes: number[] = [];
+  private readonly busWaitQueues = new Map<string, BusWaitQueue>();
   private readonly pedCrossingRoadNode: Int32Array;
   private readonly pedCrossingAxis: Uint8Array;
 
@@ -49,6 +58,7 @@ export class World {
     const gates = this.city.gateNodes.map((n) => ({ node: n, x: this.city.net.nodes[n].x, z: this.city.net.nodes[n].z }));
     this.logistics = new LogisticsSystem(this.vehicles, this.traffic, this.city.poi, gates, cityCfg.seed ^ 0x10a); this.logistics.build(2);
     this.pedBlock = new Uint8Array(this.city.net.nodes.length);
+    this.vehBlock = new Uint8Array(this.city.net.nodes.length);
     this.traffic.pedBlockedFn = (node: number) => this.pedBlock[node] === 1;
   }
 
@@ -152,7 +162,7 @@ export class World {
   private stepBeforePed(dtSec: number, updateNeeds: boolean, updateDecisions: boolean): number {
     const s = this.store, now = this.clock.totalSeconds;
     this.signals.update(dtSec); if (updateNeeds) this.needs.update(s, dtSec); if (updateDecisions) this.decideAgentsSync();
-    for (let i = 0; i < s.count; i++) if (s.state[i] === AgentState.Routing) this.beginTrip(i);
+    this.processRoutingBudget();
     this.computePedBlocks(); this.traffic.update(dtSec);
     this.bus.update(dtSec, (agent: number, stop: { x: number; z: number }) => this.onBusAlight(agent, stop), (stop: { id: number }, routeId: number, freeSeats: number) => this.collectBoarders(stop, routeId, freeSeats));
     this.bus.syncOnboard((agent: number, x: number, z: number) => { s.posX[agent] = x; s.posZ[agent] = z; });
@@ -187,18 +197,49 @@ export class World {
 
   private deferDecision(i: number, now: number): void { this.store.state[i] = AgentState.Idle; this.store.nextDecideAt[i] = now + 600 + this.rng() * 1200; }
 
+  /** Smooth routing bursts instead of allowing every Routing agent to start A* in one step. */
+  private processRoutingBudget(): void {
+    const s = this.store, count = s.count; if (count <= 0) return;
+    let scanned = 0, processed = 0;
+    while (scanned < count && processed < this.routingBudget) {
+      const i = (this.routingCursor + scanned) % count;
+      if (s.state[i] === AgentState.Routing) { this.beginTrip(i); processed++; }
+      scanned++;
+    }
+    this.routingCursor = (this.routingCursor + Math.max(1, scanned)) % count;
+  }
+
   private processParallelActivityExits(now: number): void {
-    const s = this.store;
-    for (let i = 0; i < s.count; i++) {
-      if (s.activityExit[i] === 0) continue; s.activityExit[i] = 0; if (s.state[i] !== AgentState.Engaged || s.goalPOI[i] < 0) continue;
+    const s = this.store, exits = this.agentWorkers.drainActivityExits();
+    for (let n = 0; n < exits.length; n++) {
+      const i = exits[n];
+      if (i < 0 || i >= s.count || s.activityExit[i] === 0) continue;
+      s.activityExit[i] = 0; if (s.state[i] !== AgentState.Engaged || s.goalPOI[i] < 0) continue;
       const poi = this.city.poi.get(s.goalPOI[i]); if (poi.maxStock > 0 && poi.stock > 0) poi.stock -= 1;
       this.city.poi.release(s.goalPOI[i]); s.goalPOI[i] = -1; s.goalCategory[i] = 255; s.state[i] = AgentState.Idle; s.nextDecideAt[i] = now;
     }
   }
 
+  private busWaitKey(stopId: number, routeId: number): string { return `${stopId}:${routeId}`; }
+
+  private enqueueBusWait(agent: number): void {
+    const s = this.store, stopId = s.boardStop[agent], routeId = s.busRoute[agent];
+    if (stopId < 0 || routeId < 0) return;
+    const key = this.busWaitKey(stopId, routeId);
+    let q = this.busWaitQueues.get(key); if (!q) { q = { ids: [], head: 0 }; this.busWaitQueues.set(key, q); }
+    q.ids.push(agent);
+  }
+
   private collectBoarders(stop: { id: number }, routeId: number, freeSeats: number): number[] {
-    const s = this.store; const out: number[] = [];
-    for (let i = 0; i < s.count && out.length < freeSeats; i++) { if (s.state[i] !== AgentState.WaitingBus) continue; if (s.boardStop[i] !== stop.id || s.busRoute[i] !== routeId) continue; this.bus.setAlight(i, s.alightStop[i]); s.state[i] = AgentState.OnBus; s.waiting[i] = 0; out.push(i); }
+    const s = this.store, out: number[] = [], key = this.busWaitKey(stop.id, routeId), q = this.busWaitQueues.get(key);
+    if (!q || freeSeats <= 0) return out;
+    while (q.head < q.ids.length && out.length < freeSeats) {
+      const i = q.ids[q.head++];
+      if (s.state[i] !== AgentState.WaitingBus || s.boardStop[i] !== stop.id || s.busRoute[i] !== routeId) continue;
+      this.bus.setAlight(i, s.alightStop[i]); s.state[i] = AgentState.OnBus; s.waiting[i] = 0; out.push(i);
+    }
+    if (q.head >= q.ids.length) this.busWaitQueues.delete(key);
+    else if (q.head > 1024 && q.head * 2 > q.ids.length) { q.ids = q.ids.slice(q.head); q.head = 0; }
     return out;
   }
 
@@ -208,19 +249,25 @@ export class World {
   }
 
   private computePedBlocks(): void {
-    this.pedBlock.fill(0); if (!this.vehBlock) this.vehBlock = new Uint8Array(this.city.net.nodes.length); this.vehBlock.fill(0);
+    for (let i = 0; i < this.pedBlockedNodes.length; i++) this.pedBlock[this.pedBlockedNodes[i]] = 0;
+    for (let i = 0; i < this.vehBlockedNodes.length; i++) this.vehBlock[this.vehBlockedNodes[i]] = 0;
+    this.pedBlockedNodes.length = 0; this.vehBlockedNodes.length = 0;
+
     const s = this.store, net = this.city.net;
     for (let i = 0; i < s.count; i++) {
       const roadNode = this.pedCrossingRoadNode[i]; if (roadNode < 0) continue;
       const st = s.state[i]; if (st !== AgentState.Traveling && st !== AgentState.ToVehicle && st !== AgentState.ToBusStop) continue;
-      const rn = net.nodes[roadNode]; if (rn && (s.posX[i] - rn.x) ** 2 + (s.posZ[i] - rn.z) ** 2 < 16 * 16) this.pedBlock[roadNode] = 1;
+      const rn = net.nodes[roadNode];
+      if (rn && (s.posX[i] - rn.x) ** 2 + (s.posZ[i] - rn.z) ** 2 < 16 * 16 && this.pedBlock[roadNode] === 0) {
+        this.pedBlock[roadNode] = 1; this.pedBlockedNodes.push(roadNode);
+      }
     }
     const vs = this.vehicles;
     for (let v = 0; v < vs.count; v++) {
       if (vs.state[v] !== VehicleState.Driving || vs.speed[v] < 1) continue;
-      const nt = net.nodes[vs.toNode[v]], nf = net.nodes[vs.fromNode[v]];
-      if (nt && (vs.posX[v] - nt.x) ** 2 + (vs.posZ[v] - nt.z) ** 2 < 100) this.vehBlock[vs.toNode[v]] = 1;
-      if (nf && (vs.posX[v] - nf.x) ** 2 + (vs.posZ[v] - nf.z) ** 2 < 100) this.vehBlock[vs.fromNode[v]] = 1;
+      const to = vs.toNode[v], from = vs.fromNode[v], nt = net.nodes[to], nf = net.nodes[from];
+      if (nt && (vs.posX[v] - nt.x) ** 2 + (vs.posZ[v] - nt.z) ** 2 < 100 && this.vehBlock[to] === 0) { this.vehBlock[to] = 1; this.vehBlockedNodes.push(to); }
+      if (nf && (vs.posX[v] - nf.x) ** 2 + (vs.posZ[v] - nf.z) ** 2 < 100 && this.vehBlock[from] === 0) { this.vehBlock[from] = 1; this.vehBlockedNodes.push(from); }
     }
   }
 
@@ -294,7 +341,6 @@ export class World {
   }
 
   private buildTravelerIndex(): void {
-    // Async Ped worker steps use their linked-cell index. Synchronous World.step keeps the original grid.
     if (this.workerPedStep) return;
     this.grid.clear(); const s = this.store;
     for (let i = 0; i < s.count; i++) { const st = s.state[i]; if (st === AgentState.Traveling || st === AgentState.ToVehicle || st === AgentState.ToBusStop) this.grid.insert(i, s.posX[i], s.posZ[i]); }
@@ -321,7 +367,7 @@ export class World {
           const nearCurb = Math.hypot(s.posX[i] - node.x, s.posZ[i] - node.z) < 3;
           const signalized = this.signals.modeOf(crossingRoadNode) !== null;
           const redPed = signalized && !this.signals.pedWalk(crossingRoadNode, this.pedCrossingAxis[i] as 0 | 1);
-          const carInside = this.vehBlock && this.vehBlock[crossingRoadNode] === 1;
+          const carInside = this.vehBlock[crossingRoadNode] === 1;
           if (nearCurb && (redPed || carInside)) { s.waiting[i] = 1; s.velX[i] = 0; s.velZ[i] = 0; return; }
         }
         s.waiting[i] = 0;
@@ -335,7 +381,10 @@ export class World {
     if (arriving && d2 < 9) {
       this.clearPedCrossing(i);
       if (s.state[i] === AgentState.ToVehicle) { s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; this.startDriving(i); return; }
-      if (s.state[i] === AgentState.ToBusStop) { s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; s.state[i] = AgentState.WaitingBus; return; }
+      if (s.state[i] === AgentState.ToBusStop) {
+        s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH;
+        s.state[i] = AgentState.WaitingBus; this.enqueueBusWait(i); return;
+      }
       s.state[i] = AgentState.Engaged; s.velX[i] = 0; s.velZ[i] = 0; s.waiting[i] = 0; s.pathHandle[i] = -1; this.walkPaths[i] = EMPTY_PATH; const p = this.city.poi.get(s.goalPOI[i]); if (p) { s.goalCategory[i] = p.category; s.dwellUntil[i] = this.computeDwellUntil(p.category); } return;
     }
 
