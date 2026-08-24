@@ -134,8 +134,12 @@ async function bootstrap(): Promise<void> {
     return 1.0;
   }
 
+  function totalRealLagSeconds(): number {
+    return pendingReal + world.clock.pendingRealSeconds;
+  }
+
   function renderIntervalMs(): number {
-    if (paused || !simBusy || pendingReal < 0.05) return 0;
+    if (paused || !simBusy || totalRealLagSeconds() < 0.05) return 0;
     const scale = world.clock.timeScale;
     if (scale >= 1800) return 100;
     if (scale >= 600) return 1000 / 15;
@@ -144,8 +148,10 @@ async function bootstrap(): Promise<void> {
   }
 
   async function runSimulationBatch(): Promise<void> {
-    if (simBusy || paused || pendingReal <= 0) return;
-    const real = Math.min(maxRealSecondsPerBatch(), pendingReal); pendingReal -= real;
+    const hasClockDebt = world.clock.pendingSimSeconds >= world.clock.fixedStep;
+    if (simBusy || paused || (pendingReal <= 0 && !hasClockDebt)) return;
+    const real = pendingReal > 0 ? Math.min(maxRealSecondsPerBatch(), pendingReal) : 0;
+    pendingReal -= real;
     const steps = world.clock.advance(real); if (steps <= 0) return;
     const batchSimSeconds = world.clock.stepDt * steps;
     simBusy = true; const start = performance.now();
@@ -159,7 +165,8 @@ async function bootstrap(): Promise<void> {
       console.error('[City-Sim] simulation batch failed', err);
     } finally {
       simBusy = false;
-      if (!paused && pendingReal > 0.001) setTimeout(() => { void runSimulationBatch(); }, 0);
+      const stillHasWork = pendingReal > 0.001 || world.clock.pendingSimSeconds >= world.clock.fixedStep;
+      if (!paused && stillHasWork) setTimeout(() => { void runSimulationBatch(); }, 0);
     }
   }
 
@@ -233,7 +240,8 @@ async function bootstrap(): Promise<void> {
         preRenderOtherMs,
       };
       const lod = gfx.getLodStats();
-      performanceMonitor.update(now, dt * 1000, fps, renderProfile, lod, pendingReal, simBusy);
+      const totalLag = totalRealLagSeconds();
+      performanceMonitor.update(now, dt * 1000, fps, renderProfile, lod, totalLag, simBusy);
 
       const c = world.clock; const hh = String(c.hour).padStart(2, '0'), mm = String(c.minute).padStart(2, '0'), ss = String(c.second).padStart(2, '0');
       clockEl.innerHTML = `<span class="icon">${clockIcon(c.hour)}</span><span>${hh}:${mm}<span style="font-size:13px;opacity:.7">:${ss}</span></span><span class="day">DAY ${c.day}</span>${paused ? '<span class="day">⏸ PAUSED</span>' : ''}`;
@@ -244,7 +252,7 @@ async function bootstrap(): Promise<void> {
         const followText = controller.isFollowing
           ? controller.isFirstPerson ? `追跡中 ${followKind}一人称` : `追跡中 ${followKind} dist ${controller.followDistance.toFixed(0)}m`
           : `speed ${controller.moveSpeed.toFixed(0)} m/s`;
-        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ntarget ${world.clock.timeScale.toFixed(0)} sim-s/s  effective ${effectiveSimRate.toFixed(0)} sim-s/s  lag ${pendingReal.toFixed(2)} real-s\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  列車${railRenderer.trainCount}編成  鉄道信号${railRenderer.signalCount}  信号待ち${railRenderer.waitingTrainCount}\n駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m  駅用除去 建物${railClearance.buildingsRemoved}/駐車${railClearance.parkingLotsRemoved}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=追跡一人称/三人称  MMB=人/車/列車を追跡]`;
+        hud.textContent = `FPS ${fps.toFixed(0)}   sim ${simMs.toFixed(1)}ms ${simBusy ? 'BUSY' : 'idle'}   ×${dashboard.speedLabel}\ntarget ${world.clock.timeScale.toFixed(0)} sim-s/s  effective ${effectiveSimRate.toFixed(0)} sim-s/s  lag ${totalLag.toFixed(2)} real-s\ncity ${runtime.areaKm2.toFixed(0)}km²  urban ${(runtime.urbanRatioTarget * 100).toFixed(0)}%  seed ${seed}\nplan CBD+${runtime.planning.subCenters} sub  arterial ${runtime.planning.arterialSpacing}m  collector ${runtime.planning.collectorSpacing}m\n🚆 鉄道 ${rail.lines.length}路線/${rail.stations.length}駅  列車${railRenderer.trainCount}編成  鉄道信号${railRenderer.signalCount}  信号待ち${railRenderer.waitingTrainCount}\n駅間${runtime.planning.railStationSpacing.toFixed(0)}m  TOD半径${runtime.planning.railInfluenceRadius.toFixed(0)}m  駅用除去 建物${railClearance.buildingsRemoved}/駐車${railClearance.parkingLotsRemoved}\nagents ${st.agents}/${runtime.population}  車 走行${dv.vehiclesDriving}/所有${dv.vehiclesTotal}  🚌${dv.buses}台/${dv.busRoutes}路線\nLOD 建物 ${lod.buildings.join('/')}  人 ${lod.agents.join('/')}  車 ${lod.vehicles.join('/')}\nSIM ${threadText}  shared=${world.sharedAgentMemory ? 'yes' : 'no'}\nbuildings ${st.buildings}  駐車場 ${st.parkingLots}  特殊施設 ${world.city.facilities.length}  公園 ${world.city.parks.length}\n停留所 ${dv.busStops}  信号 ${st.signals}\n📦 トラック${dv.trucks}台/ゲート${dv.gates}  棚切れ ${dv.storesEmpty}/${dv.stores}\n${followText}  ${controller.isDragging ? '● looking' : '○ inspect'}\n[WASD=move E/Space=up Q/Ctrl=down LShift=sprint LMB=drag]\n[Tab=pause  [ ]=speed  P=perf  G=activity graph  V=追跡一人称/三人称  MMB=人/車/列車を追跡]`;
       }
     } catch (err) {
       console.error('[City-Sim] render frame failed; continuing next frame', err);
