@@ -3,8 +3,8 @@ import { VehicleState } from '../traffic/VehicleStore';
 import { PerformanceMonitor, type RenderProfileSample } from '../rendering/PerformanceMonitor';
 import type { RenderingLodStats } from '../rendering/EnhancedRenderer';
 import type { World } from '../world/World';
+import { APP_VERSION } from '../version';
 
-const APP_VERSION = '0.1.3';
 const AUTO_PARAM = 'citysim-benchmark';
 const SAMPLE_INTERVAL_MS = 250;
 
@@ -20,6 +20,30 @@ const PHASES: PhaseSpec[] = [
   { label: '1x', speedLabel: '1×', scale: 1, durationMs: 10_000 },
 ];
 
+interface SchedulerSnapshot {
+  batchId: number;
+  completedSimSeconds: number;
+  pendingRealSeconds: number;
+  clockPendingSimSeconds: number;
+  speedRebaseCount: number;
+  rebasedRealSeconds: number;
+  railInputSeconds: number;
+  railProcessedSeconds: number;
+  railBacklogSeconds: number;
+  requestedPopulation: number;
+  actualPopulation: number;
+}
+interface SchedulerControl {
+  snapshot: () => SchedulerSnapshot;
+  hold: () => void;
+  resume: () => void;
+  rebaseSpeed: () => void;
+  waitForIdle: (timeoutMs?: number) => Promise<boolean>;
+}
+interface BenchWindow extends Window {
+  __CITY_SIM_BENCH_HOLD__?: boolean;
+  __CITY_SIM_SCHEDULER__?: SchedulerControl;
+}
 interface MonitorInternals {
   world: World;
   profiler: { latest: Record<string, number> };
@@ -41,6 +65,7 @@ interface BenchmarkSample {
   phase: string;
   targetScale: number;
   simTimeSeconds: number;
+  scheduler: SchedulerSnapshot;
   frame: { frameMs: number; fps: number; gpuMs: number | null; backlogSec: number; simBusy: boolean };
   render: RenderProfileSample & { preRenderMs: number };
   sim: Record<string, number>;
@@ -50,6 +75,10 @@ interface BenchmarkSample {
   performanceText: string;
 }
 interface NumericStats { n: number; mean: number; min: number; p50: number; p95: number; max: number; }
+
+const benchWindow = window as BenchWindow;
+const autoRequested = new URL(window.location.href).searchParams.get(AUTO_PARAM) === '1';
+if (autoRequested) benchWindow.__CITY_SIM_BENCH_HOLD__ = true;
 
 let latestFrame: LatestFrame | null = null;
 let harnessInstalled = false;
@@ -86,6 +115,7 @@ function nestedNumber(sample: BenchmarkSample, path: string): number {
   for (const part of path.split('.')) value = value && typeof value === 'object' ? (value as Record<string, unknown>)[part] : undefined;
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
+function schedulerControl(): SchedulerControl | null { return benchWindow.__CITY_SIM_SCHEDULER__ ?? null; }
 
 class BenchmarkHarness {
   private readonly root = document.createElement('div');
@@ -104,7 +134,7 @@ class BenchmarkHarness {
 
     this.root.style.cssText = 'position:fixed;left:8px;bottom:36px;z-index:31;display:flex;align-items:center;gap:7px;font:11px/1.2 ui-monospace,monospace;color:#cdd7e5;background:rgba(8,12,18,.78);border:1px solid rgba(52,68,91,.72);border-radius:6px;padding:5px 7px;user-select:none';
     this.button.textContent = 'BENCH';
-    this.button.title = 'Fresh 100-second standard benchmark; reloads the same city and downloads one JSON report.';
+    this.button.title = 'Fresh standard benchmark with isolated speed phases; downloads one JSON report.';
     this.button.style.cssText = 'padding:3px 8px;font:600 11px ui-monospace,monospace;cursor:pointer;border-radius:4px;border:1px solid #4d6685;background:#21344d;color:#e7eef8';
     this.status.textContent = '100s standard'; this.status.style.opacity = '.72';
     this.root.append(this.button, this.status); document.body.appendChild(this.root);
@@ -127,8 +157,8 @@ class BenchmarkHarness {
   private async waitAndRun(): Promise<void> {
     this.status.textContent = 'preparing…';
     const deadline = performance.now() + 15_000;
-    while ((!latestFrame || !this.findSpeedButton('1m/s')) && performance.now() < deadline) await sleep(50);
-    if (!latestFrame) { this.status.textContent = 'failed: no perf monitor'; return; }
+    while ((!latestFrame || !this.findSpeedButton('1m/s') || !schedulerControl()) && performance.now() < deadline) await sleep(50);
+    if (!latestFrame || !schedulerControl()) { this.status.textContent = 'failed: benchmark control unavailable'; return; }
     await this.run();
   }
 
@@ -160,7 +190,8 @@ class BenchmarkHarness {
   }
 
   private capture(phaseIndex: number, phase: PhaseSpec): BenchmarkSample | null {
-    const frame = latestFrame; if (!frame) return null;
+    const frame = latestFrame; const control = schedulerControl();
+    if (!frame || !control) return null;
     const internals = frame.monitor as unknown as MonitorInternals;
     const preRenderMs = frame.render.railOpsMs + frame.render.railVisualMs + frame.render.liveryMs + frame.render.vehicleVisualMs + frame.render.preRenderOtherMs;
     return {
@@ -169,6 +200,7 @@ class BenchmarkHarness {
       phase: phase.label,
       targetScale: phase.scale,
       simTimeSeconds: internals.world.clock.totalSeconds,
+      scheduler: control.snapshot(),
       frame: { frameMs: frame.frameMs, fps: frame.fps, gpuMs: finite(internals.gpu.latestMs), backlogSec: frame.backlogSec, simBusy: frame.simBusy },
       render: { ...frame.render, preRenderMs },
       sim: { ...internals.profiler.latest },
@@ -179,20 +211,41 @@ class BenchmarkHarness {
     };
   }
 
-  private summarize(samples: BenchmarkSample[], spec: PhaseSpec, wallSeconds: number, simAdvanced: number): unknown {
-    const metric = (path: string): NumericStats => stats(samples.map((s) => nestedNumber(s, path)));
+  private summarize(
+    samples: BenchmarkSample[], spec: PhaseSpec, wallSeconds: number, simAdvanced: number,
+    start: SchedulerSnapshot, end: SchedulerSnapshot,
+  ): unknown {
+    const frameMetric = (path: string): NumericStats => stats(samples.map((s) => nestedNumber(s, path)));
+    const uniqueBatches = new Map<number, BenchmarkSample>();
+    for (const sample of samples) {
+      const id = sample.scheduler.batchId;
+      if (id > start.batchId && sample.sim.steps > 0) uniqueBatches.set(id, sample);
+    }
+    const batchSamples = [...uniqueBatches.values()];
+    const simMetric = (path: string): NumericStats => stats(batchSamples.map((s) => nestedNumber(s, path)));
     return {
       label: spec.label, speedLabel: spec.speedLabel, targetScale: spec.scale, wallSeconds, simAdvanced,
       effectiveSimRate: wallSeconds > 0 ? simAdvanced / wallSeconds : 0,
       targetAchievementPct: spec.scale > 0 && wallSeconds > 0 ? (simAdvanced / wallSeconds / spec.scale) * 100 : 0,
+      scheduler: {
+        completedBatches: end.batchId - start.batchId,
+        completedSimSeconds: end.completedSimSeconds - start.completedSimSeconds,
+        speedRebases: end.speedRebaseCount - start.speedRebaseCount,
+        rebasedRealSeconds: end.rebasedRealSeconds - start.rebasedRealSeconds,
+        railInputSeconds: end.railInputSeconds - start.railInputSeconds,
+        railProcessedSeconds: end.railProcessedSeconds - start.railProcessedSeconds,
+        railBacklogStartSeconds: start.railBacklogSeconds,
+        railBacklogEndSeconds: end.railBacklogSeconds,
+        uniqueSimSamples: batchSamples.length,
+      },
       metrics: {
-        fps: metric('frame.fps'), frameMs: metric('frame.frameMs'), gpuMs: metric('frame.gpuMs'), lagSeconds: metric('frame.backlogSec'),
-        renderMs: metric('render.totalMs'), preRenderMs: metric('render.preRenderMs'), railOpsMs: metric('render.railOpsMs'), railBacklogSec: metric('render.railBacklogSec'),
-        simMs: metric('sim.totalMs'), agentWorkerMs: metric('sim.workerMs'), agentMs: metric('sim.agentMs'), trafficMs: metric('sim.trafficMs'),
-        pedWorkerWallMs: metric('sim.pedWorkerMs'), pedWorkerCoreMs: metric('sim.pedWorkerCoreMs'), pedReturnMs: metric('sim.pedWorkerReturnMs'), pedWakeMs: metric('sim.pedWorkerWakeMs'),
-        poiWorkerMs: metric('sim.poiWorkerMs'), poiComputeMs: metric('sim.poiWorkerComputeMs'), poiReturnMs: metric('sim.poiWorkerReturnMs'),
-        astarWalkMs: metric('sim.astarWalkMs'), astarWalkCount: metric('sim.astarWalkCount'),
-        idleAgents: metric('states.agents.Idle'), routingAgents: metric('states.agents.Routing'), engagedAgents: metric('states.agents.Engaged'), activePedestrians: metric('states.activePedestrians'),
+        fps: frameMetric('frame.fps'), frameMs: frameMetric('frame.frameMs'), gpuMs: frameMetric('frame.gpuMs'), lagSeconds: frameMetric('frame.backlogSec'),
+        renderMs: frameMetric('render.totalMs'), preRenderMs: frameMetric('render.preRenderMs'), railOpsMs: frameMetric('render.railOpsMs'), railBacklogSec: frameMetric('render.railBacklogSec'),
+        simMs: simMetric('sim.totalMs'), agentWorkerMs: simMetric('sim.workerMs'), agentMs: simMetric('sim.agentMs'), trafficMs: simMetric('sim.trafficMs'),
+        pedWorkerWallMs: simMetric('sim.pedWorkerMs'), pedWorkerCoreMs: simMetric('sim.pedWorkerCoreMs'), pedReturnMs: simMetric('sim.pedWorkerReturnMs'), pedWakeMs: simMetric('sim.pedWorkerWakeMs'),
+        poiWorkerMs: simMetric('sim.poiWorkerMs'), poiComputeMs: simMetric('sim.poiWorkerComputeMs'), poiReturnMs: simMetric('sim.poiWorkerReturnMs'),
+        astarWalkMs: simMetric('sim.astarWalkMs'), astarWalkCount: simMetric('sim.astarWalkCount'),
+        idleAgents: frameMetric('states.agents.Idle'), routingAgents: frameMetric('states.agents.Routing'), engagedAgents: frameMetric('states.agents.Engaged'), activePedestrians: frameMetric('states.activePedestrians'),
       },
     };
   }
@@ -220,38 +273,61 @@ class BenchmarkHarness {
   }
 
   private async run(): Promise<void> {
-    if (this.running || !latestFrame) return;
+    const control = schedulerControl();
+    if (this.running || !latestFrame || !control) return;
     this.running = true; this.cancelled = false; this.samples = []; this.phaseSummaries = [];
     this.startedAt = new Date().toISOString(); this.benchmarkStartWall = performance.now();
     this.button.textContent = 'STOP';
     const monitor = latestFrame.monitor as unknown as MonitorInternals;
+
+    control.hold();
+    await control.waitForIdle();
     const initialHud = document.getElementById('hud')?.textContent ?? '';
     const initialWorldStats = monitor.world.stats();
     const initialActivity = monitor.world.activitySnapshot();
+    const initialScheduler = control.snapshot();
 
-    for (let p = 0; p < PHASES.length && !this.cancelled; p++) {
-      const phase = PHASES[p];
-      if (!this.setSpeed(phase.speedLabel)) { this.status.textContent = `missing ${phase.speedLabel}`; this.cancelled = true; break; }
-      const phaseStartWall = performance.now(); const phaseStartSim = monitor.world.clock.totalSeconds;
-      while (!this.cancelled && performance.now() - phaseStartWall < phase.durationMs) {
-        const sample = this.capture(p, phase); if (sample) this.samples.push(sample);
-        const elapsed = performance.now() - phaseStartWall;
-        const remaining = Math.max(0, Math.ceil((phase.durationMs - elapsed) / 1000));
-        this.status.textContent = `${p + 1}/${PHASES.length} ${phase.speedLabel} ${remaining}s`;
-        await sleep(SAMPLE_INTERVAL_MS);
+    try {
+      for (let p = 0; p < PHASES.length && !this.cancelled; p++) {
+        const phase = PHASES[p];
+        control.hold();
+        if (!(await control.waitForIdle())) { this.status.textContent = 'failed: phase boundary timeout'; this.cancelled = true; break; }
+        if (!this.setSpeed(phase.speedLabel)) { this.status.textContent = `missing ${phase.speedLabel}`; this.cancelled = true; break; }
+        control.rebaseSpeed();
+
+        const phaseStartScheduler = control.snapshot();
+        const phaseStartSim = monitor.world.clock.totalSeconds;
+        const phaseStartWall = performance.now();
+        control.resume();
+
+        while (!this.cancelled && performance.now() - phaseStartWall < phase.durationMs) {
+          const sample = this.capture(p, phase); if (sample) this.samples.push(sample);
+          const elapsed = performance.now() - phaseStartWall;
+          const remaining = Math.max(0, Math.ceil((phase.durationMs - elapsed) / 1000));
+          this.status.textContent = `${p + 1}/${PHASES.length} ${phase.speedLabel} ${remaining}s`;
+          await sleep(SAMPLE_INTERVAL_MS);
+        }
+
+        control.hold();
+        await control.waitForIdle();
+        const last = this.capture(p, phase); if (last) this.samples.push(last);
+        const phaseEndScheduler = control.snapshot();
+        const wallSeconds = Math.max(0.001, (performance.now() - phaseStartWall) / 1000);
+        const simAdvanced = monitor.world.clock.totalSeconds - phaseStartSim;
+        const phaseSamples = this.samples.filter((s) => s.phaseIndex === p);
+        this.phaseSummaries.push(this.summarize(phaseSamples, phase, wallSeconds, simAdvanced, phaseStartScheduler, phaseEndScheduler));
       }
-      const last = this.capture(p, phase); if (last) this.samples.push(last);
-      const wallSeconds = Math.max(0.001, (performance.now() - phaseStartWall) / 1000);
-      const simAdvanced = monitor.world.clock.totalSeconds - phaseStartSim;
-      const phaseSamples = this.samples.filter((s) => s.phaseIndex === p);
-      this.phaseSummaries.push(this.summarize(phaseSamples, phase, wallSeconds, simAdvanced));
+    } finally {
+      control.resume();
     }
 
+    const finalScheduler = control.snapshot();
     const report = {
-      schema: 'city-sim-benchmark-v1', appVersion: APP_VERSION, startedAt: this.startedAt, finishedAt: new Date().toISOString(),
+      schema: 'city-sim-benchmark-v2', appVersion: APP_VERSION, startedAt: this.startedAt, finishedAt: new Date().toISOString(),
       aborted: this.cancelled, plan: PHASES, environment: this.environment(latestFrame!),
-      initial: { hudText: initialHud, worldStats: initialWorldStats, activity: initialActivity },
-      final: { hudText: document.getElementById('hud')?.textContent ?? '', worldStats: monitor.world.stats(), activity: monitor.world.activitySnapshot(), states: this.countStates(monitor.world) },
+      scenario: { requestedPopulation: finalScheduler.requestedPopulation, actualPopulation: finalScheduler.actualPopulation },
+      initial: { hudText: initialHud, worldStats: initialWorldStats, activity: initialActivity, scheduler: initialScheduler },
+      final: { hudText: document.getElementById('hud')?.textContent ?? '', worldStats: monitor.world.stats(), activity: monitor.world.activitySnapshot(), states: this.countStates(monitor.world), scheduler: finalScheduler },
       phaseSummaries: this.phaseSummaries, samples: this.samples,
     };
     this.download(report);

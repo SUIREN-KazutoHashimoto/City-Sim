@@ -13,6 +13,7 @@ export interface RailFrameProfile {
   totalMs: number;
   operationsMs: number;
   visualsMs: number;
+  inputSeconds: number;
   steps: number;
   processedSeconds: number;
   averageStepSeconds: number;
@@ -22,18 +23,15 @@ export interface RailFrameProfile {
 /**
  * Cooperative high-speed scheduler for RailRenderer.
  *
- * RailRenderer's original public update path advances operations in fixed 0.5s slices. At
- * high simulation speeds that can turn a single RAF task into tens or hundreds of full rail
- * operation passes, starving Worker completion continuations on the browser main thread.
+ * Rail operations must follow completed simulation time, not target wall-clock time. Feeding this
+ * scheduler with `realDt * timeScale` made rail continue accumulating future work while the world
+ * itself was behind, and render throttling amplified that drift. The caller now supplies only the
+ * simulation seconds that have actually completed since the previous rendered frame.
  *
- * This scheduler preserves the 0.5s slice at normal speed, but uses a bounded multirate slice
- * at accelerated speeds and caps each RAF to at most six operation passes plus a small CPU
- * budget. Unprocessed simulation seconds stay in a backlog and are consumed by later frames.
- * Visual mesh/signal synchronization still happens once per rendered frame.
- *
- * The internal-method adapter is intentionally isolated here. TypeScript `private` methods are
- * normal prototype methods at runtime in the current build; keeping this coupling in one file
- * makes it straightforward to move the scheduler into RailRenderer later.
+ * The scheduler still preserves the 0.5s operational slice at normal speed, uses bounded multirate
+ * slices at accelerated speeds, and caps each rendered frame to at most six operation passes plus a
+ * small CPU budget. Any real rail work that cannot be consumed stays in `pendingSeconds`; nothing is
+ * silently dropped.
  */
 export class RailFrameScheduler {
   private readonly runtime: RailRuntimeInternals;
@@ -43,18 +41,12 @@ export class RailFrameScheduler {
     this.runtime = renderer as unknown as RailRuntimeInternals;
   }
 
-  update(realDt: number, timeScale: number, paused: boolean): RailFrameProfile {
+  update(completedSimSeconds: number, timeScale: number, paused: boolean): RailFrameProfile {
     const totalStart = performance.now();
-    // High-speed simulation may deliberately render at 10-30 FPS to leave the main thread free
-    // for Worker continuations. Preserve those longer rendered-frame intervals instead of the
-    // old 50ms clamp, otherwise rail time would run slow whenever render throttling is active.
-    const frameDt = Math.max(0, Math.min(realDt, 0.1));
+    const inputSeconds = Number.isFinite(completedSimSeconds) ? Math.max(0, completedSimSeconds) : 0;
     const scale = Number.isFinite(timeScale) ? Math.max(0, timeScale) : 0;
 
-    if (!paused && frameDt > 0 && scale > 0) {
-      // Keep the original per-frame simulated-time safety cap, but carry any unfinished work.
-      this.pendingSeconds += Math.min(frameDt * scale, 180);
-    }
+    if (!paused && inputSeconds > 0) this.pendingSeconds += inputSeconds;
 
     const operationsStart = performance.now();
     let steps = 0;
@@ -91,6 +83,7 @@ export class RailFrameScheduler {
       totalMs: performance.now() - totalStart,
       operationsMs,
       visualsMs,
+      inputSeconds,
       steps,
       processedSeconds,
       averageStepSeconds: steps > 0 ? processedSeconds / steps : 0,
