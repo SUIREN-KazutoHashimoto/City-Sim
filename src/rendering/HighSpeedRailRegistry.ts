@@ -27,7 +27,9 @@ export interface HighSpeedRailInspectionSource {
 const HIT_CAPACITY = 32;
 const NOSE_CAPACITY = HIT_CAPACITY * 2;
 const NOSE_LENGTH = 9.0;
-const BODY_CENTER_Y = 1.85;
+const HSR_WIDTH = 3.4;
+const HSR_HEIGHT = 3.7;
+const BODY_CENTER_Y = HSR_HEIGHT * 0.5;
 
 function matrixBox(
   x: number,
@@ -51,24 +53,24 @@ function matrixBox(
  *
  * Seen from the side it is a right triangle: the rear face at x=-0.5 has full body height, the
  * bottom stays level, and the roof slopes down to the forward tip at x=+0.5. Extruding that triangle
- * across Z gives a Shinkansen-like horizontal wedge rather than the previous four-sided pyramid.
+ * across Z gives the requested horizontal wedge rather than a pyramid.
  */
 function makeHorizontalTriangularPrism(): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute([
-    -0.5, -0.5, -0.5, // 0 rear-bottom-left
-    -0.5,  0.5, -0.5, // 1 rear-top-left
-     0.5, -0.5, -0.5, // 2 front-tip-left
-    -0.5, -0.5,  0.5, // 3 rear-bottom-right
-    -0.5,  0.5,  0.5, // 4 rear-top-right
-     0.5, -0.5,  0.5, // 5 front-tip-right
+    -0.5, -0.5, -0.5,
+    -0.5,  0.5, -0.5,
+     0.5, -0.5, -0.5,
+    -0.5, -0.5,  0.5,
+    -0.5,  0.5,  0.5,
+     0.5, -0.5,  0.5,
   ], 3));
   geometry.setIndex([
-    0, 1, 2,       // left triangular side
-    3, 5, 4,       // right triangular side
-    0, 3, 4, 0, 4, 1, // rear vertical face
-    0, 2, 5, 0, 5, 3, // flat bottom
-    1, 4, 5, 1, 5, 2, // sloped roof
+    0, 1, 2,
+    3, 5, 4,
+    0, 3, 4, 0, 4, 1,
+    0, 2, 5, 0, 5, 3,
+    1, 4, 5, 1, 5, 2,
   ]);
   const hard = geometry.toNonIndexed();
   geometry.dispose();
@@ -125,7 +127,7 @@ class HighSpeedInspectionAdapter implements HighSpeedRailInspectionSource {
       ...snapshot,
       firstPersonForwardOffset: Math.max(
         snapshot.firstPersonForwardOffset,
-        snapshot.consistLength * 0.5 + NOSE_LENGTH + 0.5,
+        snapshot.consistLength * 0.5 + 0.5,
       ),
     };
   }
@@ -159,10 +161,9 @@ class HighSpeedInspectionAdapter implements HighSpeedRailInspectionSource {
     let count = 0;
     for (const s of snapshots) {
       if (count >= HIT_CAPACITY) break;
-      const length = s.consistLength + NOSE_LENGTH * 2;
       this.hitMesh.setMatrixAt(
         count,
-        matrixBox(s.x, s.y + BODY_CENTER_Y, s.z, length, 4.6, 4.3, s.heading),
+        matrixBox(s.x, s.y + BODY_CENTER_Y, s.z, s.consistLength + 1.0, HSR_HEIGHT + 0.6, HSR_WIDTH + 0.8, s.heading),
       );
       this.hitIds[count] = s.id;
       count++;
@@ -179,16 +180,16 @@ class HighSpeedInspectionAdapter implements HighSpeedRailInspectionSource {
       if (count + 1 >= NOSE_CAPACITY) break;
       const dx = Math.cos(s.heading);
       const dz = Math.sin(s.heading);
-      const reach = s.consistLength * 0.5 + NOSE_LENGTH * 0.5;
+      const reach = Math.max(0, s.consistLength * 0.5 - NOSE_LENGTH * 0.5);
       const y = s.y + BODY_CENTER_Y;
 
       const fx = s.x + dx * reach;
       const fz = s.z + dz * reach;
-      this.noseMesh.setMatrixAt(count++, matrixBox(fx, y, fz, NOSE_LENGTH, 3.3, 3.25, s.heading));
+      this.noseMesh.setMatrixAt(count++, matrixBox(fx, y, fz, NOSE_LENGTH, HSR_HEIGHT, HSR_WIDTH, s.heading));
 
       const rx = s.x - dx * reach;
       const rz = s.z - dz * reach;
-      this.noseMesh.setMatrixAt(count++, matrixBox(rx, y, rz, NOSE_LENGTH, 3.3, 3.25, s.heading + Math.PI));
+      this.noseMesh.setMatrixAt(count++, matrixBox(rx, y, rz, NOSE_LENGTH, HSR_HEIGHT, HSR_WIDTH, s.heading + Math.PI));
     }
     this.noseMesh.count = count;
     this.noseMesh.instanceMatrix.needsUpdate = true;
