@@ -2,6 +2,7 @@ import { RoadNetwork, roadWidth, crosswalkSetback, CROSSWALK_DEPTH, laneOffset }
 import { AStar } from './AStar';
 import { VehicleStore, VehicleState } from './VehicleStore';
 import { SignalSystem } from './SignalSystem';
+import { ActiveAgentIndex } from '../simulation/ActiveAgentIndex';
 
 interface EdgePointRoute { path: number[]; targetT: number; cost: number; }
 
@@ -10,13 +11,18 @@ export class TrafficSystem {
   private arrivalT: Float32Array;
   private readonly activeEdges: number[] = [];
   private readonly edgeSeen: Uint8Array;
+  private readonly drivingVehicles: ActiveAgentIndex;
   pedBlockedFn: ((node: number) => boolean) | null = null;
 
   constructor(private net: RoadNetwork, private vs: VehicleStore, private signals: SignalSystem) {
     this.astar = new AStar(net, 'drive');
     this.arrivalT = new Float32Array(vs.capacity); this.arrivalT.fill(1);
     this.edgeSeen = new Uint8Array(net.edges.length);
+    this.drivingVehicles = new ActiveAgentIndex(vs.capacity);
   }
+
+  get drivingVehicleCount(): number { return this.drivingVehicles.size; }
+  forEachDrivingVehicle(visit: (vehicle: number) => void): void { this.drivingVehicles.forEachAscending(this.vs.count, visit); }
 
   dispatch(vehicle: number, sx: number, sz: number, gx: number, gz: number): boolean {
     const startNode = this.net.nearestNode(sx, sz), goalNode = this.net.nearestNode(gx, gz);
@@ -26,7 +32,7 @@ export class TrafficSystem {
     const vs = this.vs;
     vs.paths[vehicle] = Int32Array.from(path); vs.pathCursor[vehicle] = 1; vs.parkPOI[vehicle] = -1; vs.speed[vehicle] = 0;
     this.arrivalT[vehicle] = 1;
-    this.enterEdge(vehicle, path[0], path[1]); vs.state[vehicle] = VehicleState.Driving;
+    this.enterEdge(vehicle, path[0], path[1]); vs.state[vehicle] = VehicleState.Driving; this.drivingVehicles.add(vehicle);
     return true;
   }
 
@@ -37,7 +43,7 @@ export class TrafficSystem {
     const vs = this.vs;
     vs.paths[vehicle] = Int32Array.from(route.path); vs.pathCursor[vehicle] = 1; vs.parkPOI[vehicle] = -1; vs.speed[vehicle] = 0;
     this.arrivalT[vehicle] = route.targetT;
-    this.enterEdge(vehicle, route.path[0], route.path[1]); vs.state[vehicle] = VehicleState.Driving;
+    this.enterEdge(vehicle, route.path[0], route.path[1]); vs.state[vehicle] = VehicleState.Driving; this.drivingVehicles.add(vehicle);
     return true;
   }
 
@@ -49,17 +55,17 @@ export class TrafficSystem {
     }
     if (curFrom === edgeFrom && curTo === edgeTo && t > curT + 0.01) {
       vs.paths[vehicle] = Int32Array.from([curFrom, curTo]); vs.pathCursor[vehicle] = 1; vs.speed[vehicle] = 0; vs.parkPOI[vehicle] = -1;
-      this.arrivalT[vehicle] = t; vs.state[vehicle] = VehicleState.Driving; return true;
+      this.arrivalT[vehicle] = t; vs.state[vehicle] = VehicleState.Driving; this.drivingVehicles.add(vehicle); return true;
     }
     if (curFrom === edgeTo && curTo === edgeFrom && (1 - t) > curT + 0.01) {
       vs.paths[vehicle] = Int32Array.from([curFrom, curTo]); vs.pathCursor[vehicle] = 1; vs.speed[vehicle] = 0; vs.parkPOI[vehicle] = -1;
-      this.arrivalT[vehicle] = 1 - t; vs.state[vehicle] = VehicleState.Driving; return true;
+      this.arrivalT[vehicle] = 1 - t; vs.state[vehicle] = VehicleState.Driving; this.drivingVehicles.add(vehicle); return true;
     }
     const route = this.bestRouteToEdgePoint(curTo, edgeFrom, edgeTo, t); if (!route) return false;
     const full = [curFrom, ...route.path];
     if (full.length < 3) return false;
     vs.paths[vehicle] = Int32Array.from(full); vs.pathCursor[vehicle] = 1; vs.speed[vehicle] = 0; vs.parkPOI[vehicle] = -1;
-    this.arrivalT[vehicle] = route.targetT; vs.state[vehicle] = VehicleState.Driving;
+    this.arrivalT[vehicle] = route.targetT; vs.state[vehicle] = VehicleState.Driving; this.drivingVehicles.add(vehicle);
     return true;
   }
 
@@ -72,7 +78,7 @@ export class TrafficSystem {
     vs.fromNode[vehicle] = from; vs.toNode[vehicle] = to; vs.edge[vehicle] = edgeId; vs.segT[vehicle] = Math.max(0.02, Math.min(0.98, targetT));
     vs.segLen[vehicle] = Math.max(1, Math.hypot(nt.x - nf.x, nt.z - nf.z)); vs.speed[vehicle] = 0; vs.accel[vehicle] = 0;
     vs.paths[vehicle] = Int32Array.from([from, to]); vs.pathCursor[vehicle] = 1; this.arrivalT[vehicle] = vs.segT[vehicle];
-    vs.state[vehicle] = VehicleState.Arrived; this.updateWorldPos(vehicle); return true;
+    vs.state[vehicle] = VehicleState.Arrived; this.drivingVehicles.delete(vehicle); this.updateWorldPos(vehicle); return true;
   }
 
   private bestRouteToEdgePoint(startNode: number, edgeFrom: number, edgeTo: number, t: number): EdgePointRoute | null {
@@ -142,7 +148,7 @@ export class TrafficSystem {
   }
 
   private arrive(v: number, t: number): void {
-    const vs = this.vs; vs.state[v] = VehicleState.Arrived; vs.speed[v] = 0; vs.accel[v] = 0; vs.segT[v] = t; this.updateWorldPos(v);
+    const vs = this.vs; vs.state[v] = VehicleState.Arrived; this.drivingVehicles.delete(v); vs.speed[v] = 0; vs.accel[v] = 0; vs.segT[v] = t; this.updateWorldPos(v);
   }
 
   private idm(v: number, gap: number, leadSpeed: number): number {
@@ -196,12 +202,11 @@ export class TrafficSystem {
     this.activeEdges.length = 0;
 
     const vs = this.vs;
-    for (let v = 0; v < vs.count; v++) {
-      if (vs.state[v] !== VehicleState.Driving) continue;
-      const e = vs.edge[v]; if (e < 0) continue;
+    this.drivingVehicles.forEachAscending(vs.count, (v) => {
+      const e = vs.edge[v]; if (e < 0) return;
       if (this.edgeSeen[e] === 0) { this.edgeSeen[e] = 1; this.activeEdges.push(e); }
       edges[e].occupants.push(v);
-    }
+    });
     for (let i = 0; i < this.activeEdges.length; i++) {
       const occ = edges[this.activeEdges[i]].occupants;
       if (occ.length > 1) occ.sort((a, b) => vs.segT[a] - vs.segT[b]);
