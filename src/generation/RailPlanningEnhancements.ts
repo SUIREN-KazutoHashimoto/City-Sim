@@ -10,6 +10,8 @@ declare module './RailPlanning' {
 
 // 直線主体の複数路線で都市をカバーするため、標準幹線は3路線。
 DEFAULT_RAIL_PLANNING.railTrunkLines = Math.max(3, DEFAULT_RAIL_PLANNING.railTrunkLines);
+// 駅間を従来の1.5倍に広げ、幹線・支線の既存比率はそのまま維持する。
+DEFAULT_RAIL_PLANNING.railStationSpacing *= 1.5;
 
 type AnyRailPlan = RailNetworkPlan & Record<string, any>;
 
