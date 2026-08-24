@@ -200,13 +200,20 @@ export class World {
   /** Smooth routing bursts instead of allowing every Routing agent to start A* in one step. */
   private processRoutingBudget(): void {
     const s = this.store, count = s.count; if (count <= 0) return;
+    const origin = this.routingCursor;
     let scanned = 0, processed = 0;
     while (scanned < count && processed < this.routingBudget) {
-      const i = (this.routingCursor + scanned) % count;
-      if (s.state[i] === AgentState.Routing) { this.beginTrip(i); processed++; }
-      scanned++;
+      const start = (origin + scanned) % count;
+      const segmentLength = Math.min(count - scanned, count - start);
+      const next = s.state.indexOf(AgentState.Routing, start);
+      if (next < 0 || next >= start + segmentLength) {
+        scanned += segmentLength;
+        continue;
+      }
+      scanned += next - start;
+      this.beginTrip(next); processed++; scanned++;
     }
-    this.routingCursor = (this.routingCursor + Math.max(1, scanned)) % count;
+    this.routingCursor = (origin + Math.max(1, scanned)) % count;
   }
 
   private processParallelActivityExits(now: number): void {
