@@ -48,10 +48,10 @@ export class RailFrameScheduler {
   private pendingSeconds = 0;
 
   constructor(renderer: RailRenderer) {
-    // Add external services before safety captures the operational callbacks so the new trains use
-    // exactly the same platform/crossover interlocking as the resident fleet.
-    installExternalRailConnection(renderer);
+    // City-rail safety owns only the existing network. The external high-speed line is installed
+    // afterwards and advances from the same completed rail time without joining city blocks/routes.
     installRailInterlockingSafety(renderer);
+    installExternalRailConnection(renderer);
     this.runtime = renderer as unknown as RailRuntimeInternals;
   }
 

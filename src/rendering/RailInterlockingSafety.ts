@@ -21,6 +21,7 @@ interface SafetyTrainRun {
   waitingSince: number;
   scheduledDepartureAt: number;
   depotEnd: 0 | 1;
+  blocked: boolean;
 }
 
 interface SafetyLine {
@@ -74,6 +75,7 @@ interface RailSafetyRuntime {
   chooseRoutePlan: (run: SafetyTrainRun, fromIndex: number, toIndex: number) => SafetyRoutePlan | null;
   sectionControl: (run: SafetyTrainRun) => SafetyControl;
   tryReleaseDepotTrain: (run: SafetyTrainRun) => void;
+  rebuildDispatchReservations: () => void;
 
   blockSequence: (lineId: number, fromIndex: number, toIndex: number, lane: TrackLane) => number[];
   blockAvailableFor: (trainId: number, blockId: number) => boolean;
@@ -89,13 +91,15 @@ interface RailSafetyRuntime {
 const CROSSOVER_BLOCK_PREFIX = 'crossover-block:';
 const CROSSOVER_LENGTH = 46;
 const PLATFORM_SAFETY_METERS = 4;
+const LOCAL_DEADLOCK_WATCH_SECONDS = 75;
 
 /**
- * Install the stricter station/crossover interlocking on the existing RailRenderer runtime.
+ * Install stricter station/crossover interlocking on the existing RailRenderer runtime.
  *
- * RailRenderer already exposes its operational internals to RailFrameScheduler through a narrow
- * runtime interface. Keep the safety correction isolated the same way so the very large renderer
- * stays visually unchanged while route ownership becomes stricter.
+ * v0.1.18 additionally makes deadlock recovery local to each train. The original renderer only
+ * noticed a deadlock when the entire railway stopped moving; one healthy train elsewhere therefore
+ * hid a permanently stuck pair. Recovery priority is now assigned to the longest signal wait even
+ * while other lines continue to move.
  */
 export function installRailInterlockingSafety(renderer: RailRenderer): void {
   const rt = renderer as unknown as RailSafetyRuntime;
@@ -108,6 +112,7 @@ export function installRailInterlockingSafety(renderer: RailRenderer): void {
   const baseRoutesAvailableFor = rt.routesAvailableFor.bind(rt);
   const baseSectionControl = rt.sectionControl.bind(rt);
   const baseTryReleaseDepotTrain = rt.tryReleaseDepotTrain.bind(rt);
+  const baseRebuildDispatchReservations = rt.rebuildDispatchReservations.bind(rt);
 
   const segmentDirection = (fromIndex: number, toIndex: number): 1 | -1 => toIndex > fromIndex ? 1 : -1;
 
@@ -115,7 +120,6 @@ export function installRailInterlockingSafety(renderer: RailRenderer): void {
     `${CROSSOVER_BLOCK_PREFIX}${lineId}:${stationId}:${side}`;
 
   const targetPlatformOwner = (key: string): SafetyTrainRun | null => {
-    // A train physically stopped in the platform always owns it.
     let stopped: SafetyTrainRun | null = null;
     for (const other of rt.trainRuns) {
       if (other.state === 'depot' || other.currentStationIndex < 0) continue;
@@ -124,8 +128,6 @@ export function installRailInterlockingSafety(renderer: RailRenderer): void {
     }
     if (stopped) return stopped;
 
-    // If multiple legacy/seeded trains are already committed to the same platform, let the nearest
-    // one keep the route and force the others to wait outside the station.
     let best: SafetyTrainRun | null = null;
     let bestRemaining = Infinity;
     for (const other of rt.trainRuns) {
@@ -175,6 +177,54 @@ export function installRailInterlockingSafety(renderer: RailRenderer): void {
     return owner;
   };
 
+  const touchesInterval = (run: SafetyTrainRun, lo: number, hi: number): boolean => {
+    if (run.currentStationIndex >= 0) return run.currentStationIndex >= lo && run.currentStationIndex <= hi;
+    if (run.originStationIndex < 0 || run.nextStationIndex < 0) return false;
+    const runLo = Math.min(run.originStationIndex, run.nextStationIndex);
+    const runHi = Math.max(run.originStationIndex, run.nextStationIndex);
+    return runHi >= lo && runLo <= hi;
+  };
+
+  const reverseLaneSafe = (
+    run: SafetyTrainRun,
+    fromIndex: number,
+    toIndex: number,
+    lane: TrackLane,
+  ): boolean => {
+    const sequence = rt.blockSequence(run.lineId, fromIndex, toIndex, lane);
+    if (!sequence.length) return false;
+    for (const blockId of sequence) {
+      if (!rt.blockFreeIgnoringOwnReservation(blockId, run.id)) return false;
+      const reserved = rt.blockReservations.get(blockId);
+      if (reserved != null && reserved !== run.id) return false;
+    }
+
+    const lo = Math.max(0, Math.min(fromIndex, toIndex) - 1);
+    const line = rt.rail.lines[run.lineId];
+    const hi = Math.min((line?.stationIds.length ?? 1) - 1, Math.max(fromIndex, toIndex) + 1);
+    for (const other of rt.trainRuns) {
+      if (other.id === run.id || other.state === 'depot' || other.lineId !== run.lineId) continue;
+      if (other.direction !== lane) continue;
+      if (touchesInterval(other, lo, hi)) return false;
+    }
+    return true;
+  };
+
+  const selectLocalRecoveryTrain = (): number => {
+    let bestId = -1;
+    let bestWait = LOCAL_DEADLOCK_WATCH_SECONDS;
+    for (const run of rt.trainRuns) {
+      if (run.state === 'depot' || run.waitingSince < 0) continue;
+      if (run.state !== 'signal' && !run.blocked) continue;
+      const waited = rt.railTime - run.waitingSince;
+      if (waited > bestWait + 1e-6 || (Math.abs(waited - bestWait) <= 1e-6 && run.id < bestId)) {
+        bestWait = waited;
+        bestId = run.id;
+      }
+    }
+    return bestId;
+  };
+
   rt.stationTrackAvailable = (run, toIndex, lane) => {
     const key = basePlatformKey(run, toIndex, lane);
     const owner = targetPlatformOwner(key);
@@ -183,16 +233,12 @@ export function installRailInterlockingSafety(renderer: RailRenderer): void {
   };
 
   rt.routeKeysForPlan = (run, fromIndex, toIndex, lane) => {
-    // Remove the old direction-derived crossover key and rebuild it from the actual segment
-    // direction. This matters at terminals, where dispatch planning happens before stepTrain flips
-    // run.direction for the return working.
     const keys = baseRouteKeysForPlan(run, fromIndex, toIndex, lane)
       .filter((key) => !key.startsWith(`crossover:${run.lineId}:`));
     const line = rt.rail.lines[run.lineId];
     if (line?.kind === 'trunk' && rt.hasCrossover(run.lineId, fromIndex)) {
       const side = segmentDirection(fromIndex, toIndex);
       const stationId = line.stationIds[fromIndex];
-      // Every movement through the switch area, straight or diverging, owns the same physical block.
       keys.push(crossoverBlockKey(run.lineId, stationId, side));
       if (lane !== side) keys.push(`crossover:${run.lineId}:${stationId}:${side}`);
     }
@@ -213,7 +259,15 @@ export function installRailInterlockingSafety(renderer: RailRenderer): void {
     const dir = segmentDirection(fromIndex, toIndex);
     const normal: TrackLane = line.kind === 'trunk' ? dir : 0;
     const candidates: TrackLane[] = [normal];
-    if (line.kind === 'trunk' && rt.canUseCrossover(run, fromIndex, toIndex)) candidates.push((normal * -1) as TrackLane);
+
+    if (
+      line.kind === 'trunk'
+      && run.id === rt.recoveryTrainId
+      && rt.canUseCrossover(run, fromIndex, toIndex)
+    ) {
+      const reverse = (normal * -1) as TrackLane;
+      if (reverseLaneSafe(run, fromIndex, toIndex, reverse)) candidates.push(reverse);
+    }
 
     let best: SafetyRoutePlan | null = null;
     let bestScore = -Infinity;
@@ -268,5 +322,18 @@ export function installRailInterlockingSafety(renderer: RailRenderer): void {
     const owner = targetPlatformOwner(key);
     if (owner && owner.id !== run.id) return;
     baseTryReleaseDepotTrain(run);
+  };
+
+  rt.rebuildDispatchReservations = () => {
+    const localRecovery = selectLocalRecoveryTrain();
+    if (localRecovery >= 0) {
+      rt.recoveryTrainId = localRecovery;
+    } else if (rt.recoveryTrainId >= 0) {
+      const current = rt.trainRuns[rt.recoveryTrainId];
+      if (!current || current.waitingSince < 0 || (current.state !== 'signal' && !current.blocked)) {
+        rt.recoveryTrainId = -1;
+      }
+    }
+    baseRebuildDispatchReservations();
   };
 }
