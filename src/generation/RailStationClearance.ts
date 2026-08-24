@@ -1,3 +1,4 @@
+import { BuildingArchetype, RoofType } from './CityGenerator';
 import type { CityGenerator, Building, ParkingLot } from './CityGenerator';
 import type { UrbanBlock } from './BlockParcelLayout';
 import { RailNetworkPlan, RailStationKind } from './RailPlanning';
@@ -15,39 +16,44 @@ export interface RailStationClearanceStats {
 interface PointXZ { x: number; z: number; }
 
 /**
- * Reserve whole urban blocks around stations and rail curves before population is assigned.
- *
- * Rail alignment is finalized only after the road network exists, while buildings/facilities have
- * already been generated. We therefore remove generated development from affected blocks here,
- * disable/remap the corresponding POIs, and convert station-adjacent blocks into civic parks. This
- * keeps long platforms and curve envelopes free of buildings without leaving invisible occupied POIs.
+ * Clear only the real railway/station envelope. The previous whole-block clearing produced oversized
+ * green voids around stations; safe buildings in station-adjacent blocks are now retained and major
+ * station frontage is converted to low-rise food/retail/leisure uses.
  */
 export function reserveRailStationClearance(city: CityGenerator, rail: RailNetworkPlan): RailStationClearanceStats {
   if (rail.stations.length === 0) {
     return { buildingsRemoved: 0, parkingLotsRemoved: 0, stationParkBlocks: 0, curveBlocksCleared: 0, parksAdded: 0 };
   }
 
-  // Re-run alignment once with already-generated parks available. This lets a non-terminal station
-  // planned inside/next to a park remain off the road centreline while retaining its roadNode connection.
   setRailStationOpenSpaces(city.parks);
   rail.alignToRoadNetwork(city.net);
 
   const stationBlocks = new Set<number>();
+  const majorCommercialBlocks = new Set<number>();
   const curveBlocks = new Set<number>();
   const curvePoints = collectRailCurveIntersections(rail);
 
   for (const block of city.blocks) {
-    if (rail.stations.some((station) => blockWithinRadius(block, station, stationBlockRadius(station.kind)))) {
+    for (const station of rail.stations) {
+      if (!blockWithinRadius(block, station, stationBlockRadius(station.kind))) continue;
       stationBlocks.add(block.id);
+      if (station.kind === RailStationKind.Central || station.kind === RailStationKind.SubCenter) majorCommercialBlocks.add(block.id);
     }
     if (curvePoints.some((point) => blockWithinRadius(block, point, 18))) curveBlocks.add(block.id);
   }
 
-  const clearedBlocks = new Set<number>([...stationBlocks, ...curveBlocks]);
+  const facilityBuildingIds = new Set(city.facilities.map((facility) => facility.buildingId));
   const removedBuildingIds = new Set<number>();
-  for (const b of city.buildings) {
-    if (buildingInsideAnyBlock(b, city.blocks, clearedBlocks) || intersectsAnyStation(b.x, b.z, Math.hypot(b.width, b.depth) * 0.42, rail)) {
-      removedBuildingIds.add(b.id);
+  for (const building of city.buildings) {
+    const objectRadius = Math.min(22, Math.hypot(building.width, building.depth) * 0.38);
+    if (intersectsRailEnvelope(building.x, building.z, objectRadius, rail)) {
+      removedBuildingIds.add(building.id);
+      continue;
+    }
+    if (majorCommercialBlocks.size > 0
+      && pointInsideAnyBlock(building.x, building.z, city.blocks, majorCommercialBlocks)
+      && !facilityBuildingIds.has(building.id)) {
+      restyleStationCommercial(city, building);
     }
   }
 
@@ -84,8 +90,8 @@ export function reserveRailStationClearance(city: CityGenerator, rail: RailNetwo
   let parkingLotsRemoved = 0;
   city.lotByPOI.clear();
   for (const lot of city.parkingLots) {
-    const radius = Math.hypot(lot.width, lot.depth) * 0.32;
-    if (pointInsideAnyBlock(lot.x, lot.z, city.blocks, clearedBlocks) || intersectsAnyStation(lot.x, lot.z, radius, rail)) {
+    const radius = Math.min(16, Math.hypot(lot.width, lot.depth) * 0.32);
+    if (intersectsRailEnvelope(lot.x, lot.z, radius, rail)) {
       parkingLotsRemoved++;
       city.poi.disable(lot.poiId);
       continue;
@@ -96,42 +102,61 @@ export function reserveRailStationClearance(city: CityGenerator, rail: RailNetwo
   }
   city.parkingLots.splice(0, city.parkingLots.length, ...keptLots);
 
-  let parksAdded = 0;
-  for (const blockId of stationBlocks) {
-    const block = city.blocks.find((candidate) => candidate.id === blockId);
-    if (!block) continue;
-    const alreadyPark = city.parks.some((park) => Math.abs(park.x - block.x) < 0.5 && Math.abs(park.z - block.z) < 0.5);
-    if (alreadyPark) continue;
-    const area = Math.max(1, block.width * block.depth);
-    const capacity = Math.max(120, Math.round(area / 12));
-    const poiId = city.poi.add({
-      category: POICategory.Leisure,
-      x: block.x,
-      z: block.z,
-      priceTier: 0.05,
-      capacity,
-      buildingId: -1,
-    });
-    city.parks.push({
-      id: city.parks.length,
-      x: block.x,
-      z: block.z,
-      width: block.width,
-      depth: block.depth,
-      kind: 'civic',
-      capacity,
-      poiId,
-    });
-    parksAdded++;
-  }
-
   return {
     buildingsRemoved: removedBuildingIds.size,
     parkingLotsRemoved,
     stationParkBlocks: stationBlocks.size,
     curveBlocksCleared: curveBlocks.size,
-    parksAdded,
+    parksAdded: 0,
   };
+}
+
+function restyleStationCommercial(city: CityGenerator, building: Building): void {
+  city.poi.disableBuildingPOIs(building.id);
+
+  const variant = Math.abs((building.styleSeed | 0) + building.id * 17) % 3;
+  const floors = 2 + variant;
+  building.width = Math.max(12, Math.min(34, building.width));
+  building.depth = Math.max(12, Math.min(30, building.depth));
+  building.floors = floors;
+  building.archetype = variant === 2 ? BuildingArchetype.MixedUse : BuildingArchetype.SmallShop;
+  building.roofType = RoofType.Flat;
+  building.category = variant === 0 ? POICategory.Retail : POICategory.Food;
+  building.developmentIntensity = Math.min(0.62, Math.max(0.42, building.developmentIntensity));
+  building.siteArea = Math.max(building.width * building.depth * 1.18, building.siteArea * 0.42);
+  building.grossFloorArea = building.width * building.depth * floors * 0.86;
+  building.coverageRatio = Math.min(0.82, building.width * building.depth / Math.max(1, building.siteArea));
+  building.floorAreaRatio = building.grossFloorArea / Math.max(1, building.siteArea);
+
+  const baseCapacity = Math.max(35, Math.round(building.width * building.depth * 0.18));
+  city.poi.add({
+    category: POICategory.Food,
+    x: building.x,
+    z: building.z,
+    priceTier: 0.34 + variant * 0.09,
+    capacity: baseCapacity,
+    buildingId: building.id,
+  });
+  city.poi.add({
+    category: POICategory.Retail,
+    x: building.x,
+    z: building.z,
+    priceTier: 0.28 + variant * 0.08,
+    capacity: Math.max(28, Math.round(baseCapacity * 0.82)),
+    buildingId: building.id,
+    stock: 140,
+    maxStock: 140,
+  });
+  if ((building.id & 1) === 0) {
+    city.poi.add({
+      category: POICategory.Leisure,
+      x: building.x,
+      z: building.z,
+      priceTier: 0.42 + variant * 0.08,
+      capacity: Math.max(24, Math.round(baseCapacity * 0.58)),
+      buildingId: building.id,
+    });
+  }
 }
 
 function stationBlockRadius(kind: RailStationKind): number {
@@ -140,15 +165,24 @@ function stationBlockRadius(kind: RailStationKind): number {
       : kind === RailStationKind.Terminal ? 104 : 96;
 }
 
-function intersectsAnyStation(x: number, z: number, objectRadius: number, rail: RailNetworkPlan): boolean {
-  for (const station of rail.stations) {
-    const clearance = station.kind === RailStationKind.Central ? 142
-      : station.kind === RailStationKind.SubCenter ? 134
-        : station.kind === RailStationKind.Terminal ? 128 : 122;
-    const dx = x - station.x, dz = z - station.z;
-    if (dx * dx + dz * dz <= (clearance + Math.min(24, objectRadius)) ** 2) return true;
+function intersectsRailEnvelope(x: number, z: number, objectRadius: number, rail: RailNetworkPlan): boolean {
+  const clearance = 18 + Math.min(18, Math.max(0, objectRadius));
+  const limit2 = clearance * clearance;
+  for (const line of rail.lines) {
+    for (let i = 1; i < line.path.length; i++) {
+      if (pointSegmentDistanceSquared(x, z, line.path[i - 1], line.path[i]) <= limit2) return true;
+    }
   }
   return false;
+}
+
+function pointSegmentDistanceSquared(x: number, z: number, a: PointXZ, b: PointXZ): number {
+  const dx = b.x - a.x, dz = b.z - a.z;
+  const len2 = dx * dx + dz * dz;
+  if (len2 < 0.01) return (x - a.x) ** 2 + (z - a.z) ** 2;
+  const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / len2));
+  const qx = a.x + dx * t, qz = a.z + dz * t;
+  return (x - qx) ** 2 + (z - qz) ** 2;
 }
 
 function collectRailCurveIntersections(rail: RailNetworkPlan): PointXZ[] {
@@ -182,8 +216,4 @@ function pointInsideBlock(x: number, z: number, block: UrbanBlock): boolean {
 function pointInsideAnyBlock(x: number, z: number, blocks: UrbanBlock[], ids: Set<number>): boolean {
   for (const block of blocks) if (ids.has(block.id) && pointInsideBlock(x, z, block)) return true;
   return false;
-}
-
-function buildingInsideAnyBlock(building: Building, blocks: UrbanBlock[], ids: Set<number>): boolean {
-  return pointInsideAnyBlock(building.x, building.z, blocks, ids);
 }

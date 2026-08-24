@@ -14,18 +14,16 @@ import '../world/RailPassengerAutoAttach';
 import './RailPassengerVisualConsistency';
 import '../world/RailPassengerDemand';
 import './TrainPassengerInspector';
+import './RailStationRuntimeV033';
 
-/**
- * 列車の外装レイヤー。
- *
- * RailRendererで確定した台車ベースposeをそのまま転写する。
- * 側面は「路線色」と「種別色」の2本帯にして、路線と普通/快速/特急を同時に識別できるようにする。
- */
+/** Exterior city-rail layer plus visible/illuminating front headlights. */
 export class TrainLiveryOverlay {
   private shell: THREE.InstancedMesh | null = null;
   private windows: THREE.InstancedMesh | null = null;
   private routeStripes: THREE.InstancedMesh | null = null;
   private serviceStripes: THREE.InstancedMesh | null = null;
+  private headlampMesh: THREE.InstancedMesh | null = null;
+  private readonly headlightPool: THREE.SpotLight[] = [];
   private capacity = 0;
   private proxyHidden = false;
 
@@ -39,6 +37,7 @@ export class TrainLiveryOverlay {
   private readonly rawScale = new THREE.Vector3();
   private readonly outScale = new THREE.Vector3();
   private readonly routeColorTmp = new THREE.Color();
+  private readonly identityQuat = new THREE.Quaternion();
   private readonly localBody = new THREE.Color(0xe8ecef);
   private readonly rapidBody = new THREE.Color(0xf3f5f6);
   private readonly limitedBody = new THREE.Color(0xf7f8fa);
@@ -50,14 +49,18 @@ export class TrainLiveryOverlay {
 
   sync(_dt: number): void {
     const proxy = this.rail.trainHitMesh;
-    if (!proxy || proxy.count <= 0) return;
+    if (!proxy || proxy.count <= 0) {
+      this.disableHeadlightPool();
+      return;
+    }
 
     this.hideProxy(proxy);
     const required = Math.max(1, proxy.instanceMatrix.count);
     if (!this.shell || required !== this.capacity) this.rebuild(required);
-    if (!this.shell || !this.windows || !this.routeStripes || !this.serviceStripes) return;
+    if (!this.shell || !this.windows || !this.routeStripes || !this.serviceStripes || !this.headlampMesh) return;
 
     let shellCount = 0, panelCount = 0;
+    const activeRuns = new Set<number>();
 
     for (let i = 0; i < proxy.count; i++) {
       proxy.getMatrixAt(i, this.rawMatrix);
@@ -73,6 +76,7 @@ export class TrainLiveryOverlay {
       this.shell.setMatrixAt(shellCount, this.outMatrix);
 
       const runId = this.rail.trainIdFromInstance(i);
+      if (runId >= 0) activeRuns.add(runId);
       const status = runId >= 0 ? this.rail.trainStatus(runId) : null;
       const service: TrainService = status?.service ?? 'local';
       this.shell.setColorAt(shellCount, this.bodyColor(service));
@@ -113,6 +117,66 @@ export class TrainLiveryOverlay {
     if (this.shell.instanceColor) this.shell.instanceColor.needsUpdate = true;
     if (this.routeStripes.instanceColor) this.routeStripes.instanceColor.needsUpdate = true;
     if (this.serviceStripes.instanceColor) this.serviceStripes.instanceColor.needsUpdate = true;
+
+    this.syncHeadlights(activeRuns);
+  }
+
+  private syncHeadlights(activeRuns: Set<number>): void {
+    if (!this.headlampMesh) return;
+    this.ensureHeadlightPool();
+    let lampCount = 0;
+    let realLightCount = 0;
+    const runtime = this.rail as unknown as { railTime?: number };
+    const day = (((runtime.railTime ?? 0) % 86400) + 86400) % 86400;
+    const hour = day / 3600;
+    const coneIntensity = hour >= 17 || hour < 6.5 ? 145 : hour >= 16 || hour < 7 ? 58 : 12;
+
+    for (const runId of activeRuns) {
+      const status = this.rail.trainStatus(runId);
+      if (!status || status.state === 'depot') continue;
+      const fx = Math.cos(status.heading), fz = Math.sin(status.heading);
+      const lx = -fz, lz = fx;
+      const forward = status.firstPersonForwardOffset;
+      const frontX = status.x + fx * forward;
+      const frontZ = status.z + fz * forward;
+      const lampY = status.y + 1.62;
+
+      for (const side of [-1, 1]) {
+        const p = new THREE.Vector3(frontX + lx * 0.72 * side, lampY, frontZ + lz * 0.72 * side);
+        this.outScale.set(0.18, 0.18, 0.18);
+        this.outMatrix.compose(p, this.identityQuat, this.outScale);
+        this.headlampMesh.setMatrixAt(lampCount++, this.outMatrix);
+      }
+
+      if (realLightCount < this.headlightPool.length) {
+        const light = this.headlightPool[realLightCount++];
+        light.intensity = coneIntensity;
+        light.position.set(frontX, lampY, frontZ);
+        light.target.position.set(frontX + fx * 78, status.y + 0.45, frontZ + fz * 78);
+        light.target.updateMatrixWorld();
+      }
+    }
+
+    this.headlampMesh.count = lampCount;
+    this.headlampMesh.instanceMatrix.needsUpdate = true;
+    for (let i = realLightCount; i < this.headlightPool.length; i++) this.headlightPool[i].intensity = 0;
+  }
+
+  private ensureHeadlightPool(): void {
+    if (this.headlightPool.length) return;
+    const maxRealHeadlights = 12;
+    for (let i = 0; i < maxRealHeadlights; i++) {
+      const light = new THREE.SpotLight(0xf8fbff, 0, 115, Math.PI / 10, 0.48, 1.45);
+      light.castShadow = false;
+      this.scene.add(light);
+      this.scene.add(light.target);
+      this.headlightPool.push(light);
+    }
+  }
+
+  private disableHeadlightPool(): void {
+    for (const light of this.headlightPool) light.intensity = 0;
+    if (this.headlampMesh) this.headlampMesh.count = 0;
   }
 
   private hideProxy(proxy: THREE.InstancedMesh): void {
@@ -128,6 +192,7 @@ export class TrainLiveryOverlay {
     if (this.windows) this.scene.remove(this.windows);
     if (this.routeStripes) this.scene.remove(this.routeStripes);
     if (this.serviceStripes) this.scene.remove(this.serviceStripes);
+    if (this.headlampMesh) this.scene.remove(this.headlampMesh);
 
     this.capacity = capacity;
     const box = new THREE.BoxGeometry(1, 1, 1);
@@ -151,8 +216,13 @@ export class TrainLiveryOverlay {
       new THREE.MeshBasicMaterial({ color: 0xffffff }),
       capacity * 2,
     );
+    this.headlampMesh = new THREE.InstancedMesh(
+      new THREE.SphereGeometry(1, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xf8fbff, toneMapped: false }),
+      capacity * 2,
+    );
 
-    for (const mesh of [this.shell, this.windows, this.routeStripes, this.serviceStripes]) {
+    for (const mesh of [this.shell, this.windows, this.routeStripes, this.serviceStripes, this.headlampMesh]) {
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       mesh.frustumCulled = false;
       const lit = mesh === this.shell || mesh === this.windows;

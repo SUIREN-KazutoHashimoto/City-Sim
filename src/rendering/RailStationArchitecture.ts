@@ -19,7 +19,7 @@ type PlatformSpec = {
 };
 
 const MAIN_OFFSET = 1.72;
-const SIDING_OFFSET = 10.0;
+const SIDING_OFFSET = 10.4;
 const TRAIN_HALF_WIDTH = 1.50;
 const PLATFORM_CLEARANCE = 0.48;
 const PLATFORM_TOP_HEIGHT = 1.05;
@@ -76,15 +76,9 @@ function platformSpecs(self: AnyRail, line: AnyRail, stationId: number, stationI
   return [{ stationId, stationIndex, lineId: line.id, center, length, offset, width, y, terminal }];
 }
 
-function stationPoint(self: AnyRail, smooth: AnySmooth, spec: PlatformSpec, distance: number, offset: number): { x: number; z: number; heading: number } | null {
-  const anchor = self.sampleSmooth(smooth, spec.center) as { x: number; z: number; heading: number } | null;
-  if (!anchor) return null;
-  const along = distance - spec.center;
-  return {
-    x: anchor.x + Math.cos(anchor.heading) * along - Math.sin(anchor.heading) * offset,
-    z: anchor.z + Math.sin(anchor.heading) * along + Math.cos(anchor.heading) * offset,
-    heading: anchor.heading,
-  };
+/** Follow the real smoothed running line so gentle station curves stay aligned with the train. */
+function stationPoint(self: AnyRail, smooth: AnySmooth, _spec: PlatformSpec, distance: number, offset: number): { x: number; z: number; heading: number } | null {
+  return self.offsetPoint(smooth, THREE.MathUtils.clamp(distance, 0, smooth.length), offset) as { x: number; z: number; heading: number } | null;
 }
 
 function pushStationRange(
@@ -228,7 +222,6 @@ function buildStationArchitecture(self: AnyRail): void {
   const lowerWalls: StaticPart[] = [], glass: StaticPart[] = [], fascia: StaticPart[] = [];
   const seats: StaticPart[] = [], backs: StaticPart[] = [];
   const vending: StaticPart[] = [], vendingFronts: StaticPart[] = [], fluorescent: StaticPart[] = [];
-  const lightStations = new Set<number>();
   const lights: THREE.PointLight[] = [];
 
   for (const line of self.rail.lines as AnyRail[]) {
@@ -246,20 +239,17 @@ function buildStationArchitecture(self: AnyRail): void {
 
       for (const spec of specs) {
         buildPlatformDetails(self, smooth, spec, platformSlabs, roofs, pillars, seats, backs, vending, vendingFronts, fluorescent);
-      }
-      buildOuterShell(self, smooth, specs[0], wallOffsets(self, line, i, specs[0].center, specs[0].width), lowerWalls, glass, fascia);
 
-      if (!lightStations.has(stationId) && station.kind !== RailStationKind.Local) {
-        const p = stationPoint(self, smooth, specs[0], specs[0].center, 0);
+        const p = stationPoint(self, smooth, spec, spec.center, spec.offset);
         if (p) {
-          const light = new THREE.PointLight(0xf5f8ff, 0, 62, 2.0);
-          light.position.set(p.x, y + 4.10, p.z);
+          const light = new THREE.PointLight(0xf5f8ff, 0, 180, 1.2);
+          light.position.set(p.x, y + ROOF_UNDERSIDE_HEIGHT - 0.18, p.z);
           light.castShadow = false;
           self.scene.add(light);
           lights.push(light);
-          lightStations.add(stationId);
         }
       }
+      buildOuterShell(self, smooth, specs[0], wallOffsets(self, line, i, specs[0].center, specs[0].width), lowerWalls, glass, fascia);
     }
   }
 
@@ -274,19 +264,19 @@ function buildStationArchitecture(self: AnyRail): void {
   self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0x5a656b, roughness: 0.72, metalness: 0.18 }), backs);
   self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0xe8edf1, roughness: 0.42, metalness: 0.10 }), vending);
   self.addStatic(box.clone(), new THREE.MeshStandardMaterial({ color: 0x5bb4e6, roughness: 0.28, emissive: 0x163b54, emissiveIntensity: 1.2 }), vendingFronts);
-  self.addStatic(box, new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2, emissive: 0xf3f8ff, emissiveIntensity: 2.4 }), fluorescent);
+  self.addStatic(box, new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2, emissive: 0xf3f8ff, emissiveIntensity: 2.8 }), fluorescent);
 
-  self.__citySimStationLightsV032 = lights;
+  self.__citySimStationLightsV033 = lights;
 }
 
 function updateStationLights(self: AnyRail): void {
-  const lights = self.__citySimStationLightsV032 as THREE.PointLight[] | undefined;
+  const lights = self.__citySimStationLightsV033 as THREE.PointLight[] | undefined;
   if (!lights?.length) return;
   const t = ((self.railTime as number) % 86400 + 86400) % 86400;
   const hour = t / 3600;
   const night = hour >= 17.0 || hour < 6.5;
   const dusk = (hour >= 16.0 && hour < 17.0) || (hour >= 6.5 && hour < 7.0);
-  const intensity = night ? 48 : dusk ? 18 : 3;
+  const intensity = night ? 58 : dusk ? 22 : 2.5;
   for (const light of lights) light.intensity = intensity;
 }
 

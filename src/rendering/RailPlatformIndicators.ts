@@ -86,13 +86,15 @@ interface HsrBoard extends BoardVisual {
 }
 
 const MAIN_OFFSET = 1.72;
-const SIDING_OFFSET = 10.0;
+const SIDING_OFFSET = 10.4;
 const HSR_TRACK_OFFSET = 2.4;
 const BOARD_CENTER_HEIGHT = 3.72;
 const BOARD_ALONG_SHIFT = 16;
+const BOARD_PAIR_OFFSET = 1.03;
 const BOARD_REFRESH_SECONDS = 1;
+const TIMETABLE_QUANTUM = 15;
 
-/** Very small ceiling-hung departure display, mounted perpendicular to the platform axis. */
+/** Tiny ceiling-hung departure display, perpendicular to the platform axis. */
 function boardVisual(scene: THREE.Scene, heading: number): BoardVisual {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
@@ -106,31 +108,27 @@ function boardVisual(scene: THREE.Scene, heading: number): BoardVisual {
   group.rotation.y = -heading + Math.PI / 2;
 
   const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x22272d, roughness: 0.58, metalness: 0.55 });
-  const frame = new THREE.Mesh(new THREE.BoxGeometry(2.40, 0.78, 0.16), frameMaterial);
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.85, 0.68, 0.14), frameMaterial);
   frame.castShadow = true;
   group.add(frame);
 
   const displayMaterial = new THREE.MeshBasicMaterial({ map: texture, toneMapped: false });
-  const front = new THREE.Mesh(new THREE.PlaneGeometry(2.22, 0.64), displayMaterial);
-  front.position.z = 0.086;
+  const front = new THREE.Mesh(new THREE.PlaneGeometry(1.70, 0.55), displayMaterial);
+  front.position.z = 0.076;
   group.add(front);
 
-  const back = new THREE.Mesh(new THREE.PlaneGeometry(2.22, 0.64), displayMaterial.clone());
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(1.70, 0.55), displayMaterial.clone());
   back.rotation.y = Math.PI;
-  back.position.z = -0.086;
+  back.position.z = -0.076;
   group.add(back);
 
   const hangerMaterial = new THREE.MeshStandardMaterial({ color: 0x4a4f55, roughness: 0.52, metalness: 0.62 });
-  for (const x of [-0.88, 0.88]) {
-    const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.26, 0.09), hangerMaterial);
-    hanger.position.set(x, 0.52, 0);
+  for (const x of [-0.67, 0.67]) {
+    const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.28, 0.08), hangerMaterial);
+    hanger.position.set(x, 0.47, 0);
     hanger.castShadow = true;
     group.add(hanger);
   }
-  const ceilingBar = new THREE.Mesh(new THREE.BoxGeometry(1.92, 0.09, 0.12), hangerMaterial.clone());
-  ceilingBar.position.set(0, 0.66, 0);
-  ceilingBar.castShadow = true;
-  group.add(ceilingBar);
 
   scene.add(group);
   return { group, canvas, texture };
@@ -144,11 +142,16 @@ function serviceColor(service: TrainService): string {
   return service === 'limited' ? '#ff8966' : service === 'rapid' ? '#64c8ff' : '#f1f5f8';
 }
 
+function quantizeTime(seconds: number): number {
+  return Math.ceil((seconds - 1e-6) / TIMETABLE_QUANTUM) * TIMETABLE_QUANTUM;
+}
+
 function formatBoardTime(seconds: number): string {
-  const day = ((Math.floor(seconds) % 86400) + 86400) % 86400;
+  const day = ((Math.floor(quantizeTime(seconds)) % 86400) + 86400) % 86400;
   const h = Math.floor(day / 3600);
   const m = Math.floor((day % 3600) / 60);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  const s = Math.floor(day % 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 function drawBoard(
@@ -173,18 +176,18 @@ function drawBoard(
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#f0f4f7';
   ctx.font = '700 22px ui-monospace, sans-serif';
-  ctx.fillText(`${board.trackNo}番線`, 16, 24);
+  ctx.fillText(`${board.trackNo}番線`, 14, 24);
   ctx.fillStyle = stateColor;
   ctx.font = '700 20px ui-monospace, sans-serif';
   ctx.textAlign = 'right';
-  ctx.fillText(state, 494, 24);
+  ctx.fillText(state, 496, 24);
   ctx.textAlign = 'left';
 
   ctx.strokeStyle = '#30363c';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(12, 43);
-  ctx.lineTo(500, 43);
+  ctx.moveTo(10, 43);
+  ctx.lineTo(502, 43);
   ctx.stroke();
 
   const rowHeight = 46;
@@ -194,27 +197,26 @@ function drawBoard(
       ctx.strokeStyle = '#20262b';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(12, y - 23);
-      ctx.lineTo(500, y - 23);
+      ctx.moveTo(10, y - 23);
+      ctx.lineTo(502, y - 23);
       ctx.stroke();
     }
     const row = rows[i];
     if (!row) {
       ctx.fillStyle = '#535b63';
       ctx.font = '600 18px ui-monospace, sans-serif';
-      ctx.fillText('--:--', 16, y);
-      ctx.fillText('---', 118, y);
+      ctx.fillText('--:--:--', 14, y);
       continue;
     }
     ctx.fillStyle = '#ffd65a';
-    ctx.font = '700 20px ui-monospace, sans-serif';
-    ctx.fillText(formatBoardTime(row.time), 16, y);
+    ctx.font = '700 18px ui-monospace, sans-serif';
+    ctx.fillText(formatBoardTime(row.time), 14, y);
     ctx.fillStyle = serviceColor(row.service);
-    ctx.font = '700 19px ui-monospace, sans-serif';
-    ctx.fillText(serviceLabel(row.service), 118, y);
+    ctx.font = '700 18px ui-monospace, sans-serif';
+    ctx.fillText(serviceLabel(row.service), 142, y);
     ctx.fillStyle = '#e7edf2';
-    ctx.font = '600 18px ui-monospace, sans-serif';
-    ctx.fillText(row.destination, 188, y);
+    ctx.font = '600 17px ui-monospace, sans-serif';
+    ctx.fillText(row.destination, 208, y);
   }
   board.texture.needsUpdate = true;
 }
@@ -248,8 +250,8 @@ function estimatedDepartureAt(rt: CityRuntime, board: CityBoard, run: TrainRunLi
   if (!smooth || !runStopsAt(rt, run, board.stationIndex)) return null;
 
   if (run.currentStationIndex === board.stationIndex && (run.state === 'dwell' || run.state === 'schedule')) {
-    if (run.scheduledDepartureAt > rt.railTime - 2) return Math.max(rt.railTime, run.scheduledDepartureAt);
-    return rt.railTime + Math.max(0, run.dwellRemaining);
+    if (run.scheduledDepartureAt > rt.railTime - 2) return quantizeTime(Math.max(rt.railTime, run.scheduledDepartureAt));
+    return quantizeTime(rt.railTime + Math.max(0, run.dwellRemaining));
   }
   if (run.state !== 'running') return null;
 
@@ -269,11 +271,11 @@ function estimatedDepartureAt(rt: CityRuntime, board: CityBoard, run: TrainRunLi
         if (i < 0 || i >= smooth.stationDistances.length) break;
         if (runStopsAt(rt, run, i)) intermediateStops++;
       }
-      arrival += intermediateStops * 18;
+      arrival += intermediateStops * 15;
     }
   }
-  const stationDwell = run.service === 'limited' ? 12 : run.service === 'rapid' ? 15 : 18;
-  return arrival + stationDwell;
+  const stationDwell = run.service === 'limited' ? 15 : run.service === 'rapid' ? 15 : 30;
+  return quantizeTime(arrival + stationDwell);
 }
 
 function cityBoardDepartures(rt: CityRuntime, board: CityBoard): BoardDeparture[] {
@@ -305,12 +307,15 @@ function cityBoardState(rt: CityRuntime, board: CityBoard): BoardState {
   return departing ? '発車' : approaching ? '接近' : '待機';
 }
 
-function platformCenterOffset(rt: CityRuntime, line: RailLineLike, stationIndex: number, spec: { trackOffset: number }): number {
+function platformBoardOffset(rt: CityRuntime, line: RailLineLike, stationIndex: number, spec: { trackOffset: number; mode: TrackMode }): number {
   const side = spec.trackOffset >= 0 ? 1 : -1;
   if (line.kind === 'trunk' && rt.lineStationHasPassingLoop(line.id, stationIndex)) {
-    return side * ((MAIN_OFFSET + SIDING_OFFSET) * 0.5);
+    const islandCenter = side * ((MAIN_OFFSET + SIDING_OFFSET) * 0.5);
+    return spec.mode === 'main'
+      ? islandCenter - side * BOARD_PAIR_OFFSET
+      : islandCenter + side * BOARD_PAIR_OFFSET;
   }
-  return spec.trackOffset + side * 4.10;
+  return spec.trackOffset + side * 4.08;
 }
 
 function buildCityBoards(rt: CityRuntime): CityBoard[] {
@@ -322,7 +327,7 @@ function buildCityBoards(rt: CityRuntime): CityBoard[] {
     for (let stationIndex = 0; stationIndex < line.stationIds.length; stationIndex++) {
       const stationId = line.stationIds[stationIndex];
       const center = smooth.stationDistances[stationIndex] ?? 0;
-      const baseShift = stationIndex % 2 === 0 ? BOARD_ALONG_SHIFT : -BOARD_ALONG_SHIFT;
+      const boardDistance = THREE.MathUtils.clamp(center + (stationIndex % 2 === 0 ? BOARD_ALONG_SHIFT : -BOARD_ALONG_SHIFT), 0, smooth.length);
       const specs: Array<{ lane: TrackLane; mode: TrackMode; trackOffset: number }> = [];
       if (line.kind === 'trunk') {
         specs.push({ lane: -1, mode: 'main', trackOffset: -MAIN_OFFSET });
@@ -334,19 +339,17 @@ function buildCityBoards(rt: CityRuntime): CityBoard[] {
       } else {
         specs.push({ lane: 0, mode: 'main', trackOffset: rt.sharedSpurOffset(smooth, center) });
       }
+      specs.sort((a, b) => a.trackOffset - b.trackOffset);
 
       for (const spec of specs) {
-        const modeShift = spec.mode === 'siding' ? 5 : -5;
-        const boardDistance = THREE.MathUtils.clamp(center + baseShift + modeShift, 0, smooth.length);
-        const p = rt.sampleSmooth(smooth, center);
+        const p = rt.sampleSmooth(smooth, boardDistance);
         if (!p) continue;
-        const along = boardDistance - center;
-        const boardOffset = platformCenterOffset(rt, line, stationIndex, spec);
+        const boardOffset = platformBoardOffset(rt, line, stationIndex, spec);
         const visual = boardVisual(rt.scene, p.heading);
         visual.group.position.set(
-          p.x + Math.cos(p.heading) * along - Math.sin(p.heading) * boardOffset,
+          p.x - Math.sin(p.heading) * boardOffset,
           rt.lineTrackY(line.id) + BOARD_CENTER_HEIGHT,
-          p.z + Math.sin(p.heading) * along + Math.cos(p.heading) * boardOffset,
+          p.z + Math.cos(p.heading) * boardOffset,
         );
         const trackNo = (trackCounter.get(stationId) ?? 0) + 1;
         trackCounter.set(stationId, trackNo);
@@ -402,11 +405,11 @@ function installHsrBoards(): void {
   source.syncMeshes();
 }
 
-/** Add one very small, perpendicular ceiling-hung live departure display per platform track. */
+/** Add compact ceiling-hung live departure displays. Island-platform pairs are mounted side-by-side. */
 export function installRailPlatformIndicators(renderer: RailRenderer): void {
-  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV032?: boolean };
-  if (rt.__citySimPlatformBoardsV032) return;
-  rt.__citySimPlatformBoardsV032 = true;
+  const rt = renderer as unknown as CityRuntime & { __citySimPlatformBoardsV033?: boolean };
+  if (rt.__citySimPlatformBoardsV033) return;
+  rt.__citySimPlatformBoardsV033 = true;
   const boards = buildCityBoards(rt);
   const baseUpdate = rt.updateTrainMeshes.bind(rt);
   let lastRefreshBucket = -1;
