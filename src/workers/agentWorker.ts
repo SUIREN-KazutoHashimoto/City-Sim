@@ -4,6 +4,7 @@ import { POICategory } from '../world/POI';
 type Buffers = {
   energy: SharedArrayBuffer; hunger: SharedArrayBuffer; social: SharedArrayBuffer; hygiene: SharedArrayBuffer; fun: SharedArrayBuffer;
   wealth: SharedArrayBuffer; state: SharedArrayBuffer; goalCategory: SharedArrayBuffer; dwellUntil: SharedArrayBuffer; activityExit: SharedArrayBuffer;
+  exitIds: SharedArrayBuffer; exitCount: SharedArrayBuffer;
 };
 
 type InitMessage = { type: 'init'; buffers: Buffers };
@@ -12,6 +13,7 @@ type Message = InitMessage | BatchMessage;
 
 let energy!: Float32Array, hunger!: Float32Array, social!: Float32Array, hygiene!: Float32Array, fun!: Float32Array, wealth!: Float32Array;
 let state!: Uint8Array, goalCategory!: Uint8Array, dwellUntil!: Float32Array, activityExit!: Uint8Array;
+let exitIds!: Int32Array, exitCount!: Int32Array;
 
 const clamp01 = (v: number): number => v < 0 ? 0 : v > 1 ? 1 : v;
 
@@ -22,6 +24,7 @@ self.onmessage = (ev: MessageEvent<Message>) => {
     hygiene = new Float32Array(msg.buffers.hygiene); fun = new Float32Array(msg.buffers.fun); wealth = new Float32Array(msg.buffers.wealth);
     state = new Uint8Array(msg.buffers.state); goalCategory = new Uint8Array(msg.buffers.goalCategory);
     dwellUntil = new Float32Array(msg.buffers.dwellUntil); activityExit = new Uint8Array(msg.buffers.activityExit);
+    exitIds = new Int32Array(msg.buffers.exitIds); exitCount = new Int32Array(msg.buffers.exitCount);
     return;
   }
 
@@ -46,7 +49,11 @@ self.onmessage = (ev: MessageEvent<Message>) => {
       default: fun[i] = clamp01(fun[i] + msg.dt / 3000); break;
     }
     const critical = (cat !== POICategory.Food && hunger[i] < 0.05) || (cat !== POICategory.Home && energy[i] < 0.05);
-    if (msg.now >= dwellUntil[i] || critical) activityExit[i] = 1;
+    if (msg.now >= dwellUntil[i] || critical) {
+      activityExit[i] = 1;
+      const slot = Atomics.add(exitCount, 0, 1);
+      if (slot < exitIds.length) exitIds[slot] = i;
+    }
   }
 
   postMessage({ type: 'done', jobId: msg.jobId });
