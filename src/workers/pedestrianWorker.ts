@@ -10,7 +10,7 @@ type Buffers = {
   usedCells: SharedArrayBuffer; control: SharedArrayBuffer; metrics: SharedArrayBuffer;
 };
 type InitMessage = {
-  type: 'init'; workerId: number; workerCount: number;
+  type: 'init'; workerId: number; workerCount: number; completionByAtomics: boolean;
   cellSize: number; gridOrigin: number; gridWidth: number; buffers: Buffers;
 };
 
@@ -23,12 +23,17 @@ const JOB_ID = 5;
 const JOB_ACTIVE_COUNT = 6;
 const JOB_MOVE_COUNT = 7;
 const JOB_DT_MICROS = 8;
-const METRIC_STRIDE = 5;
+const DONE_EPOCH = 9;
+const DISPATCH_TIME_MS = 10;
+const DONE_TIME_MS = 11;
+const METRIC_STRIDE = 6;
 const M_PREP = 0;
 const M_INDEX = 1;
 const M_AVOID_MOVE = 2;
 const M_BARRIER = 3;
 const M_TOTAL = 4;
+const M_WAKE = 5;
+const TIME_MASK = 0x3fffffff;
 
 let posX!: Float32Array, posZ!: Float32Array, velX!: Float32Array, velZ!: Float32Array;
 let heading!: Float32Array, maxSpeed!: Float32Array, energy!: Float32Array;
@@ -36,7 +41,10 @@ let desiredX!: Float32Array, desiredZ!: Float32Array, snapshotX!: Float32Array, 
 let activeIds!: Int32Array, moveIds!: Int32Array, cellHead!: Int32Array, nextInCell!: Int32Array, usedCells!: Int32Array;
 let control!: Int32Array, metrics!: Float32Array;
 let cellSize = 8, invCell = 1 / 8, gridOrigin = -32, gridWidth = 8;
-let workerId = 0, workerCount = 1;
+let workerId = 0, workerCount = 1, completionByAtomics = false;
+
+const nowMs32 = (): number => Date.now() & TIME_MASK;
+const elapsedMs32 = (start: number, end: number): number => (end - start + TIME_MASK + 1) & TIME_MASK;
 
 const cellOf = (x: number, z: number): number => {
   const cx = Math.floor((x - gridOrigin) * invCell), cz = Math.floor((z - gridOrigin) * invCell);
@@ -119,31 +127,26 @@ function moveRange(begin: number, end: number, dt: number): void {
   }
 }
 
-function finishStep(jobId: number, prepMs: number, indexMs: number, avoidMoveMs: number, barrierMs: number, totalMs: number): void {
+function finishStep(jobId: number, prepMs: number, indexMs: number, avoidMoveMs: number, barrierMs: number, totalMs: number, wakeMs: number): void {
   const base = workerId * METRIC_STRIDE;
   metrics[base + M_PREP] = prepMs;
   metrics[base + M_INDEX] = indexMs;
   metrics[base + M_AVOID_MOVE] = avoidMoveMs;
   metrics[base + M_BARRIER] = barrierMs;
   metrics[base + M_TOTAL] = totalMs;
+  metrics[base + M_WAKE] = wakeMs;
 
   const done = Atomics.add(control, DONE_COUNT, 1) + 1;
   if (done !== workerCount) return;
   Atomics.store(control, DONE_COUNT, 0);
+  Atomics.store(control, DONE_TIME_MS, nowMs32());
+  Atomics.add(control, DONE_EPOCH, 1);
+  Atomics.notify(control, DONE_EPOCH, 1);
 
-  let maxPrep = 0, maxIndex = 0, maxAvoidMove = 0, maxBarrier = 0, maxTotal = 0;
-  for (let w = 0; w < workerCount; w++) {
-    const p = w * METRIC_STRIDE;
-    maxPrep = Math.max(maxPrep, metrics[p + M_PREP]);
-    maxIndex = Math.max(maxIndex, metrics[p + M_INDEX]);
-    maxAvoidMove = Math.max(maxAvoidMove, metrics[p + M_AVOID_MOVE]);
-    maxBarrier = Math.max(maxBarrier, metrics[p + M_BARRIER]);
-    maxTotal = Math.max(maxTotal, metrics[p + M_TOTAL]);
-  }
-  postMessage({ type: 'done', jobId, timing: { prepMs: maxPrep, indexMs: maxIndex, avoidMoveMs: maxAvoidMove, barrierMs: maxBarrier, totalMs: maxTotal } });
+  if (!completionByAtomics) postMessage({ type: 'done', jobId });
 }
 
-function runStep(jobId: number, activeCount: number, moveCount: number, dt: number): void {
+function runStep(jobId: number, activeCount: number, moveCount: number, dt: number, wakeMs: number): void {
   const totalStart = performance.now();
 
   const prepStart = performance.now();
@@ -165,10 +168,10 @@ function runStep(jobId: number, activeCount: number, moveCount: number, dt: numb
   moveRange(moveBegin, moveEnd, dt);
   const avoidMoveMs = performance.now() - moveStart;
 
-  finishStep(jobId, prepMs, indexMs, avoidMoveMs, barrierMs, performance.now() - totalStart);
+  finishStep(jobId, prepMs, indexMs, avoidMoveMs, barrierMs, performance.now() - totalStart, wakeMs);
 }
 
-/** Persistent worker loop. Main thread only advances JOB_EPOCH and Atomics.notify(). */
+/** Persistent worker loop. Main thread advances JOB_EPOCH and workers signal DONE_EPOCH. */
 function runLoop(): never {
   let seenEpoch = 0;
   for (;;) {
@@ -179,18 +182,19 @@ function runLoop(): never {
       if (epoch === seenEpoch) continue;
     }
     seenEpoch = epoch;
+    const wakeMs = elapsedMs32(Atomics.load(control, DISPATCH_TIME_MS), nowMs32());
     const jobId = Atomics.load(control, JOB_ID);
     const activeCount = Atomics.load(control, JOB_ACTIVE_COUNT);
     const moveCount = Atomics.load(control, JOB_MOVE_COUNT);
     const dt = Atomics.load(control, JOB_DT_MICROS) / 1_000_000;
-    runStep(jobId, activeCount, moveCount, dt);
+    runStep(jobId, activeCount, moveCount, dt, wakeMs);
   }
 }
 
 self.onmessage = (ev: MessageEvent<InitMessage>) => {
   const msg = ev.data;
   if (msg.type !== 'init') return;
-  workerId = msg.workerId; workerCount = msg.workerCount;
+  workerId = msg.workerId; workerCount = msg.workerCount; completionByAtomics = msg.completionByAtomics;
   cellSize = msg.cellSize; invCell = 1 / cellSize; gridOrigin = msg.gridOrigin; gridWidth = msg.gridWidth;
   posX = new Float32Array(msg.buffers.posX); posZ = new Float32Array(msg.buffers.posZ);
   velX = new Float32Array(msg.buffers.velX); velZ = new Float32Array(msg.buffers.velZ);
