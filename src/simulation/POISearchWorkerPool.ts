@@ -15,6 +15,10 @@ interface PendingJob {
 interface WorkerReply { type: 'result'; jobId: number; offset: number; results: Int32Array; computeMs: number; }
 
 const ZERO_TIMING: POIWorkerTiming = { totalMs: 0, computeMs: 0, returnMs: 0, workers: 0 };
+// The normal Agent decision budget is 512 queries/step. BENCH data shows these small
+// batches spend far more time waiting for Worker -> main resumption than searching.
+// Keep Workers for future/larger bulk queries, but execute normal batches synchronously.
+const MAIN_THREAD_QUERY_THRESHOLD = 512;
 
 /**
  * 読み取り専用POI検索を複数Web Workerへ分配する。
@@ -22,6 +26,8 @@ const ZERO_TIMING: POIWorkerTiming = { totalMs: 0, computeMs: 0, returnMs: 0, wo
  *
  * Runtime query batches are converted to compact TypedArrays and transferred to workers.
  * This avoids structured-cloning hundreds of small JS objects on every simulation step.
+ * Normal decision-sized batches intentionally stay on the Coordinator thread because the
+ * indexed POI lookup is sub-millisecond while Worker completion latency is often tens of ms.
  */
 export class POISearchWorkerPool {
   private readonly workers: Worker[] = [];
@@ -77,13 +83,19 @@ export class POISearchWorkerPool {
 
   findBestBatch(queries: readonly POIBestQuery[]): Promise<Int32Array> {
     if (queries.length === 0) { this.latestTimingValue = ZERO_TIMING; return Promise.resolve(new Int32Array(0)); }
-    if (!this.active) { this.latestTimingValue = ZERO_TIMING; return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findBest(q.category, q.x, q.z, q.wealth))); }
+    if (!this.active || queries.length <= MAIN_THREAD_QUERY_THRESHOLD) {
+      this.latestTimingValue = ZERO_TIMING;
+      return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findBest(q.category, q.x, q.z, q.wealth)));
+    }
     return this.dispatch('best', queries);
   }
 
   findNearestBatch(queries: readonly POINearestQuery[]): Promise<Int32Array> {
     if (queries.length === 0) { this.latestTimingValue = ZERO_TIMING; return Promise.resolve(new Int32Array(0)); }
-    if (!this.active) { this.latestTimingValue = ZERO_TIMING; return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findNearestFree(q.category, q.x, q.z))); }
+    if (!this.active || queries.length <= MAIN_THREAD_QUERY_THRESHOLD) {
+      this.latestTimingValue = ZERO_TIMING;
+      return Promise.resolve(Int32Array.from(queries, (q) => this.poi.findNearestFree(q.category, q.x, q.z)));
+    }
     return this.dispatch('nearest', queries);
   }
 
