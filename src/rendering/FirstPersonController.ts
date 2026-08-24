@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 export interface CameraFollowTarget {
-  kind: 'agent' | 'vehicle' | 'train';
+  kind: 'agent' | 'vehicle' | 'train' | 'highSpeedTrain';
   id: number;
   position: THREE.Vector3;
   /** Traffic/Railと同じ +X基準のrad。 */
@@ -32,7 +32,7 @@ export class FirstPersonController {
     document.addEventListener('mousemove', (e) => {
       if (!this.dragging) return;
       if (this.followTarget && this.followFirstPerson) return;
-      if (this.followTarget?.kind === 'vehicle' || this.followTarget?.kind === 'train') {
+      if (this.followTarget?.kind === 'vehicle' || this.followTarget?.kind === 'train' || this.followTarget?.kind === 'highSpeedTrain') {
         this.followYawOffset += e.movementX * this.lookSensitivity;
         this.followPitch -= e.movementY * this.lookSensitivity;
         this.followPitch = THREE.MathUtils.clamp(this.followPitch, -0.12, 1.25);
@@ -72,7 +72,8 @@ export class FirstPersonController {
 
   get isFollowing(): boolean { return this.followTarget !== null; }
   get isFollowingVehicle(): boolean { return this.followTarget?.kind === 'vehicle'; }
-  get isFollowingTrain(): boolean { return this.followTarget?.kind === 'train'; }
+  get isFollowingTrain(): boolean { return this.followTarget?.kind === 'train' || this.followTarget?.kind === 'highSpeedTrain'; }
+  get isFollowingHighSpeedTrain(): boolean { return this.followTarget?.kind === 'highSpeedTrain'; }
   get isFollowingAgent(): boolean { return this.followTarget?.kind === 'agent'; }
   get isFirstPerson(): boolean { return this.isFollowing && this.followFirstPerson; }
   get isVehicleFirstPerson(): boolean { return this.isFollowingVehicle && this.followFirstPerson; }
@@ -104,14 +105,14 @@ export class FirstPersonController {
         return;
       }
 
-      if (t.kind === 'vehicle' || t.kind === 'train') {
+      if (t.kind === 'vehicle' || t.kind === 'train' || t.kind === 'highSpeedTrain') {
         const d = this.followDistance, cp = Math.cos(this.followPitch), orbitHeading = h + this.followYawOffset;
         this.camera.position.set(
           t.position.x - Math.cos(orbitHeading) * cp * d,
           t.position.y + Math.sin(this.followPitch) * d + 1.2,
           t.position.z - Math.sin(orbitHeading) * cp * d,
         );
-        this.camera.lookAt(t.position.x, t.position.y + (t.kind === 'train' ? 1.8 : 1.0), t.position.z);
+        this.camera.lookAt(t.position.x, t.position.y + (t.kind === 'train' || t.kind === 'highSpeedTrain' ? 1.8 : 1.0), t.position.z);
         return;
       }
 

@@ -1,1 +1,1 @@
-export { installExternalRailConnection } from './RoadAlignedExternalRailConnection';
+export { installExternalRailConnection } from './StraightRoadExternalRailConnection';
