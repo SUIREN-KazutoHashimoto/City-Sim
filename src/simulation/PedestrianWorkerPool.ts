@@ -162,10 +162,24 @@ export class PedestrianWorkerPool {
     const jobId = this.nextJobId++;
     if (this.useAtomicsCompletion) {
       const expectedDoneEpoch = Atomics.load(this.control, DONE_EPOCH);
-      const done = this.waitForDone(expectedDoneEpoch);
-      this.dispatch(jobId, dt);
-      await done;
-      this.latestTimingState = this.collectTiming();
+      await new Promise<void>((resolve, reject) => {
+        this.pending.set(jobId, { resolve, reject });
+        const done = this.waitForDone(expectedDoneEpoch);
+        done.then(() => {
+          const job = this.pending.get(jobId); if (!job) return;
+          this.pending.delete(jobId);
+          this.latestTimingState = this.collectTiming();
+          job.resolve();
+        }, (reason) => {
+          const job = this.pending.get(jobId); if (!job) return;
+          this.pending.delete(jobId); job.reject(reason);
+        });
+        try { this.dispatch(jobId, dt); }
+        catch (reason) {
+          const job = this.pending.get(jobId); if (!job) return;
+          this.pending.delete(jobId); job.reject(reason);
+        }
+      });
       return;
     }
 
