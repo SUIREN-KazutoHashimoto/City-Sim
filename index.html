@@ -11,7 +11,7 @@
       #clock { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 12; font: 600 20px/1.1 ui-monospace, monospace; color: #eaf1fb; background: rgba(10,14,20,.7); padding: 6px 14px; border-radius: 8px; border: 1px solid #2c3a4f; letter-spacing: 1px; pointer-events: none; display: flex; gap: 12px; align-items: baseline; }
       #clock .day { font-size: 12px; opacity: .7; font-weight: 400; }
       #clock .icon { font-size: 16px; }
-      #app-version { position: fixed; left: 8px; bottom: 8px; z-index: 20; font: 11px/1.2 ui-monospace, monospace; color: rgba(215,224,236,.72); background: rgba(8,12,18,.72); border: 1px solid rgba(52,68,91,.65); border-radius: 5px; padding: 4px 7px; letter-spacing: .3px; pointer-events: none; user-select: none; }
+      #app-version { position: fixed; right: 8px; bottom: 8px; z-index: 20; font: 11px/1.2 ui-monospace, monospace; color: rgba(215,224,236,.72); background: rgba(8,12,18,.72); border: 1px solid rgba(52,68,91,.65); border-radius: 5px; padding: 4px 7px; letter-spacing: .3px; white-space: nowrap; text-align: right; pointer-events: none; user-select: none; }
       #boot-screen { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: #0b0e13; color: #e7eef8; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: 1; transition: opacity .25s ease; }
       #boot-screen.boot-screen--done { opacity: 0; pointer-events: none; }
       #boot-screen.boot-screen--error { background: #160f12; }
@@ -30,7 +30,7 @@
     <div id="app"></div>
     <div id="clock">booting…</div>
     <div id="hud">booting…</div>
-    <div id="app-version">City Sim</div>
+    <div id="app-version">City-Sim</div>
     <div id="boot-screen" role="status" aria-live="polite">
       <div class="boot-card">
         <div class="boot-title">CITY SIM</div>
@@ -46,5 +46,16 @@
     <script type="module" src="/src/rendering/UiLayoutTuning.ts"></script>
     <script type="module" src="/src/benchmark/BenchmarkBootstrap.ts"></script>
     <script type="module" src="/src/main.ts"></script>
+    <script type="module">
+      import { APP_VERSION } from '/src/version.ts';
+
+      const updateAppIdentity = () => {
+        const appVersion = document.getElementById('app-version');
+        if (appVersion) appVersion.textContent = `City-Sim v${APP_VERSION} · © 2026 City Sim contributors`;
+      };
+
+      updateAppIdentity();
+      window.addEventListener('citysim-ready', updateAppIdentity, { once: true });
+    </script>
   </body>
 </html>
