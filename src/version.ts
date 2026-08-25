@@ -1,4 +1,5 @@
 import './generation/CityDiversityTuning';
+import './generation/ParkPriorityTuning';
 import './world/ExternalVisitorSystem';
 import './rendering/HighSpeedCapacityTuning';
 import './rendering/HighSpeedStationConnection';
@@ -15,4 +16,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.68';
+export const APP_VERSION = '0.1.69';
