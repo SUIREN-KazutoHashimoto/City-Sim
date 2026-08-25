@@ -1,5 +1,6 @@
 import './world/ExternalVisitorSystem';
 import './rendering/HighSpeedCapacityTuning';
+import './rendering/RailPassengerPlatformBoundsPatch';
 import './rendering/HighSpeedStationConnection';
 import './generation/RailRuralStationSpacing';
 import './rendering/VisitorAccessoryRendering';
@@ -12,4 +13,4 @@ import './rendering/RailRenderLod';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.67';
+export const APP_VERSION = '0.1.68';
