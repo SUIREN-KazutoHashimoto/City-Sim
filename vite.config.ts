@@ -7,6 +7,7 @@ const isolationHeaders = {
 };
 
 export default defineConfig({
+  base: './',
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   worker: { format: 'es' },
   build: { target: 'es2022' },

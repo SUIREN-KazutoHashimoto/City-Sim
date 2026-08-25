@@ -37,7 +37,7 @@ function requireFinite(name: string, value: number, min: number, max: number): n
   return value;
 }
 
-export async function loadCityConfig(url = '/config/city.json'): Promise<RuntimeCityConfig> {
+export async function loadCityConfig(url = './config/city.json'): Promise<RuntimeCityConfig> {
   const response = await fetch(url, { cache: 'no-store' });
   if (!response.ok) throw new Error(`Failed to load city config: ${response.status} ${response.statusText}`);
 

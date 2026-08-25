@@ -1,0 +1,100 @@
+name: Release and deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: city-sim-release-pages
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Read application version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(sed -n "s/^export const APP_VERSION = '\([^']*\)';$/\1/p" src/version.ts)"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Could not read a valid APP_VERSION from src/version.ts"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: npm run build
+
+      - name: Package release asset
+        shell: bash
+        run: |
+          cd dist
+          zip -qr "../city-sim-v${{ steps.version.outputs.version }}.zip" .
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          TAG="v${VERSION}"
+          ASSET="city-sim-${TAG}.zip"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            TAG_SHA="$(git rev-list -n 1 "$TAG" 2>/dev/null || true)"
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::${TAG} already exists on ${TAG_SHA}; bump APP_VERSION before updating main."
+              exit 1
+            fi
+            echo "${TAG} already exists for this commit; reusing it."
+          else
+            gh release create "$TAG" "$ASSET#City Sim web build" \
+              --target "$GITHUB_SHA" \
+              --title "City Sim ${TAG}" \
+              --generate-notes
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
