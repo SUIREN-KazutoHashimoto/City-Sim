@@ -574,13 +574,232 @@ const rendererProto: AnyWorld = EnhancedRenderer.prototype as any;
 const originalSyncAgents = rendererProto.syncAgents;
 rendererProto.syncAgents = function syncAgentsWithoutRailPassengers(this: EnhancedRenderer, store: AnyWorld, ...args: AnyWorld[]): void {
   const visual = visualByStore.get(store);
-  const moved: Array<[number, number, number]> = [];
+  let hidden = 0;
   for (let i = 0; i < store.count; i++) {
-    if (store.state[i] !== AgentState.OnTrain && !visual?.active[i]) continue;
-    moved.push([i, store.posX[i], store.posZ[i]]); store.posX[i] = 1e9; store.posZ[i] = 1e9;
+    if (store.state[i] === AgentState.OnTrain || visual?.active[i]) hidden++;
   }
-  try { originalSyncAgents.call(this, store, ...args); }
-  finally { for (const [i, x, z] of moved) { store.posX[i] = x; store.posZ[i] = z; } }
+
+  if (hidden > 0) {
+    const capacity = Math.max(store.capacity ?? store.count, store.count);
+    let scratchX = (this as unknown as AnyWorld).__railPassengerScratchX as Float32Array | undefined;
+    let scratchZ = (this as unknown as AnyWorld).__railPassengerScratchZ as Float32Array | undefined;
+    if (!scratchX || scratchX.length < capacity || !scratchZ || scratchZ.length < capacity) {
+      scratchX = new Float32Array(capacity);
+      scratchZ = new Float32Array(capacity);
+      (this as unknown as AnyWorld).__railPassengerScratchX = scratchX;
+      (this as unknown as AnyWorld).__railPassengerScratchZ = scratchZ;
+    }
+    scratchX.set(store.posX.subarray(0, store.count), 0);
+    scratchZ.set(store.posZ.subarray(0, store.count), 0);
+    for (let i = 0; i < store.count; i++) {
+      if (store.state[i] !== AgentState.OnTrain && !visual?.active[i]) continue;
+      scratchX[i] = 1e9; scratchZ[i] = 1e9;
+    }
+    const renderStore = Object.create(store) as AnyWorld;
+    renderStore.posX = scratchX; renderStore.posZ = scratchZ;
+    originalSyncAgents.call(this, renderStore, ...args);
+  } else {
+    originalSyncAgents.call(this, store, ...args);
+  }
+
   const camera = args[1] instanceof THREE.Vector3 ? args[1] : undefined;
   syncRailPassengerMeshes(this as unknown as AnyWorld, store, visual, camera);
+};
+
+// --- HSR/conventional-station connection -------------------------------------------------------
+// These methods expose the existing conventional rail passenger route engine to the external
+// visitor lifecycle. No visitor-specific renderer or walking implementation is introduced.
+
+type ExternalStationPoint = { x: number; y: number; z: number };
+type ExternalStationAccess = {
+  stationId: number;
+  direction: 1 | -1;
+  heading: number;
+  platformWait: ExternalStationPoint;
+  platformLanding: ExternalStationPoint;
+  connector: ExternalStationPoint[];
+  waitSpan: number;
+};
+type ExternalDeparturePlan = { access: ExternalStationAccess; ground: RailPassengerStationAccess };
+const EXTERNAL_STATION_APPROACH = 13 as AgentState;
+const externalDepartureByWorld = new WeakMap<object, Map<number, ExternalDeparturePlan>>();
+
+function externalDepartures(world: object): Map<number, ExternalDeparturePlan> {
+  let map = externalDepartureByWorld.get(world);
+  if (!map) { map = new Map<number, ExternalDeparturePlan>(); externalDepartureByWorld.set(world, map); }
+  return map;
+}
+
+function individualExternalAccess(access: ExternalStationAccess, agent: number): ExternalStationAccess {
+  const along = (hash01(agent * 2081 + access.stationId * 353 + (access.direction > 0 ? 17 : 29)) - 0.5) * access.waitSpan;
+  return {
+    ...access,
+    platformWait: {
+      x: access.platformWait.x + Math.cos(access.heading) * along,
+      y: access.platformWait.y,
+      z: access.platformWait.z + Math.sin(access.heading) * along,
+    },
+  };
+}
+
+function closestConventionalAccess(world: AnyWorld, access: ExternalStationAccess): RailPassengerStationAccess | null {
+  const data = dataFor(world), rail = railOf(world), station = stationById(rail, access.stationId);
+  if (!data.provider || !station) return null;
+  const anchor = access.connector[access.connector.length - 1] ?? access.platformLanding;
+  let best: RailPassengerStationAccess | null = null, bestD = Infinity;
+  for (const lineId of station.lineIds) {
+    for (const direction of [1, -1] as const) {
+      const candidate = nearestAccess(data.provider, station.id, lineId, direction, anchor.x, anchor.z, 'concourse');
+      if (!candidate) continue;
+      const d = Math.hypot(candidate.concourse.x - anchor.x, candidate.concourse.z - anchor.z);
+      if (d < bestD) { bestD = d; best = candidate; }
+    }
+  }
+  return best;
+}
+
+function externalRoutePrefix(access: ExternalStationAccess): RailPassengerPoint3D[] {
+  return [access.platformWait, access.platformLanding, ...access.connector];
+}
+
+function externalRouteReverse(access: ExternalStationAccess): RailPassengerPoint3D[] {
+  return [...access.connector].reverse();
+}
+
+declare module './World' {
+  interface World {
+    holdExternalRailArrival(agent: number, access: ExternalStationAccess): boolean;
+    releaseExternalRailArrival(agent: number, access: ExternalStationAccess): boolean;
+    beginExternalRailDeparture(agent: number, access: ExternalStationAccess): boolean;
+    clearExternalRailPassenger(agent: number): void;
+  }
+}
+
+proto.holdExternalRailArrival = function holdExternalRailArrival(this: AnyWorld, agent: number, raw: ExternalStationAccess): boolean {
+  if (agent < 0 || agent >= this.store.count) return false;
+  const access = individualExternalAccess(raw, agent), data = dataFor(this), s = this.store;
+  clearPlan(data, agent);
+  externalDepartures(this).delete(agent);
+  data.visual.active[agent] = 1; data.visual.y[agent] = access.platformWait.y;
+  s.posX[agent] = access.platformWait.x; s.posZ[agent] = access.platformWait.z; s.heading[agent] = access.heading;
+  s.velX[agent] = 0; s.velZ[agent] = 0; s.pathHandle[agent] = -1; this.walkPaths[agent] = EMPTY_PATH;
+  s.state[agent] = AgentState.WaitingTrain; s.waiting[agent] = 1;
+  return true;
+};
+
+proto.releaseExternalRailArrival = function releaseExternalRailArrival(this: AnyWorld, agent: number, raw: ExternalStationAccess): boolean {
+  if (agent < 0 || agent >= this.store.count) return false;
+  const data = dataFor(this), s = this.store, access = individualExternalAccess(raw, agent);
+  if (s.goalPOI[agent] < 0 || !this.reserveGoal(agent)) {
+    const ground = closestConventionalAccess(this, access);
+    clearPlan(data, agent);
+    if (ground) { s.posX[agent] = ground.entrance.x; s.posZ[agent] = ground.entrance.z; }
+    s.state[agent] = AgentState.Idle; s.waiting[agent] = 0; s.nextDecideAt[agent] = this.clock.totalSeconds + 30;
+    return true;
+  }
+
+  const tripDistance = Math.hypot(s.goalX[agent] - s.posX[agent], s.goalZ[agent] - s.posZ[agent]);
+  const plan = chooseRailTrip(this, agent, tripDistance);
+  if (plan && plan.boardStation === access.stationId) {
+    const direction = directionOnLine(railOf(this), plan.firstLine, plan.boardStation, plan.firstAlightStation);
+    const anchor = access.connector[access.connector.length - 1] ?? access.platformLanding;
+    const rawDeparture = direction == null ? null : nearestAccess(
+      data.provider, plan.boardStation, plan.firstLine, direction, anchor.x, anchor.z, 'concourse',
+    );
+    if (rawDeparture) {
+      const departure = individualAccess(rawDeparture, agent);
+      data.boardStation[agent] = plan.boardStation;
+      data.alightStation[agent] = plan.firstAlightStation;
+      data.line[agent] = plan.firstLine;
+      data.nextLine[agent] = plan.transferLine;
+      data.finalStation[agent] = plan.finalStation;
+      data.train[agent] = -1;
+      data.access.set(agent, departure);
+      beginRoute(this, agent, [
+        ...externalRoutePrefix(access),
+        departure.concourse,
+        departure.platformLanding,
+        departure.platformWait,
+      ], 'wait');
+      return true;
+    }
+  }
+
+  const groundRaw = closestConventionalAccess(this, access);
+  if (groundRaw) {
+    const ground = individualAccess(groundRaw, agent);
+    data.access.set(agent, ground);
+    beginRoute(this, agent, [
+      ...externalRoutePrefix(access),
+      ground.concourse,
+      ground.stairTop,
+      ground.entrance,
+    ], 'exit');
+    return true;
+  }
+
+  clearPlan(data, agent);
+  this.assignWalkPath(agent, s.goalX[agent], s.goalZ[agent]);
+  s.state[agent] = AgentState.Traveling; s.waiting[agent] = 0;
+  return true;
+};
+
+proto.beginExternalRailDeparture = function beginExternalRailDeparture(this: AnyWorld, agent: number, raw: ExternalStationAccess): boolean {
+  if (agent < 0 || agent >= this.store.count) return false;
+  const data = dataFor(this), access = individualExternalAccess(raw, agent);
+  const groundRaw = closestConventionalAccess(this, access);
+  if (!groundRaw) return false;
+  const ground = individualAccess(groundRaw, agent);
+  clearPlan(data, agent);
+  externalDepartures(this).set(agent, { access, ground });
+  this.assignWalkPath(agent, ground.entrance.x, ground.entrance.z);
+  this.store.state[agent] = EXTERNAL_STATION_APPROACH;
+  this.store.waiting[agent] = 0;
+  this.store.nextDecideAt[agent] = Number.POSITIVE_INFINITY;
+  return true;
+};
+
+proto.clearExternalRailPassenger = function clearExternalRailPassenger(this: AnyWorld, agent: number): void {
+  if (agent < 0 || agent >= this.store.capacity) return;
+  clearPlan(dataFor(this), agent);
+  externalDepartures(this).delete(agent);
+};
+
+const stepBeforePedWithExternalStation = proto.stepBeforePed;
+proto.stepBeforePed = function stepBeforePedWithExternalStationAccess(
+  this: AnyWorld,
+  dt: number,
+  needs: boolean,
+  decisions: boolean,
+): number {
+  const now = stepBeforePedWithExternalStation.call(this, dt, needs, decisions);
+  const pending = externalDepartures(this);
+  if (!pending.size) return now;
+  const s = this.store;
+  for (const [agent, plan] of [...pending]) {
+    if (s.state[agent] !== EXTERNAL_STATION_APPROACH) { pending.delete(agent); continue; }
+    const gx = s.goalX[agent], gz = s.goalZ[agent];
+    s.goalX[agent] = plan.ground.entrance.x; s.goalZ[agent] = plan.ground.entrance.z;
+    s.state[agent] = AgentState.Traveling;
+    originalWalkStep.call(this, agent, dt, false);
+    s.goalX[agent] = gx; s.goalZ[agent] = gz;
+    if (s.state[agent] === AgentState.Engaged) {
+      s.dwellUntil[agent] = 0; s.velX[agent] = 0; s.velZ[agent] = 0;
+      pending.delete(agent);
+      beginRoute(this, agent, [
+        plan.ground.entrance,
+        plan.ground.stairTop,
+        plan.ground.concourse,
+        ...externalRouteReverse(plan.access),
+        plan.access.platformLanding,
+        plan.access.platformWait,
+      ], 'wait');
+    } else if (s.state[agent] === AgentState.Traveling) {
+      s.state[agent] = EXTERNAL_STATION_APPROACH;
+    } else if (s.state[agent] === AgentState.Idle) {
+      pending.delete(agent);
+      s.nextDecideAt[agent] = this.clock.totalSeconds + 60;
+    }
+  }
+  return now;
 };

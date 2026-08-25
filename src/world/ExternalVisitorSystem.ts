@@ -6,6 +6,22 @@ import { World } from './World';
 
 export type ExternalVisitorPurpose = 'shopping' | 'tourism' | 'hotel';
 
+export interface ExternalVisitorStationPoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface ExternalVisitorStationAccess {
+  stationId: number;
+  direction: 1 | -1;
+  heading: number;
+  platformWait: ExternalVisitorStationPoint;
+  platformLanding: ExternalVisitorStationPoint;
+  connector: ExternalVisitorStationPoint[];
+  waitSpan: number;
+}
+
 export interface ExternalVisitorStats {
   active: number;
   shopping: number;
@@ -31,7 +47,7 @@ const PURPOSE_SHOPPING: PurposeCode = 1;
 const PURPOSE_TOURISM: PurposeCode = 2;
 const PURPOSE_HOTEL: PurposeCode = 3;
 const INACTIVE_AGENT_STATE = 1 as AgentState;
-const PHASE1_VISITORS_PER_TRAIN = 20;
+const HSR_CAPACITY = 730;
 const MAX_ACTIVE_VISITORS = 7000;
 const INACTIVE_COORD = -1_000_000;
 
@@ -49,6 +65,14 @@ function purposeCode(purpose: ExternalVisitorPurpose): PurposeCode {
   if (purpose === 'shopping') return PURPOSE_SHOPPING;
   if (purpose === 'tourism') return PURPOSE_TOURISM;
   return PURPOSE_HOTEL;
+}
+
+function trainDirection(trainId: number): 1 | -1 {
+  return (Math.abs(Math.trunc(trainId)) & 1) === 1 ? 1 : -1;
+}
+
+function accessKey(stationId: number, direction: 1 | -1): string {
+  return `${stationId}:${direction}`;
 }
 
 function resetReusedVisitor(store: AgentStore, id: number, x: number, z: number, salt: number): void {
@@ -74,18 +98,19 @@ function resetReusedVisitor(store: AgentStore, id: number, x: number, z: number,
 }
 
 /**
- * External visitors are ordinary AgentStore pedestrians while they are in the city.
- * There is deliberately no tourist renderer, tourist movement implementation, or station-only
- * proxy. The sidecar below only owns visitor lifecycle metadata: purpose, expiry and outbound wait.
- * Movement, routing, collision avoidance, buses, rail integration and rendering remain resident code.
+ * Visitors are normal resident agents while they are in the city. The sidecar owns only their
+ * lifecycle: why they came, when they leave and which HSR platform they use. Rendering, walking,
+ * routing, collision avoidance, buses and conventional rail remain the resident implementations.
  */
 export class ExternalVisitorSystem {
+  private readonly world: World;
   private readonly store: AgentStore;
   private readonly poi: POIRegistry;
   private readonly rail: RailNetworkPlan;
   private readonly residentCount: number;
   private readonly hotelPois: number[] = [];
   private readonly exitPoisByStation = new Map<number, number[]>();
+  private readonly highSpeedAccess = new Map<string, ExternalVisitorStationAccess>();
 
   private readonly active: Uint8Array;
   private readonly purpose: Uint8Array;
@@ -95,6 +120,8 @@ export class ExternalVisitorSystem {
   private readonly outboundQueued: Uint8Array;
   private readonly exitPoi: Int32Array;
   private readonly hotelPoi: Int32Array;
+  private readonly platformReleaseAt: Float64Array;
+  private readonly platformDirection: Int8Array;
   private readonly freeSlots: number[] = [];
   private readonly waitingOutboundIds: number[] = [];
 
@@ -106,6 +133,7 @@ export class ExternalVisitorSystem {
   private lastAdvanceAt = -Infinity;
 
   constructor(world: World & { city: VisitorCity }) {
+    this.world = world;
     this.store = world.store;
     this.poi = world.city.poi;
     this.rail = world.city.planning.rail;
@@ -120,6 +148,8 @@ export class ExternalVisitorSystem {
     this.outboundQueued = new Uint8Array(capacity);
     this.exitPoi = new Int32Array(capacity); this.exitPoi.fill(-1);
     this.hotelPoi = new Int32Array(capacity); this.hotelPoi.fill(-1);
+    this.platformReleaseAt = new Float64Array(capacity);
+    this.platformDirection = new Int8Array(capacity);
 
     for (const facility of world.city.facilities) {
       if (facility.type !== FacilityType.Hotel) continue;
@@ -130,55 +160,53 @@ export class ExternalVisitorSystem {
     latestSystem = this;
   }
 
-  /** Called once when an external high-speed train exchanges passengers at Central. */
-  exchangeAtStation(stationId: number, trainCapacity: number, timeSeconds: number, trainId: number): { arrived: number; boarded: number } {
+  registerHighSpeedStationAccess(accesses: ExternalVisitorStationAccess[], railProvider?: unknown): void {
+    for (const access of accesses) this.highSpeedAccess.set(accessKey(access.stationId, access.direction), access);
+    if (railProvider) this.world.attachRailTransit(railProvider as any);
+  }
+
+  exchangeAtStation(stationId: number, inboundPassengers: number, timeSeconds: number, trainId: number): { arrived: number; boarded: number } {
     this.advanceTo(timeSeconds, true);
     const station = this.station(stationId); if (!station) return { arrived: 0, boarded: 0 };
-    const seats = Math.max(80, Math.floor(trainCapacity));
-
-    // Returners board first. They remain normal visible AgentStore pedestrians until this point.
-    const boardLimit = Math.min(this.waitingOutboundIds.length, Math.floor(seats * 0.62));
-    let boarded = 0;
-    for (let n = 0; n < boardLimit; n++) {
-      const id = this.waitingOutboundIds.shift();
-      if (id == null || !this.active[id] || !this.outboundQueued[id]) continue;
-      this.outboundQueued[id] = 0;
-      this.deactivateVisitor(id);
-      boarded++;
-    }
-    this.departedToday += boarded;
+    const inbound = Math.max(0, Math.min(HSR_CAPACITY, Math.floor(inboundPassengers)));
+    const direction = trainDirection(trainId);
 
     const reusable = this.freeSlots.length;
     const appendable = Math.max(0, this.store.capacity - this.store.count);
-    const headroom = Math.min(MAX_ACTIVE_VISITORS - this.activeVisitors, reusable + appendable);
-    if (headroom <= 0) return { arrived: 0, boarded };
+    const headroom = Math.max(0, Math.min(MAX_ACTIVE_VISITORS - this.activeVisitors, reusable + appendable));
+    const requested = Math.min(headroom, Math.floor(inbound * 0.5));
+
+    const through = Math.max(0, inbound - requested);
+    const boardingCapacity = Math.max(0, HSR_CAPACITY - through);
+    let boarded = 0;
+    let write = 0;
+    for (let read = 0; read < this.waitingOutboundIds.length; read++) {
+      const id = this.waitingOutboundIds[read];
+      const valid = this.active[id] && this.outboundQueued[id];
+      const matchingPlatform = this.platformDirection[id] === 0 || this.platformDirection[id] === direction;
+      if (valid && matchingPlatform && boarded < boardingCapacity) {
+        this.outboundQueued[id] = 0;
+        this.deactivateVisitor(id);
+        boarded++;
+      } else if (valid) {
+        this.waitingOutboundIds[write++] = id;
+      }
+    }
+    this.waitingOutboundIds.length = write;
+    this.departedToday += boarded;
 
     const hour = ((timeSeconds % 86400) + 86400) % 86400 / 3600;
-    const demand = hour >= 9 && hour < 17 ? 0.58
-      : hour >= 17 && hour < 21 ? 0.46
-        : hour >= 6 && hour < 9 ? 0.38 : 0.18;
-    const jitter = 0.82 + hash01(trainId * 92821 + this.eventSerial * 131 + Math.floor(timeSeconds / 300)) * 0.36;
-    const requested = Math.min(
-      PHASE1_VISITORS_PER_TRAIN,
-      headroom,
-      Math.max(0, Math.floor(seats * demand * jitter)),
-    );
-
     let arrived = 0;
     for (let n = 0; n < requested; n++) {
       const salt = this.eventSerial++;
-      const purpose = this.pickPurpose(hour, salt);
-      if (this.spawnVisitor(station, purpose, timeSeconds, salt) < 0) break;
+      const visitorPurpose = this.pickPurpose(hour, salt);
+      if (this.spawnVisitor(station, visitorPurpose, timeSeconds, salt, direction) < 0) break;
       arrived++;
     }
     this.arrivedToday += arrived;
     return { arrived, boarded };
   }
 
-  /**
-   * Only lifecycle bookkeeping happens here. Visitor movement itself is advanced by World exactly
-   * like a resident because visitor agents use the same AgentState transitions and stores.
-   */
   advanceTo(timeSeconds: number, force = false): void {
     if (!Number.isFinite(timeSeconds)) return;
     this.resetDailyCounters(timeSeconds);
@@ -187,34 +215,40 @@ export class ExternalVisitorSystem {
 
     for (let id = this.residentCount; id < this.store.count; id++) {
       if (!this.active[id]) continue;
-      const state = this.store.state[id] as AgentState;
 
       if (this.outboundQueued[id]) {
         this.store.nextDecideAt[id] = Number.POSITIVE_INFINITY;
         continue;
       }
 
-      if (!this.returning[id] && timeSeconds >= this.leaveAt[id]) this.returning[id] = 1;
-
-      if (this.returning[id]) {
-        if (state === AgentState.Engaged) {
-          if (this.store.goalPOI[id] === this.exitPoi[id]) this.queueOutbound(id);
-          else {
-            this.releaseEngagedGoal(id);
-            this.routeToExit(id);
-          }
-        } else if (state === AgentState.Idle) {
-          this.routeToExit(id);
-        } else if (state === AgentState.WaitingTrain) {
-          this.queueOutbound(id);
-        }
+      const platformRelease = this.platformReleaseAt[id];
+      if (platformRelease > 0) {
+        if (timeSeconds < platformRelease) continue;
+        this.platformReleaseAt[id] = 0;
+        const access = this.accessFor(id);
+        if (access && this.world.releaseExternalRailArrival(id, access)) continue;
+        this.store.waiting[id] = 0;
+        this.store.state[id] = this.store.goalPOI[id] >= 0 ? AgentState.Routing : AgentState.Idle;
+        this.store.nextDecideAt[id] = this.store.goalPOI[id] >= 0 ? Number.POSITIVE_INFINITY : timeSeconds;
         continue;
       }
 
-      // Keep the visitor on the resident program. The first purpose-specific destination is seeded
-      // at arrival, then UtilityBrain is free to choose food/retail/leisure exactly as for residents.
-      // If a visitor is idling because a resident action could not find a target, let the normal
-      // decision scheduler retry; we only constrain the return phase.
+      const state = this.store.state[id] as AgentState;
+      if (!this.returning[id] && timeSeconds >= this.leaveAt[id]) {
+        this.returning[id] = 1;
+        if (this.platformDirection[id] !== 0) this.platformDirection[id] = (-this.platformDirection[id]) as 1 | -1;
+      }
+
+      if (!this.returning[id]) continue;
+
+      if (state === AgentState.Engaged) {
+        this.releaseEngagedGoal(id);
+        this.routeToExit(id);
+      } else if (state === AgentState.Idle) {
+        this.routeToExit(id);
+      } else if (state === AgentState.WaitingTrain) {
+        this.queueOutbound(id);
+      }
     }
   }
 
@@ -243,7 +277,13 @@ export class ExternalVisitorSystem {
     };
   }
 
-  private spawnVisitor(station: RailStation, visitorPurpose: ExternalVisitorPurpose, now: number, salt: number): number {
+  private spawnVisitor(
+    station: RailStation,
+    visitorPurpose: ExternalVisitorPurpose,
+    now: number,
+    salt: number,
+    direction: 1 | -1,
+  ): number {
     const jitterX = (hash01(salt * 31 + 7) - 0.5) * 8;
     const jitterZ = (hash01(salt * 43 + 11) - 0.5) * 8;
     const x = station.x + jitterX, z = station.z + jitterZ;
@@ -256,14 +296,15 @@ export class ExternalVisitorSystem {
       resetReusedVisitor(this.store, id, x, z, salt);
     }
 
-    const code = purposeCode(visitorPurpose);
     this.active[id] = 1;
-    this.purpose[id] = code;
+    this.purpose[id] = purposeCode(visitorPurpose);
     this.stationId[id] = station.id;
     this.returning[id] = 0;
     this.outboundQueued[id] = 0;
     this.exitPoi[id] = this.pickExitPoi(station, id);
     this.hotelPoi[id] = -1;
+    this.platformDirection[id] = direction;
+    this.platformReleaseAt[id] = 0;
 
     const durationHours = visitorPurpose === 'shopping'
       ? 2.0 + hash01(salt * 53 + 13) * 3.2
@@ -282,25 +323,32 @@ export class ExternalVisitorSystem {
       const hotel = this.pickHotel(station, this.store.wealth[id], salt);
       if (hotel >= 0) {
         this.hotelPoi[id] = hotel;
-        // Treat the hotel as this temporary resident's home anchor. UtilityBrain can therefore use
-        // its normal sleep/routine-home action without any visitor-specific movement code.
         this.store.homePOI[id] = hotel;
         initialTarget = hotel;
       }
     }
     if (initialTarget < 0) initialTarget = this.pickVisitPoi(station, visitorPurpose, this.store.wealth[id], salt);
 
-    if (initialTarget >= 0) this.assignGoal(id, initialTarget);
+    if (initialTarget >= 0) this.prepareGoal(id, initialTarget);
     else {
       this.store.state[id] = AgentState.Idle;
       this.store.nextDecideAt[id] = now + 30;
+    }
+
+    const access = this.accessFor(id);
+    if (access && this.world.holdExternalRailArrival(id, access)) {
+      this.platformReleaseAt[id] = now + 30 + hash01(salt * 149 + id * 17) * 150;
+      this.store.nextDecideAt[id] = Number.POSITIVE_INFINITY;
+    } else if (initialTarget >= 0) {
+      this.store.state[id] = AgentState.Routing;
+      this.store.nextDecideAt[id] = Number.POSITIVE_INFINITY;
     }
 
     this.activeVisitors++;
     return id;
   }
 
-  private assignGoal(id: number, poiId: number): boolean {
+  private prepareGoal(id: number, poiId: number): boolean {
     if (poiId < 0 || poiId >= this.poi.size) return false;
     const p = this.poi.get(poiId);
     this.store.goalPOI[id] = poiId;
@@ -310,8 +358,6 @@ export class ExternalVisitorSystem {
     this.store.pathHandle[id] = -1;
     this.store.pathCursor[id] = 0;
     this.store.waiting[id] = 0;
-    this.store.state[id] = AgentState.Routing;
-    this.store.nextDecideAt[id] = Number.POSITIVE_INFINITY;
     return true;
   }
 
@@ -321,15 +367,20 @@ export class ExternalVisitorSystem {
       this.queueOutbound(id);
       return;
     }
+
+    const access = this.accessFor(id);
+    if (access && this.world.beginExternalRailDeparture(id, access)) return;
+
     let exit = this.exitPoi[id];
     if (exit < 0) {
       exit = this.pickExitPoi(station, id);
       this.exitPoi[id] = exit;
     }
-    if (exit >= 0 && this.assignGoal(id, exit)) return;
-
-    // The generated city normally always has a station-adjacent POI. If not, keeping the visitor
-    // at the station as WaitingTrain is safer than inventing a second movement implementation.
+    if (exit >= 0 && this.prepareGoal(id, exit)) {
+      this.store.state[id] = AgentState.Routing;
+      this.store.nextDecideAt[id] = Number.POSITIVE_INFINITY;
+      return;
+    }
     this.store.posX[id] = station.x;
     this.store.posZ[id] = station.z;
     this.queueOutbound(id);
@@ -362,6 +413,7 @@ export class ExternalVisitorSystem {
   private deactivateVisitor(id: number): void {
     if (!this.active[id]) return;
     this.releaseEngagedGoal(id);
+    this.world.clearExternalRailPassenger(id);
     this.active[id] = 0;
     this.purpose[id] = PURPOSE_NONE;
     this.stationId[id] = -1;
@@ -370,6 +422,8 @@ export class ExternalVisitorSystem {
     this.outboundQueued[id] = 0;
     this.exitPoi[id] = -1;
     this.hotelPoi[id] = -1;
+    this.platformReleaseAt[id] = 0;
+    this.platformDirection[id] = 0;
 
     this.store.state[id] = INACTIVE_AGENT_STATE;
     this.store.posX[id] = INACTIVE_COORD;
@@ -385,6 +439,14 @@ export class ExternalVisitorSystem {
     this.store.nextDecideAt[id] = Number.POSITIVE_INFINITY;
     this.activeVisitors = Math.max(0, this.activeVisitors - 1);
     this.freeSlots.push(id);
+  }
+
+  private accessFor(id: number): ExternalVisitorStationAccess | null {
+    const station = this.stationId[id];
+    if (station < 0) return null;
+    const direction = this.platformDirection[id] as 1 | -1;
+    if (direction !== 1 && direction !== -1) return null;
+    return this.highSpeedAccess.get(accessKey(station, direction)) ?? null;
   }
 
   private pickPurpose(hour: number, salt: number): ExternalVisitorPurpose {
@@ -462,8 +524,6 @@ export function latestExternalVisitorSystem(): ExternalVisitorSystem | null {
   return latestSystem;
 }
 
-// Create the sidecar after resident population has finished. This is the only lifecycle hook: the
-// visitor system does not wrap World.step, World.walkStep, EnhancedRenderer, or any worker path.
 type AnyWorld = World & { city: VisitorCity };
 const worldProto = World.prototype as unknown as { populate: (count: number) => void };
 const originalPopulate = worldProto.populate;
