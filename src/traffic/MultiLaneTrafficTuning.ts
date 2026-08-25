@@ -406,8 +406,15 @@ if (!proto.__citySimMultiLaneV074) {
           }
 
           let gapStop = Infinity;
+          const downstreamLanes = nextEdgeLanes(this, v);
+          const mergeBlocked = downstreamLanes != null && runtime.lane[v] >= downstreamLanes;
+          const mergeStopDistance = Math.max(6, vs.length[v] + 1.5);
           if (isTerminal) gapStop = Math.max(0.1, remaining + vs.s0[v]);
           else {
+            if (mergeBlocked) {
+              const toMergeLine = (1 - vs.segT[v]) * vs.segLen[v] - mergeStopDistance;
+              if (toMergeLine > 0.1) gapStop = Math.min(gapStop, toMergeLine);
+            }
             const axis = net.axisOf(vs.fromNode[v], vs.toNode[v]);
             const redOrPed = !this.signals.vehicleGreen(vs.toNode[v], axis)
               || (this.pedBlockedFn ? this.pedBlockedFn(vs.toNode[v]) : false);
@@ -426,6 +433,12 @@ if (!proto.__citySimMultiLaneV074) {
           vs.speed[v] = Math.max(0, vs.speed[v] + accel * dt);
           const nextT = vs.segT[v] + (vs.speed[v] * dt) / vs.segLen[v];
           if (isTerminal && nextT >= terminalT) { this.arrive(v, terminalT); continue; }
+          if (mergeBlocked) {
+            const stopT = Math.max(0.02, 1 - Math.min(0.45, mergeStopDistance / Math.max(1, vs.segLen[v])));
+            if (nextT >= stopT) {
+              vs.segT[v] = stopT; vs.speed[v] = 0; vs.accel[v] = 0; this.updateWorldPos(v); continue;
+            }
+          }
           vs.segT[v] = nextT;
           if (vs.segT[v] >= 1) this.advanceEdge(v);
           this.updateWorldPos(v);

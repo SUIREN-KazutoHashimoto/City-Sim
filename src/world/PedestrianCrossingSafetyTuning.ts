@@ -1,5 +1,5 @@
 import { AgentState } from '../agents/AgentStore';
-import { roadWidth } from '../traffic/RoadNetwork';
+import { roadWidth, crosswalkSetback, CROSSWALK_DEPTH } from '../traffic/RoadNetwork';
 import type { SidewalkEdge } from '../traffic/SidewalkNetwork';
 import { VehicleState } from '../traffic/VehicleStore';
 import { World } from './World';
@@ -96,14 +96,17 @@ if (!proto.__citySimPedestrianCrossingSafetyV074) {
     const vs = this.vehicles;
     const net = this.city.net;
     for (let v = 0; v < vs.count; v++) {
-      if (vs.state[v] !== VehicleState.Driving || vs.speed[v] < 0.5) continue;
+      if (vs.state[v] !== VehicleState.Driving) continue;
       const edge = vs.edge[v] >= 0 ? net.edges[vs.edge[v]] : null;
       const lanes = Math.max(1, edge?.lanes ?? 1);
-      const conflictDistance = 10 + roadWidth(lanes) * 0.55;
+      const rw = roadWidth(lanes);
+      // Only vehicles that have actually entered the crosswalk/intersection conflict zone block
+      // pedestrian entry. A vehicle correctly stopped at the stop line must not deadlock pedestrians.
+      const conflictDistance = crosswalkSetback(rw) + CROSSWALK_DEPTH * 0.5 + vs.length[v] * 0.5;
       const toDistance = Math.max(0, (1 - vs.segT[v]) * vs.segLen[v]);
       const fromDistance = Math.max(0, vs.segT[v] * vs.segLen[v]);
       if (toDistance < conflictDistance) markVehBlock(this, vs.toNode[v]);
-      if (fromDistance < conflictDistance * 0.65) markVehBlock(this, vs.fromNode[v]);
+      if (fromDistance < conflictDistance) markVehBlock(this, vs.fromNode[v]);
     }
 
     const rt = runtime(this);
