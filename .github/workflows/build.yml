@@ -25,3 +25,9 @@ jobs:
         run: npm ci
       - name: TypeScript and Vite build
         run: npm run build
+      - name: Verify legal files in distribution
+        run: |
+          test -s dist/LICENSE
+          test -s dist/NOTICE
+          test -s dist/THIRD_PARTY_NOTICES.txt
+          grep -Fq "three.js authors" dist/THIRD_PARTY_NOTICES.txt
