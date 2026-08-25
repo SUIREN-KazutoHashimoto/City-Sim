@@ -7,7 +7,10 @@ import './rendering/HighSpeedStationConnection';
 import './generation/RailRuralStationSpacing';
 import './rendering/VisitorAccessoryRendering';
 import './world/VisitorBehaviorTuning';
+import './traffic/TaxiIntegration';
+import './rendering/TaxiRendering';
 import './rendering/VisitorInspectorTuning';
+import './rendering/TaxiInspectorTuning';
 import './rendering/RenderFilterTuning';
 import './rendering/RenderFilterRailSplit';
 import './rendering/RenderFilterHighSpeedTrainFix';
@@ -17,4 +20,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.70';
+export const APP_VERSION = '0.1.71';
