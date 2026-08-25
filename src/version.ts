@@ -1,5 +1,7 @@
+import './generation/UrbanFootprintBaseline';
 import './generation/CityDiversityTuning';
 import './generation/ParkPriorityTuning';
+import './generation/UrbanFootprintGuard';
 import './world/ExternalVisitorSystem';
 import './rendering/HighSpeedCapacityTuning';
 import './rendering/RailPassengerPlatformBoundsPatch';
@@ -8,9 +10,12 @@ import './generation/RailRuralStationSpacing';
 import './rendering/VisitorAccessoryRendering';
 import './world/VisitorBehaviorTuning';
 import './traffic/MultiLaneTrafficTuning';
+import './traffic/BusHazardTuning';
 import './traffic/TaxiIntegration';
+import './world/PedestrianCrossingSafetyTuning';
 import './rendering/MultiLaneRoadRendering';
 import './rendering/TaxiRendering';
+import './rendering/VehicleSignalRendering';
 import './rendering/VisitorInspectorTuning';
 import './rendering/TaxiInspectorTuning';
 import './rendering/MultiLaneInspectorTuning';
@@ -24,4 +29,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.73';
+export const APP_VERSION = '0.1.74';

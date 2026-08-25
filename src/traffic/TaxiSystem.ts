@@ -5,8 +5,9 @@ import type { SimulationClock } from '../core/SimulationClock';
 import { RoadClass } from './RoadNetwork';
 import type { TrafficSystem } from './TrafficSystem';
 import { VehicleState, type VehicleStore } from './VehicleStore';
+import { setVehicleHazard } from './VehicleSignalRuntime';
 
-export type TaxiPhase = 'idle' | 'to-pickup' | 'occupied';
+export type TaxiPhase = 'idle' | 'to-pickup' | 'boarding' | 'occupied' | 'alighting';
 
 export interface TaxiVehicleInfo {
   taxiId: number;
@@ -36,6 +37,7 @@ interface TaxiRecord {
   destinationX: number;
   destinationZ: number;
   tripDistance: number;
+  serviceUntil: number;
 }
 
 type DropoffHandler = (agent: number, x: number, z: number) => void;
@@ -43,6 +45,8 @@ type CancelHandler = (agent: number) => void;
 
 const taxiByVehicles = new WeakMap<VehicleStore, TaxiSystem>();
 const taxiByStore = new WeakMap<AgentStore, TaxiSystem>();
+const BOARDING_SECONDS = 4;
+const ALIGHTING_SECONDS = 4;
 
 function hash01(value: number): number {
   let x = (value ^ 0x9e3779b9) >>> 0;
@@ -97,12 +101,12 @@ export class TaxiSystem {
     for (const center of this.city.planning.subCenters) pushNode(this.city.net.nearestNode(center.x, center.z));
 
     const roadCandidates = this.city.net.nodes
-      .filter((node) => node.edges.some((eid) => {
+      .filter((node: { id: number; edges: number[] }) => node.edges.some((eid: number) => {
         const cls = this.city.net.edges[eid]?.roadClass;
         return cls === RoadClass.Arterial || cls === RoadClass.Collector;
       }))
-      .map((node) => ({ id: node.id, rank: hash01(node.id * 4099 + this.city.sizeMeters * 17) }))
-      .sort((a, b) => a.rank - b.rank);
+      .map((node: { id: number }) => ({ id: node.id, rank: hash01(node.id * 4099 + this.city.sizeMeters * 17) }))
+      .sort((a: { rank: number }, b: { rank: number }) => a.rank - b.rank);
     for (const item of roadCandidates) pushNode(item.id);
 
     if (preferred.length === 0) return;
@@ -129,7 +133,9 @@ export class TaxiSystem {
         destinationX: node.x,
         destinationZ: node.z,
         tripDistance: 0,
+        serviceUntil: 0,
       });
+      setVehicleHazard(this.vehicles, vehicle, false);
     }
     console.info('[City-Sim] taxi fleet', { taxis: this.taxis.length, population });
   }
@@ -147,14 +153,15 @@ export class TaxiSystem {
     taxi.destinationX = destinationX;
     taxi.destinationZ = destinationZ;
     taxi.tripDistance = Math.hypot(destinationX - pickupX, destinationZ - pickupZ);
+    taxi.serviceUntil = 0;
     this.agentTaxi[agent] = taxi.id;
+    setVehicleHazard(this.vehicles, taxi.vehicle, false);
 
     const v = taxi.vehicle;
     const distanceToTaxi = Math.hypot(this.vehicles.posX[v] - pickupX, this.vehicles.posZ[v] - pickupZ);
     if (distanceToTaxi < 45) {
-      if (this.boardPassenger(taxi)) return true;
-      this.resetTaxi(taxi);
-      return false;
+      this.beginBoarding(taxi);
+      return true;
     }
     if (this.traffic.dispatch(v, this.vehicles.posX[v], this.vehicles.posZ[v], pickupX, pickupZ)) return true;
 
@@ -175,17 +182,23 @@ export class TaxiSystem {
       if (taxi.phase === 'to-pickup') {
         if (now - taxi.requestedAt > 20 * 60) {
           const passenger = taxi.passenger;
-          this.vehicles.state[v] = VehicleState.Parked;
           this.resetTaxi(taxi);
           cancel(passenger);
           continue;
         }
         if (this.vehicles.state[v] === VehicleState.Arrived || this.vehicles.state[v] === VehicleState.Parked) {
-          if (!this.boardPassenger(taxi)) {
-            const passenger = taxi.passenger;
-            this.resetTaxi(taxi);
-            cancel(passenger);
-          }
+          this.beginBoarding(taxi);
+        }
+        continue;
+      }
+
+      if (taxi.phase === 'boarding') {
+        this.holdStopped(taxi);
+        if (now < taxi.serviceUntil) continue;
+        if (!this.startOccupiedTrip(taxi)) {
+          const passenger = taxi.passenger;
+          this.resetTaxi(taxi);
+          cancel(passenger);
         }
         continue;
       }
@@ -197,22 +210,29 @@ export class TaxiSystem {
       this.store.velZ[passenger] = 0;
       this.store.heading[passenger] = this.vehicles.heading[v];
 
-      if (this.vehicles.state[v] === VehicleState.Arrived) {
-        const x = this.vehicles.posX[v], z = this.vehicles.posZ[v];
-        this.vehicles.state[v] = VehicleState.Parked;
-        this.agentTaxi[passenger] = -1;
-        taxi.phase = 'idle';
-        taxi.passenger = -1;
-        taxi.requestedAt = 0;
-        dropoff(passenger, x, z);
+      if (taxi.phase === 'occupied') {
+        if (this.vehicles.state[v] === VehicleState.Arrived) this.beginAlighting(taxi);
+        continue;
       }
+
+      this.holdStopped(taxi);
+      if (now < taxi.serviceUntil) continue;
+      const x = this.vehicles.posX[v], z = this.vehicles.posZ[v];
+      setVehicleHazard(this.vehicles, v, false);
+      this.agentTaxi[passenger] = -1;
+      taxi.phase = 'idle';
+      taxi.passenger = -1;
+      taxi.requestedAt = 0;
+      taxi.serviceUntil = 0;
+      dropoff(passenger, x, z);
     }
   }
 
   forEachPassenger(fn: (agent: number, phase: 'waiting' | 'onboard') => void): void {
     for (const taxi of this.taxis) {
       if (taxi.passenger < 0) continue;
-      fn(taxi.passenger, taxi.phase === 'occupied' ? 'onboard' : 'waiting');
+      const onboard = taxi.phase === 'occupied' || taxi.phase === 'alighting';
+      fn(taxi.passenger, onboard ? 'onboard' : 'waiting');
     }
   }
 
@@ -232,10 +252,11 @@ export class TaxiSystem {
     const taxiId = this.agentTaxi[agent];
     if (taxiId < 0 || taxiId >= this.taxis.length) return null;
     const taxi = this.taxis[taxiId];
+    const onboard = taxi.phase === 'occupied' || taxi.phase === 'alighting';
     return {
       taxiId,
       vehicle: taxi.vehicle,
-      phase: taxi.phase === 'occupied' ? 'onboard' : 'waiting',
+      phase: onboard ? 'onboard' : 'waiting',
       requestedAt: taxi.requestedAt,
       tripDistance: taxi.tripDistance,
     };
@@ -268,29 +289,46 @@ export class TaxiSystem {
     return best;
   }
 
-  private boardPassenger(taxi: TaxiRecord): boolean {
+  private beginBoarding(taxi: TaxiRecord): void {
+    taxi.phase = 'boarding';
+    taxi.serviceUntil = this.clock.totalSeconds + BOARDING_SECONDS;
+    this.holdStopped(taxi);
+    setVehicleHazard(this.vehicles, taxi.vehicle, true);
+  }
+
+  private startOccupiedTrip(taxi: TaxiRecord): boolean {
     const passenger = taxi.passenger;
     if (passenger < 0) return false;
+    const v = taxi.vehicle;
+    setVehicleHazard(this.vehicles, v, false);
+    taxi.serviceUntil = 0;
     taxi.phase = 'occupied';
-    this.store.posX[passenger] = this.vehicles.posX[taxi.vehicle];
-    this.store.posZ[passenger] = this.vehicles.posZ[taxi.vehicle];
+    this.store.posX[passenger] = this.vehicles.posX[v];
+    this.store.posZ[passenger] = this.vehicles.posZ[v];
 
-    const dx = taxi.destinationX - this.vehicles.posX[taxi.vehicle];
-    const dz = taxi.destinationZ - this.vehicles.posZ[taxi.vehicle];
+    const dx = taxi.destinationX - this.vehicles.posX[v];
+    const dz = taxi.destinationZ - this.vehicles.posZ[v];
     if (Math.hypot(dx, dz) < 45) {
-      this.vehicles.state[taxi.vehicle] = VehicleState.Arrived;
+      this.beginAlighting(taxi);
       return true;
     }
-    if (this.traffic.dispatch(
-      taxi.vehicle,
-      this.vehicles.posX[taxi.vehicle],
-      this.vehicles.posZ[taxi.vehicle],
-      taxi.destinationX,
-      taxi.destinationZ,
-    )) return true;
-
-    taxi.phase = 'to-pickup';
+    if (this.traffic.dispatch(v, this.vehicles.posX[v], this.vehicles.posZ[v], taxi.destinationX, taxi.destinationZ)) return true;
+    taxi.phase = 'boarding';
     return false;
+  }
+
+  private beginAlighting(taxi: TaxiRecord): void {
+    taxi.phase = 'alighting';
+    taxi.serviceUntil = this.clock.totalSeconds + ALIGHTING_SECONDS;
+    this.holdStopped(taxi);
+    setVehicleHazard(this.vehicles, taxi.vehicle, true);
+  }
+
+  private holdStopped(taxi: TaxiRecord): void {
+    const v = taxi.vehicle;
+    this.vehicles.state[v] = VehicleState.Parked;
+    this.vehicles.speed[v] = 0;
+    this.vehicles.accel[v] = 0;
   }
 
   private resetTaxi(taxi: TaxiRecord): void {
@@ -299,6 +337,8 @@ export class TaxiSystem {
     taxi.passenger = -1;
     taxi.requestedAt = 0;
     taxi.tripDistance = 0;
+    taxi.serviceUntil = 0;
+    setVehicleHazard(this.vehicles, taxi.vehicle, false);
     this.vehicles.state[taxi.vehicle] = VehicleState.Parked;
     this.vehicles.speed[taxi.vehicle] = 0;
     this.vehicles.accel[taxi.vehicle] = 0;

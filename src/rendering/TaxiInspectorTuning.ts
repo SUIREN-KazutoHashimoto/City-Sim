@@ -5,13 +5,15 @@ type AnyInspector = any;
 type DescribeMethod = (this: AnyInspector, id: number) => string;
 
 function phaseLabel(phase: string): string {
-  if (phase === 'idle') return '空車待機';
-  if (phase === 'to-pickup') return '迎車中';
-  return '実車';
+  if (phase === 'idle') return '空車待機 / 行灯点灯';
+  if (phase === 'to-pickup') return '迎車中 / 行灯消灯';
+  if (phase === 'boarding') return '乗車扱い中 / ハザード';
+  if (phase === 'alighting') return '降車扱い中 / ハザード';
+  return '実車 / 行灯消灯';
 }
 
 const proto = UniversalInspector.prototype as unknown as Record<string, any>;
-if (!proto.__citySimTaxiInspectorV071) {
+if (!proto.__citySimTaxiInspectorV074) {
   const previousAgent = proto.describeAgent as DescribeMethod;
   proto.describeAgent = function describeAgentWithTaxi(this: AnyInspector, agent: number): string {
     let text = previousAgent.call(this, agent);
@@ -35,5 +37,5 @@ if (!proto.__citySimTaxiInspectorV071) {
     return `タクシー #${info.taxiId} / Vehicle #${vehicle}\n状態 ${phaseLabel(info.phase)}\n速度 ${kmh.toFixed(0)}km/h\n乗客 ${passenger}\n今回距離 ${(info.tripDistance / 1000).toFixed(1)}km\n位置 (${vs.posX[vehicle].toFixed(1)}, ${vs.posZ[vehicle].toFixed(1)})`;
   };
 
-  proto.__citySimTaxiInspectorV071 = true;
+  proto.__citySimTaxiInspectorV074 = true;
 }
