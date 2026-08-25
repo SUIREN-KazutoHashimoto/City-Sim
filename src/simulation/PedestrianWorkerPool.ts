@@ -6,25 +6,56 @@ export interface PedestrianWorkerTiming {
   avoidMoveMs: number;
   barrierMs: number;
   totalMs: number;
+  wakeMs: number;
+  returnMs: number;
 }
 
 interface PendingJob { resolve: () => void; reject: (reason?: unknown) => void; }
-interface WorkerReply { type: 'done'; jobId: number; timing: PedestrianWorkerTiming; }
+interface WorkerReply { type: 'done'; jobId: number; }
+interface WaitAsyncResult { async: boolean; value: string | Promise<string>; }
+interface AtomicsWithWaitAsync { waitAsync?: (array: Int32Array, index: number, value: number, timeout?: number) => WaitAsyncResult; }
 
-const ZERO_TIMING: PedestrianWorkerTiming = { prepMs: 0, indexMs: 0, avoidMoveMs: 0, barrierMs: 0, totalMs: 0 };
-const METRIC_STRIDE = 5;
+const ZERO_TIMING: PedestrianWorkerTiming = { prepMs: 0, indexMs: 0, avoidMoveMs: 0, barrierMs: 0, totalMs: 0, wakeMs: 0, returnMs: 0 };
+const METRIC_STRIDE = 6;
+const M_PREP = 0;
+const M_INDEX = 1;
+const M_AVOID_MOVE = 2;
+const M_BARRIER = 3;
+const M_TOTAL = 4;
+const M_WAKE = 5;
+const USED_CELL_COUNT = 2;
+const JOB_EPOCH = 4;
+const JOB_ID = 5;
+const JOB_ACTIVE_COUNT = 6;
+const JOB_MOVE_COUNT = 7;
+const JOB_DT_MICROS = 8;
+const DONE_EPOCH = 9;
+const DISPATCH_TIME_MS = 10;
+const DONE_TIME_MS = 11;
+const CONTROL_SIZE = 12;
+const TIME_MASK = 0x3fffffff;
+
+// Below this active-pedestrian count, BENCH data shows Worker compute is tiny compared with
+// Worker -> main continuation latency. Run the same snapshot/index/avoidance integration on the
+// Coordinator thread and keep the 4-worker path for dense crowds/cold-start bursts.
+const SYNC_ACTIVE_THRESHOLD = 4096;
+
+const nowMs32 = (): number => Date.now() & TIME_MASK;
+const elapsedMs32 = (start: number, end: number): number => (end - start + TIME_MASK + 1) & TIME_MASK;
 
 /**
  * Pedestrian spatial index / avoidance / movement integration worker pool.
  *
- * One message is dispatched to each worker per simulation step. Workers synchronize with
- * Atomics.wait/notify barriers internally, so the main thread no longer performs a separate
- * index dispatch/await followed by a movement dispatch/await.
+ * Workers are initialized once and then sleep on a SharedArrayBuffer job epoch. Both hot-path
+ * directions avoid Worker message delivery when Atomics.waitAsync is available:
+ * - main -> workers: JOB_EPOCH + Atomics.notify
+ * - workers -> main: DONE_EPOCH + Atomics.notify / Atomics.waitAsync
  *
- * Each step:
- * 1. clears only cells used by the previous step and snapshots active pedestrian positions,
- * 2. builds the linked-cell index in parallel using Atomics.exchange,
- * 3. calculates separation/avoidance and integrates movement in parallel.
+ * Sparse settled steps use a synchronous path with the same snapshot/index/avoidance equations
+ * to avoid paying an event-loop roundtrip that is much larger than the actual computation.
+ * Dense steps still use the persistent Worker pool.
+ *
+ * postMessage remains only as a compatibility fallback for browsers without Atomics.waitAsync.
  */
 export class PedestrianWorkerPool {
   private readonly workers: Worker[] = [];
@@ -42,16 +73,20 @@ export class PedestrianWorkerPool {
   private readonly usedCells: Int32Array;
   private readonly control: Int32Array;
   private readonly metrics: Float32Array;
+  private readonly useAtomicsCompletion: boolean;
 
   private activeCount = 0;
   private moveCount = 0;
   private readonly cellSize = 8;
+  private readonly invCellSize = 1 / 8;
   private readonly gridOrigin = -32;
   private readonly gridWidth: number;
   private latestTimingState: PedestrianWorkerTiming = { ...ZERO_TIMING };
 
-  constructor(store: AgentStore, worldSizeMeters: number) {
+  constructor(private readonly store: AgentStore, worldSizeMeters: number) {
     const shared = store.sharedMemory && typeof SharedArrayBuffer !== 'undefined';
+    const waitAsync = (Atomics as unknown as AtomicsWithWaitAsync).waitAsync;
+    this.useAtomicsCompletion = shared && typeof waitAsync === 'function';
     const alloc = (bytes: number): ArrayBufferLike => shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
     const f32 = () => new Float32Array(alloc(store.capacity * Float32Array.BYTES_PER_ELEMENT));
     const i32 = () => new Int32Array(alloc(store.capacity * Int32Array.BYTES_PER_ELEMENT));
@@ -61,11 +96,9 @@ export class PedestrianWorkerPool {
     this.desiredX = f32(); this.desiredZ = f32();
     this.activeIds = i32(); this.moveIds = i32();
     this.snapshotX = f32(); this.snapshotZ = f32(); this.nextInCell = i32(); this.usedCells = i32();
-    this.control = new Int32Array(alloc(4 * Int32Array.BYTES_PER_ELEMENT));
+    this.control = new Int32Array(alloc(CONTROL_SIZE * Int32Array.BYTES_PER_ELEMENT));
     this.metrics = new Float32Array(alloc(desiredWorkerCount * METRIC_STRIDE * Float32Array.BYTES_PER_ELEMENT));
 
-    // 32m padding on each side. At a 10km city this is about 1.58M Int32 cells (~6.3MB),
-    // but only cells touched by pedestrians are cleared on the next step.
     this.gridWidth = Math.max(8, Math.ceil((worldSizeMeters - this.gridOrigin + 32) / this.cellSize) + 1);
     this.cellHead = new Int32Array(alloc(this.gridWidth * this.gridWidth * Int32Array.BYTES_PER_ELEMENT));
     this.cellHead.fill(-1);
@@ -78,7 +111,7 @@ export class PedestrianWorkerPool {
         if (ev.data.type !== 'done') return;
         const job = this.pending.get(ev.data.jobId); if (!job) return;
         this.pending.delete(ev.data.jobId);
-        this.latestTimingState = ev.data.timing;
+        this.latestTimingState = this.collectTiming();
         job.resolve();
       };
       worker.onerror = (ev) => {
@@ -92,6 +125,7 @@ export class PedestrianWorkerPool {
         type: 'init',
         workerId: i,
         workerCount: desiredWorkerCount,
+        completionByAtomics: this.useAtomicsCompletion,
         cellSize: this.cellSize,
         gridOrigin: this.gridOrigin,
         gridWidth: this.gridWidth,
@@ -114,36 +148,179 @@ export class PedestrianWorkerPool {
   get queuedPedestrians(): number { return this.activeCount; }
   get queuedMovers(): number { return this.moveCount; }
   get latestTiming(): PedestrianWorkerTiming { return this.latestTimingState; }
+  get completionMode(): 'atomics' | 'message' { return this.useAtomicsCompletion ? 'atomics' : 'message'; }
 
   begin(): void { this.activeCount = 0; this.moveCount = 0; }
 
-  /** Include a pedestrian in neighbor avoidance even when it is currently waiting/stopped. */
   include(agent: number): void {
     if (this.activeCount >= this.activeIds.length) return;
     this.activeIds[this.activeCount++] = agent;
   }
 
-  /** Queue the base desired direction. Separation is added in the Worker. */
   queue(agent: number, desiredX: number, desiredZ: number): void {
     if (this.moveCount >= this.moveIds.length) return;
     this.desiredX[agent] = desiredX; this.desiredZ[agent] = desiredZ;
     this.moveIds[this.moveCount++] = agent;
   }
 
-  /** One main-thread dispatch per worker; all index/movement phase synchronization stays inside workers. */
-  flush(dt: number): Promise<void> {
+  /** Use the Coordinator for sparse work, otherwise wake persistent workers and await completion. */
+  async flush(dt: number): Promise<void> {
     if (!this.active || this.activeCount <= 0 || this.moveCount <= 0 || dt <= 0) {
       this.latestTimingState = { ...ZERO_TIMING };
-      return Promise.resolve();
+      return;
+    }
+
+    if (this.activeCount <= SYNC_ACTIVE_THRESHOLD) {
+      this.flushSynchronous(dt);
+      return;
     }
 
     const jobId = this.nextJobId++;
-    return new Promise<void>((resolve, reject) => {
+    if (this.useAtomicsCompletion) {
+      const expectedDoneEpoch = Atomics.load(this.control, DONE_EPOCH);
+      await new Promise<void>((resolve, reject) => {
+        this.pending.set(jobId, { resolve, reject });
+        const done = this.waitForDone(expectedDoneEpoch);
+        done.then(() => {
+          const job = this.pending.get(jobId); if (!job) return;
+          this.pending.delete(jobId);
+          this.latestTimingState = this.collectTiming();
+          job.resolve();
+        }, (reason) => {
+          const job = this.pending.get(jobId); if (!job) return;
+          this.pending.delete(jobId); job.reject(reason);
+        });
+        try { this.dispatch(jobId, dt); }
+        catch (reason) {
+          const job = this.pending.get(jobId); if (!job) return;
+          this.pending.delete(jobId); job.reject(reason);
+        }
+      });
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
       this.pending.set(jobId, { resolve, reject });
-      for (const worker of this.workers) {
-        worker.postMessage({ type: 'step', jobId, activeCount: this.activeCount, moveCount: this.moveCount, dt });
-      }
+      this.dispatch(jobId, dt);
     });
+  }
+
+  private cellOf(x: number, z: number): number {
+    const cx = Math.floor((x - this.gridOrigin) * this.invCellSize);
+    const cz = Math.floor((z - this.gridOrigin) * this.invCellSize);
+    if (cx < 0 || cz < 0 || cx >= this.gridWidth || cz >= this.gridWidth) return -1;
+    return cz * this.gridWidth + cx;
+  }
+
+  /**
+   * Single-thread equivalent of pedestrianWorker.runStep for sparse settled traffic.
+   * Worker threads are sleeping while this runs, so shared work buffers are safe to reuse.
+   */
+  private flushSynchronous(dt: number): void {
+    const totalStart = performance.now();
+    const s = this.store;
+
+    const prepStart = performance.now();
+    const previousUsed = Atomics.load(this.control, USED_CELL_COUNT);
+    for (let n = 0; n < previousUsed; n++) this.cellHead[this.usedCells[n]] = -1;
+    Atomics.store(this.control, USED_CELL_COUNT, 0);
+    for (let n = 0; n < this.activeCount; n++) {
+      const agent = this.activeIds[n];
+      this.snapshotX[agent] = s.posX[agent];
+      this.snapshotZ[agent] = s.posZ[agent];
+    }
+    const prepMs = performance.now() - prepStart;
+
+    const indexStart = performance.now();
+    let usedCount = 0;
+    for (let n = 0; n < this.activeCount; n++) {
+      const agent = this.activeIds[n];
+      const cell = this.cellOf(this.snapshotX[agent], this.snapshotZ[agent]);
+      if (cell < 0) { this.nextInCell[agent] = -1; continue; }
+      const previous = this.cellHead[cell];
+      this.cellHead[cell] = agent;
+      this.nextInCell[agent] = previous;
+      if (previous === -1) this.usedCells[usedCount++] = cell;
+    }
+    Atomics.store(this.control, USED_CELL_COUNT, usedCount);
+    const indexMs = performance.now() - indexStart;
+
+    const moveStart = performance.now();
+    const radius = 2, radius2 = radius * radius;
+    for (let n = 0; n < this.moveCount; n++) {
+      const agent = this.moveIds[n];
+      const px = this.snapshotX[agent], pz = this.snapshotZ[agent];
+      let desX = this.desiredX[agent], desZ = this.desiredZ[agent], sepX = 0, sepZ = 0, neighbors = 0;
+
+      const minCx = Math.max(0, Math.floor((px - radius - this.gridOrigin) * this.invCellSize));
+      const maxCx = Math.min(this.gridWidth - 1, Math.floor((px + radius - this.gridOrigin) * this.invCellSize));
+      const minCz = Math.max(0, Math.floor((pz - radius - this.gridOrigin) * this.invCellSize));
+      const maxCz = Math.min(this.gridWidth - 1, Math.floor((pz + radius - this.gridOrigin) * this.invCellSize));
+
+      for (let cz = minCz; cz <= maxCz; cz++) for (let cx = minCx; cx <= maxCx; cx++) {
+        let other = this.cellHead[cz * this.gridWidth + cx];
+        while (other >= 0) {
+          if (other !== agent) {
+            const dx = px - this.snapshotX[other], dz = pz - this.snapshotZ[other], d2 = dx * dx + dz * dz;
+            if (d2 > 0 && d2 < radius2) {
+              const inv = 1 / Math.sqrt(d2); sepX += dx * inv; sepZ += dz * inv; neighbors++;
+            }
+          }
+          other = this.nextInCell[other];
+        }
+      }
+
+      if (neighbors > 0) { desX += (sepX / neighbors) * 0.6; desZ += (sepZ / neighbors) * 0.6; }
+      const mag = Math.hypot(desX, desZ) || 1, sp = s.maxSpeed[agent];
+      const vx = (desX / mag) * sp, vz = (desZ / mag) * sp;
+      s.velX[agent] = vx; s.velZ[agent] = vz;
+      s.posX[agent] += vx * dt; s.posZ[agent] += vz * dt; s.heading[agent] = Math.atan2(vz, vx);
+      s.energy[agent] = Math.max(0, s.energy[agent] - (1 / (2.5 * 3600)) * dt);
+    }
+    const avoidMoveMs = performance.now() - moveStart;
+
+    this.latestTimingState = {
+      prepMs,
+      indexMs,
+      avoidMoveMs,
+      barrierMs: 0,
+      totalMs: performance.now() - totalStart,
+      wakeMs: 0,
+      returnMs: 0,
+    };
+  }
+
+  private dispatch(jobId: number, dt: number): void {
+    Atomics.store(this.control, JOB_ID, jobId);
+    Atomics.store(this.control, JOB_ACTIVE_COUNT, this.activeCount);
+    Atomics.store(this.control, JOB_MOVE_COUNT, this.moveCount);
+    Atomics.store(this.control, JOB_DT_MICROS, Math.max(1, Math.min(0x7fffffff, Math.round(dt * 1_000_000))));
+    Atomics.store(this.control, DISPATCH_TIME_MS, nowMs32());
+    Atomics.add(this.control, JOB_EPOCH, 1);
+    Atomics.notify(this.control, JOB_EPOCH, this.workers.length);
+  }
+
+  private async waitForDone(expectedEpoch: number): Promise<void> {
+    const fn = (Atomics as unknown as AtomicsWithWaitAsync).waitAsync;
+    if (typeof fn !== 'function') throw new Error('Atomics.waitAsync unavailable after atomics completion was selected');
+    const result = fn(this.control, DONE_EPOCH, expectedEpoch);
+    if (result.async) await result.value;
+  }
+
+  private collectTiming(): PedestrianWorkerTiming {
+    let prepMs = 0, indexMs = 0, avoidMoveMs = 0, barrierMs = 0, totalMs = 0, wakeMs = 0;
+    for (let w = 0; w < this.workers.length; w++) {
+      const base = w * METRIC_STRIDE;
+      prepMs = Math.max(prepMs, this.metrics[base + M_PREP]);
+      indexMs = Math.max(indexMs, this.metrics[base + M_INDEX]);
+      avoidMoveMs = Math.max(avoidMoveMs, this.metrics[base + M_AVOID_MOVE]);
+      barrierMs = Math.max(barrierMs, this.metrics[base + M_BARRIER]);
+      totalMs = Math.max(totalMs, this.metrics[base + M_TOTAL]);
+      wakeMs = Math.max(wakeMs, this.metrics[base + M_WAKE]);
+    }
+    const doneAt = Atomics.load(this.control, DONE_TIME_MS);
+    const returnMs = elapsedMs32(doneAt, nowMs32());
+    return { prepMs, indexMs, avoidMoveMs, barrierMs, totalMs, wakeMs, returnMs };
   }
 
   dispose(): void {

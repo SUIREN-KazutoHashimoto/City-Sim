@@ -272,7 +272,7 @@ export class RailNetworkPlan {
     for (const sid of clean) if (!this.stations[sid].lineIds.includes(id)) this.stations[sid].lineIds.push(id);
   }
 
-  private rebuildMetrics(line: RailLine): void {
+  rebuildMetrics(line: RailLine): void {
     line.cumulative = new Array(line.path.length).fill(0); let total = 0;
     for (let i = 1; i < line.path.length; i++) {
       total += Math.hypot(line.path[i].x - line.path[i - 1].x, line.path[i].z - line.path[i - 1].z);
@@ -281,7 +281,7 @@ export class RailNetworkPlan {
     line.length = total;
   }
 
-  private terminalLandPoint(station: RailStation, net: RoadNetwork, roadNode: number): RailPoint {
+  terminalLandPoint(station: RailStation, net: RoadNetwork, roadNode: number): RailPoint {
     const base = net.nodes[roadNode];
     let tx = 1, tz = 0;
     for (const lineId of station.lineIds) {
@@ -315,7 +315,7 @@ export class RailNetworkPlan {
     return Math.sqrt(best) + Math.min(50, edge) * 0.25;
   }
 
-  private nearestSurfaceNode(net: RoadNetwork, x: number, z: number): number {
+  nearestSurfaceNode(net: RoadNetwork, x: number, z: number): number {
     let best = -1, bestD = Infinity;
     for (const n of net.nodes) {
       let surface = false, major = false;
@@ -331,7 +331,7 @@ export class RailNetworkPlan {
     return best;
   }
 
-  private compressCollinear(points: RailPoint[]): RailPoint[] {
+  compressCollinear(points: RailPoint[]): RailPoint[] {
     if (points.length <= 2) return points.slice();
     const out: RailPoint[] = [points[0]];
     for (let i = 1; i < points.length - 1; i++) {
@@ -367,5 +367,5 @@ export class RailNetworkPlan {
     return 1;
   }
 
-  private samePoint(a: RailPoint, b: RailPoint): boolean { return Math.abs(a.x - b.x) < 0.1 && Math.abs(a.z - b.z) < 0.1; }
+  samePoint(a: RailPoint, b: RailPoint): boolean { return Math.abs(a.x - b.x) < 0.1 && Math.abs(a.z - b.z) < 0.1; }
 }

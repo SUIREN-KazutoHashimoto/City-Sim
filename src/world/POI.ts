@@ -96,13 +96,13 @@ export class POIRegistry {
   }
 
   private syncOccupancy(id: number, value: number): void {
-    const mirror = this.occupancyMirror; if (!mirror) return;
+    const mirror = this.occupancyMirror; if (!mirror || id < 0 || id >= mirror.length) return;
     if (typeof SharedArrayBuffer !== 'undefined' && mirror.buffer instanceof SharedArrayBuffer) Atomics.store(mirror, id, value);
     else mirror[id] = value;
   }
 
   private syncCapacity(id: number, value: number): void {
-    const mirror = this.capacityMirror; if (!mirror) return;
+    const mirror = this.capacityMirror; if (!mirror || id < 0 || id >= mirror.length) return;
     if (typeof SharedArrayBuffer !== 'undefined' && mirror.buffer instanceof SharedArrayBuffer) Atomics.store(mirror, id, value);
     else mirror[id] = value;
   }

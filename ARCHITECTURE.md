@@ -1,25 +1,12 @@
 # City-Sim Architecture
 
-City-Sim is a browser-based real-time city simulation built with TypeScript, three.js and Vite.
+This document describes the current implementation. **Source code is authoritative; this document follows the code.** Historical `doc/CityGeneratorV2_Phase*.md` files are not current architecture specifications.
 
-The current default scenario is a 100 km² city with 50,000 citizens, road traffic, buses, freight logistics and a working passenger railway system.
-
-For maintained Japanese documentation, start at:
-
-- `doc/README.md` — documentation index
-- `doc/現行仕様書.md` — authoritative current specification
-- `doc/基本設計書.md`
-- `doc/機能設計書.md`
-- `doc/詳細設計書.md`
-- `doc/設定ファイル仕様.md`
-
-`doc/CityGeneratorV2_Phase*.md` files are historical design records and are not the authoritative current specification.
-
-## Runtime structure
+## Runtime overview
 
 ```text
 main.ts
-  ├─ CityConfigLoader
+  ├─ CityConfigLoader / BootScreen / PreRoll
   ├─ World
   │   ├─ SimulationClock
   │   ├─ AgentStore / NeedSystem / UtilityBrain
@@ -30,155 +17,141 @@ main.ts
   │   ├─ Agent / Pedestrian / POI worker pools
   │   └─ RailPassengerIntegration
   ├─ RailNetworkPlan
-  ├─ RailRenderer
-  │   ├─ train operations / timetable / blocks / signals
-  │   └─ railway enhancement modules
+  ├─ RailRenderer + rail runtime enhancement chain
+  ├─ RailFrameScheduler
   ├─ EnhancedRenderer -> InstancedRenderer
+  ├─ VehicleVisualSmoother -> TrafficTurningTuning
   ├─ TrainLiveryOverlay
-  ├─ Inspector / Dashboard / Performance Monitor
+  ├─ External high-speed rail subsystem
+  ├─ Inspector / Dashboard / PerformanceMonitor
+  ├─ RenderFilterTuning / RenderFilterRailSplit
+  ├─ UiNoiseReduction window manager
   └─ FirstPersonController
 ```
 
-## Data-oriented simulation
+## Startup and time model
 
-Citizens and road vehicles use SoA TypedArrays. When cross-origin isolation is available, SharedArrayBuffer allows worker pools to update shared state without copying the entire population.
+1. `CityConfigLoader` reads `/config/city.json`, validates ranges and resolves the seed.
+2. `World` constructs and generates the city.
+3. The loading screen remains visible while the real simulation is pre-rolled to 08:00.
+4. Static road/building/rail geometry and dynamic visual stores are built.
+5. Dashboard, Inspector, Performance Monitor and follow controls are attached.
+6. Simulation time and `requestAnimationFrame` are decoupled. At high time scales, simulation work may be batched and rendering cadence reduced while backlog is present.
+7. `RailFrameScheduler` gives rail operations a per-frame CPU budget and carries unprocessed rail simulation seconds forward as rail backlog.
 
-`World` remains the main coordinator for citizen activities, POI reservation and multimodal transitions.
+## Data ownership
 
-Rail operations are currently maintained by `RailRenderer`, which therefore owns both railway operational state and railway rendering state. Passenger code accesses it through a smaller transit-provider bridge instead of directly depending on all renderer internals.
+Large citizen and road-vehicle state uses SoA TypedArrays. When cross-origin isolation is available, SharedArrayBuffer allows worker pools to update shared state without cloning the full population.
+
+`World` coordinates citizen decisions, trips, POI reservations, bus/logistics and multimodal transitions. `RailRenderer` currently owns both rail operational state and rail rendering state; passenger code uses a smaller transit-provider bridge instead of directly depending on all rail internals.
+
+This mixed responsibility in `RailRenderer` is current technical debt, not an intended long-term boundary.
 
 ## City generation
 
-Current city generation includes:
+Current generation includes CBD, sub-centers, residential/commercial/mixed-use districts, industry/logistics, civic facilities, parks, hierarchical roads, blocks/parcels, development intensity and POIs.
 
-- CBD and sub-centers
-- commercial and mixed-use areas
-- high/low density residential districts
-- industrial and logistics districts
-- civic facilities and parks
-- hierarchical roads: Highway > Arterial > Collector > Local > Path
-- block/parcel generation with frontage, depth, setback and development intensity
-- schools, hospitals, universities, city hall, police/fire facilities, malls, supermarkets, hotels, gas stations and stadiums
-
-Rail planning is calculated before final city development influence, then aligned to the completed road network.
-
-## Mobility
-
-Citizens can currently travel by:
-
-- walking
-- private car
-- route bus
-- railway
-
-Railway use is not a teleport abstraction. A rail passenger walks to a station entrance, follows a 3D station-access route, waits on the platform, boards an actually stopped train, rides with that train, gets off on a platform and walks back to street level. One transfer is currently supported.
-
-## Railway network
-
-The default configuration uses three trunk rail lines plus optional sub-center spurs.
-
-Rail alignment follows road corridors, but the raw road A* polyline is simplified to avoid small repeated zig-zag curves. Terminal stations are pulled away from the road center and connected through dedicated smooth approaches.
-
-### Track operation
-
-Trunk double track uses right-hand running:
+Road hierarchy:
 
 ```text
-path direction +1 -> lane -1
-path direction -1 -> lane +1
+Highway > Arterial > Collector > Local > Path
 ```
 
-Each inter-station interval has three blocks per direction. Exceptional reverse running through crossovers is reserved for delay/deadlock recovery and requires the opposing interval to be clear.
+Rail planning exists before final TOD sampling, while final rail alignment is performed after the road network exists.
 
-A stopped train keeps its arrival lane/platform for the entire dwell. Lane changes for the next direction begin only when departure routing starts.
+### Station-area clearance
 
-### Signals
+`RailStationClearance` clears only buildings/parking that intersect the actual rail envelope. It does not convert whole station blocks into parks. Around Central/SubCenter stations, safe non-facility frontage buildings are restyled as 2–4 floor Food/Retail/Leisure-oriented low-rise commercial buildings.
 
-A physical signal describes the block immediately beyond it:
+## Road mobility
 
-- red: immediate block unavailable
-- yellow: immediate block clear, following block unavailable
-- green: two blocks ahead clear
+Walking uses the SidewalkNetwork; cars, trucks and buses use RoadNetwork and TrafficSystem. Signals, pedestrian blocking and IDM-style following remain edge based.
 
-Compatible reservations made for the same direction/lane are treated as passable for that route.
+### Vehicle cornering
 
-Block boundaries inside station platforms remain operational but their physical signal posts are hidden, preventing signals from standing in the middle of a platform.
+`TrafficTurningTuning` replaces the old “position snaps to the next straight edge while heading catches up later” behavior. Intersection turns use one cubic Bezier trajectory whose tangent also defines vehicle heading.
 
-### Services
+Nominal turn radii:
 
-Trunk lines operate local, rapid and limited services. Fleet size scales with station count. Reserve local trains are used during the morning and evening peaks.
+- passenger car: 10.5 m
+- truck: 15 m
+- bus: 18 m
 
-Typical service window:
+The upcoming turn temporarily caps the free-road speed target; IDM/signal/following logic remains responsible for acceleration and spacing. `VehicleVisualSmoother` performs only render-time interpolation and does not alter the traffic simulation state.
 
-- 05:00 service start
-- 23:30 last-departure baseline
-- 07:00–09:30 morning peak
-- 17:00–19:30 evening peak
+## Conventional railway planning
 
-Train motion uses a single scalar `run.distance` as the consist position. All car poses are derived from it. Per-car independent following/smoothing must not be introduced because it breaks consist stability.
+The normal configuration creates three trunk lines and optional sub-center spurs.
 
-## Terminals and depots
+### Running line vs station metadata
 
-Terminal stations use a four-track fan. During a terminal dwell, the assigned physical platform remains stable and the train converges to its normal right-hand main line after departure.
+This distinction is important:
 
-Depots are generated only at real `RailStationKind.Terminal` stations. A depot is currently short and wide rather than a long city-center yard:
+- `station.plannedX/Z` remains the planning/TOD location.
+- `station.x/z` may stay off the road for terminal/open-space station context.
+- `station.roadNode` is the road-network connection.
+- **`line.path` is constructed from road A* node positions and is not pulled toward the station metadata position.**
 
-- 8 storage tracks
-- 4.4 m track spacing
-- about 260 m depth
-- shared lead and ladder
+Only near-collinear road points are removed. The old wide “38 m trunk / 28 m spur corridor chord simplification” and station-specific S-curve insertion are not current behavior.
 
-Spur fleets may use the nearest real terminal depot.
+`RailCurveTuning` only softens source vertices sharper than 90 degrees before the normal rail smoothing step.
 
-## Rail passengers
+### Spur rules
 
-Rail routing considers nearby origin/destination stations, direct trips and one-transfer trips. Walking access, initial waiting time, train travel and transfer time are compared to pure walking.
+`RailSpurConsistency` ensures that:
 
-Passenger rail states extend the Agent state machine:
+- a spur branches from a trunk station;
+- very short candidates promote the nearby trunk station instead of creating a one-stop stub;
+- a real spur has at least junction + intermediate + sub-center stations;
+- rendered spur rail and spur trains use the same track-offset function.
 
-```text
-ToRailStation -> WaitingTrain -> OnTrain
-```
+## Railway operations
 
-Passenger-specific board/alight/train arrays live in a World-side rail passenger data store rather than expanding AgentStore with all rail details.
+Trunk lines are double track with right-hand operation. Rail blocks, signals, dispatch reservations, crossovers and local passing loops are managed by RailRenderer.
 
-### Station circulation
+The consist position invariant is one scalar `run.distance`. All cars are sampled from the same smoothed line around that scalar position. Independent per-car following must not be introduced.
 
-Multi-level interchange stations connect adjacent platform levels rather than giving every level a separate street staircase:
+The timetable uses a 180-second repeating terminal pattern and a 15-second quantum. Scheduled arrival/departure and normal dwell values are quantized to the same 15-second grid by `RailStationRuntimeV033`.
 
-```text
-upper platform
-  -> next lower platform
-  -> ...
-  -> lowest platform
-  -> street
-```
+Outside service hours and on depot release, trains use non-revenue `deadhead` operation. Deadhead trains stop only at endpoints, use short terminal dwell, and are shown as 回送 states through inspection.
 
-Inter-platform stairs are constrained to platform-safe geometry and should not cross train clearance diagonally.
+## Station geometry
 
-Ground access keeps height while crossing road space, moves outside the roadway, and only then descends to street level.
+`RailStationArchitecture` suppresses the legacy platform/roof geometry and owns the visible station slab/canopy.
 
-## Railway rendering
+Key effective geometry:
 
-Rail rendering is built from instanced primitive geometry.
+- platform top: rail reference + 1.05 m
+- roof center: +4.45 m
+- roof thickness: 0.18 m
+- terminal platform minimum length: 270 m
+- siding/outside track offset: 10.4 m
+- terminal platform width: 4.8 m
+- ordinary side platforms are slightly wider than the original base width; island platforms receive a smaller width increase
 
-Current visible features include:
+Platforms and station components follow the final smoothed running line, so gentle station curves are supported. The station is not forced into a separate straight path that can diverge from the rail.
 
-- route/service train stripes
-- station and track lighting
-- train head/tail lamp pairs attached to the actual first/last car matrices
-- green departure indicators
-- blinking amber approach indicators
-- road-aware elevated support columns/portal beams
-- station exterior architecture built from thin walls, glazing, frames and roof elements
+Station architecture remains hollow/walkable and uses thin walls/glazing/fascia rather than a solid filled box.
 
-Station architecture must remain hollow/walkable; it must not be replaced by one solid box filling the interior.
+### Station equipment
 
-## Rail extension chain
+Current platform equipment includes benches, vending machines, emissive fluorescent fixtures and a real PointLight per platform. Ceiling-hung departure boards are small, perpendicular to the platform axis and display up to three departures. Island platforms place the two track boards side-by-side.
 
-The railway is currently implemented through `RailRenderer` plus prototype-patch enhancement modules. Import order is behaviorally significant.
+## Train rendering and lighting
 
-Current high-level order:
+`TrainLiveryOverlay` copies the final RailRenderer car matrices into visible shell/window/route/service meshes; it does not invent another train trajectory.
+
+Conventional train headlights include visible lamps plus a pooled set of real SpotLights aimed forward. Rail/station indication lights are separate from the departure board.
+
+## External high-speed rail
+
+The external high-speed subsystem is operational rather than decorative. It has its own running trains, dwell/service schedule, passenger load and central-station visitor exchange, while exposing train snapshots through `HighSpeedRailRegistry` for Inspector/follow support.
+
+The former always-visible external-line status panel is intentionally removed from the normal UI. High-speed train status remains available through selection/tracking.
+
+## Rail enhancement chain
+
+Import order is behaviorally significant. Current high-level order from `TrainLiveryOverlay.ts` is:
 
 ```text
 RailPlanningEnhancements
@@ -195,39 +168,52 @@ RailPassengerAutoAttach
 RailPassengerVisualConsistency
 RailPassengerDemand
 TrainPassengerInspector
+RailStationRuntimeV033
+  ├─ RailStationOperationsTuning
+  └─ RailSpurConsistency
 ```
 
-`RailPassengerAutoAttach` additionally loads stair-clearance, ground-stair and passenger-integration patches.
+`RailPassengerAutoAttach` also loads stair-clearance, ground-stair and passenger-integration patches. Later patches may wrap methods replaced by earlier patches, so import order changes require behavior review.
 
-Long-term cleanup should fold stabilized behavior into explicit rail-operation/station models and reduce prototype-patch ordering dependencies.
+## Rail passengers
 
-## Dashboard and inspection
+Railway use is physical rather than teleport-based: citizens walk to station access, use 3D station circulation, wait on the platform, board an actually stopped train, ride with it, alight on a platform and return to street level. One transfer is currently supported.
 
-The 24-hour activity dashboard uses 288 five-minute bins and currently displays:
+Passenger rail state is held in World-side sidecar arrays/maps rather than expanding every AgentStore row with all rail-specific fields.
 
-- home
-- work
-- food
-- leisure/shopping
-- driving
-- bus
-- railway
-- walking
-- idle
+## Rendering filters
 
-The railway series counts only citizens actually in `OnTrain`.
+Validation rendering is grouped by parent `THREE.Group` so visibility cannot be re-enabled accidentally by child lighting/update code. Categories include ground, roads/signals/bus stops, buildings/parks/facilities, rail infrastructure, road vehicles, pedestrians and rolling stock.
 
-Train inspection includes train service/state plus passenger count, capacity and load percentage. Current passenger capacity is a simplified 120 people per car.
+Rail infrastructure (`線路・駅設備`) and rolling stock (`列車`) are independent. The train category includes conventional visible train meshes, headlights/SpotLights and external high-speed rolling stock. Filtering changes rendering/sync work only; the simulation continues.
+
+## Debug UI/window management
+
+Debug/validation panels are managed as movable/resizable windows:
+
+- statistics/FPS HUD
+- time/speed dashboard
+- render filter
+- Performance Monitor
+- pinned tracking information
+
+Window position, size and visibility persist in localStorage. A bottom-right `UI` launcher provides GUI visibility toggles and layout reset. `P`, `F9` and `G` shortcuts remain available.
 
 ## Performance principles
 
 - SoA TypedArrays for large dynamic populations
-- SharedArrayBuffer where available
-- worker pools for expensive population/POI/pedestrian work
+- SharedArrayBuffer and worker pools where available
 - GPU instancing for repeated geometry
-- static geometry generated once
-- rendering/simulation LOD
-- spatial indexes instead of repeated global scans
-- performance instrumentation separating render and simulation costs
+- static geometry generated once when possible
+- simulation/render LOD
+- spatial indexes and A* route cache
+- active/dirty-set clearing instead of repeated full-array clears in hot paths
+- performance instrumentation separating simulation, pre-render, render and GPU costs
 
-The default 100 km² / 50,000 citizen configuration is also a stress-test configuration. See `doc/性能モニタ仕様.md` for runtime diagnostics.
+## Known architectural debt
+
+- RailRenderer mixes operations and rendering.
+- The rail prototype-patch chain is long and import-order dependent.
+- Some runtime tuning is applied by patching private implementation methods/fields.
+- The configured `railStationSpacing` currently overrides the attempted default `×1.5` tuning, so normal launches still use 525 m.
+- Station access/architecture remains procedural rather than using one explicit shared station-geometry model.

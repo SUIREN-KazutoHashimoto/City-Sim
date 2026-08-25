@@ -45,14 +45,38 @@ export class AgentStore {
     this.boardStop = i32(); this.boardStop.fill(-1); this.alightStop = i32(); this.alightStop.fill(-1); this.busRoute = i32(); this.busRoute.fill(-1);
   }
 
+  /**
+   * Spawn-time attributes must be reproducible for a fixed city/population layout.
+   * Derive an independent deterministic stream from agent id + spawn position instead
+   * of Math.random(), which otherwise changes later seeded population RNG consumption.
+   */
+  private static spawnSeed(agent: number, x: number, z: number): number {
+    const xi = Math.round(x * 16) | 0, zi = Math.round(z * 16) | 0;
+    return (
+      Math.imul((agent + 1) | 0, 0x9e3779b1)
+      ^ Math.imul(xi, 0x85ebca6b)
+      ^ Math.imul(zi, 0xc2b2ae35)
+    ) >>> 0;
+  }
+
+  private static spawnRandom(seed: number, salt: number): number {
+    let v = (seed ^ Math.imul(salt | 0, 0x27d4eb2d)) | 0;
+    v = Math.imul(v ^ (v >>> 16), 0x7feb352d);
+    v = Math.imul(v ^ (v >>> 15), 0x846ca68b);
+    return ((v ^ (v >>> 16)) >>> 0) / 4294967296;
+  }
+
   spawn(x: number, z: number): number {
     if (this.count >= this.capacity) return -1;
     const i = this.count++;
     this.posX[i] = x; this.posZ[i] = z; this.velX[i] = 0; this.velZ[i] = 0;
-    this.maxSpeed[i] = 1.2 + Math.random() * 0.6;
-    this.energy[i] = 0.5 + Math.random() * 0.5; this.hunger[i] = 0.5 + Math.random() * 0.5;
-    this.social[i] = 0.4 + Math.random() * 0.6; this.hygiene[i] = 0.7 + Math.random() * 0.3; this.fun[i] = 0.4 + Math.random() * 0.6;
-    this.wealth[i] = Math.random(); this.age[i] = 16 + Math.floor(Math.random() * 70); this.extrovert[i] = Math.random();
+
+    const seed = AgentStore.spawnSeed(i, this.posX[i], this.posZ[i]);
+    const r = (salt: number): number => AgentStore.spawnRandom(seed, salt);
+    this.maxSpeed[i] = 1.2 + r(1) * 0.6;
+    this.energy[i] = 0.5 + r(2) * 0.5; this.hunger[i] = 0.5 + r(3) * 0.5;
+    this.social[i] = 0.4 + r(4) * 0.6; this.hygiene[i] = 0.7 + r(5) * 0.3; this.fun[i] = 0.4 + r(6) * 0.6;
+    this.wealth[i] = r(7); this.age[i] = 16 + Math.floor(r(8) * 70); this.extrovert[i] = r(9);
     this.state[i] = AgentState.Idle; this.goalCategory[i] = 255; this.activityExit[i] = 0;
     return i;
   }

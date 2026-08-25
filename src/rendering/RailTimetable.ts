@@ -8,11 +8,11 @@ export type TimetableService = 'local' | 'rapid' | 'limited';
  */
 export class RailTimetable {
   static readonly CYCLE_SECONDS = 180;
+  static readonly QUANTUM_SECONDS = 15;
 
   /**
    * 終端駅の次回発車スロット。
-   * 10駅あたり 普通5 / 快速3 / 特急1 程度の編成密度でも同一時刻に集中しないよう、
-   * 種別ごとに複数の発車スロットを持つ。
+   * 全て15秒グリッド上に置き、種別と方向・路線位相だけをずらす。
    */
   nextTerminalDeparture(
     earliest: number,
@@ -22,20 +22,21 @@ export class RailTimetable {
     trainOrdinal: number,
   ): number {
     const cycle = RailTimetable.CYCLE_SECONDS;
+    const quantum = RailTimetable.QUANTUM_SECONDS;
     const lineOffset = this.lineOffset(lineId);
-    const directionOffset = direction > 0 ? 0 : 9;
+    const directionOffset = direction > 0 ? 0 : quantum;
     const slots = service === 'limited'
-      ? [5]
+      ? [0]
       : service === 'rapid'
-        ? [24, 78, 132]
-        : [42, 66, 96, 120, 154];
+        ? [30, 90, 150]
+        : [15, 45, 75, 105, 135];
     const slot = slots[Math.abs(trainOrdinal) % slots.length];
-    const overflow = Math.floor(Math.abs(trainOrdinal) / slots.length) * 11;
+    const overflow = Math.floor(Math.abs(trainOrdinal) / slots.length) * quantum;
     const shifted = earliest + lineOffset;
     const cycleStart = Math.floor(shifted / cycle) * cycle;
     let target = cycleStart + directionOffset + slot + overflow - lineOffset;
     if (target < earliest - 1e-6) target += cycle;
-    return target;
+    return Math.ceil((target - 1e-6) / quantum) * quantum;
   }
 
   /** 発車・進路予約順のソートキー。小さいほど先。 */
@@ -56,7 +57,6 @@ export class RailTimetable {
   }
 
   private lineOffset(lineId: number): number {
-    // 共有駅へ複数路線が同時刻に集中しすぎないよう、路線単位で発車位相をずらす。
-    return (Math.abs(lineId) * 17) % 31;
+    return (Math.abs(lineId) % 4) * RailTimetable.QUANTUM_SECONDS;
   }
 }

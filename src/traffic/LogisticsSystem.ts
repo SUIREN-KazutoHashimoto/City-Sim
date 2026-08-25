@@ -15,19 +15,41 @@ export class LogisticsSystem {
   }
   update(dt: number): void {
     const vs = this.vs;
+    let shortageCandidates: number[] | null = null;
+    const shortages = (): number[] => {
+      if (shortageCandidates !== null) return shortageCandidates;
+      shortageCandidates = [];
+      for (const p of this.poi.all()) if (p.maxStock > 0 && p.stock < p.maxStock * 0.6) shortageCandidates.push(p.id);
+      return shortageCandidates;
+    };
+
     for (let t = 0; t < this.trucks.length; t++) {
       const tr = this.trucks[t]; const v = tr.vehicle;
       switch (tr.phase) {
-        case 'idle': { const targets = this.pickTargets(tr.gateX, tr.gateZ, 6); if (targets.length === 0) break; tr.route = targets; tr.routeIdx = 0; tr.cargo = tr.capacity; this.goToNextStore(tr); break; }
+        case 'idle': { const targets = this.pickTargets(tr.gateX, tr.gateZ, 6, shortages()); if (targets.length === 0) break; tr.route = targets; tr.routeIdx = 0; tr.cargo = tr.capacity; this.goToNextStore(tr); break; }
         case 'toStore': { if (vs.state[v] === VehicleState.Arrived) { tr.phase = 'unloading'; tr.unloadT = this.unloadSeconds; vs.speed[v] = 0; } break; }
-        case 'unloading': { tr.unloadT -= dt; if (tr.unloadT <= 0) { const store = this.poi.get(tr.route[tr.routeIdx]); const need = store.maxStock - store.stock; const give = Math.min(need, tr.cargo); store.stock += give; tr.cargo -= give; tr.routeIdx++; if (tr.routeIdx >= tr.route.length || tr.cargo <= 0) this.returnToGate(tr); else this.goToNextStore(tr); } break; }
+        case 'unloading': {
+          tr.unloadT -= dt;
+          if (tr.unloadT <= 0) {
+            const store = this.poi.get(tr.route[tr.routeIdx]); const need = store.maxStock - store.stock; const give = Math.min(need, tr.cargo); store.stock += give; tr.cargo -= give;
+            // A later idle truck in this same update must observe the replenished stock exactly as it
+            // did before candidate sharing was introduced.
+            shortageCandidates = null;
+            tr.routeIdx++; if (tr.routeIdx >= tr.route.length || tr.cargo <= 0) this.returnToGate(tr); else this.goToNextStore(tr);
+          }
+          break;
+        }
         case 'returning': { if (vs.state[v] === VehicleState.Arrived) { tr.phase = 'idle'; vs.speed[v] = 0; vs.posX[v] = tr.gateX; vs.posZ[v] = tr.gateZ; } break; }
       }
     }
   }
-  private pickTargets(gx: number, gz: number, n: number): number[] {
-    const list = this.poi.all(); const cand: { id: number; d: number }[] = [];
-    for (const p of list) { if (p.maxStock <= 0) continue; if (p.stock >= p.maxStock * 0.6) continue; const d = (p.x - gx) ** 2 + (p.z - gz) ** 2; cand.push({ id: p.id, d }); }
+  private pickTargets(gx: number, gz: number, n: number, candidates: readonly number[]): number[] {
+    const cand: { id: number; d: number }[] = [];
+    for (let i = 0; i < candidates.length; i++) {
+      const p = this.poi.get(candidates[i]);
+      const d = (p.x - gx) ** 2 + (p.z - gz) ** 2;
+      cand.push({ id: p.id, d });
+    }
     cand.sort((a, b) => a.d - b.d);
     const out: number[] = []; for (let i = 0; i < cand.length && out.length < n; i++) if (this.rng() < 0.85) out.push(cand[i].id);
     return out;

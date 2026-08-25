@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import '../traffic/TrafficTurningTuning';
 import { VehicleStore } from '../traffic/VehicleStore';
 
 /**
@@ -20,8 +21,10 @@ export class VehicleVisualSmoother {
   }
 
   update(vs: VehicleStore, dt: number): void {
-    const posAlpha = 1 - Math.exp(-Math.max(0, dt) * 9);
-    const rotAlpha = 1 - Math.exp(-Math.max(0, dt) * 7);
+    // The traffic layer now supplies a continuous corner arc. Keep render interpolation responsive
+    // enough that heading does not visibly lag behind the curved position and look like side-slip.
+    const posAlpha = 1 - Math.exp(-Math.max(0, dt) * 11);
+    const rotAlpha = 1 - Math.exp(-Math.max(0, dt) * 13);
     for (let v = 0; v < vs.count; v++) {
       const tx = vs.posX[v], tz = vs.posZ[v], th = vs.heading[v];
       const dx = tx - this.x[v], dz = tz - this.z[v];

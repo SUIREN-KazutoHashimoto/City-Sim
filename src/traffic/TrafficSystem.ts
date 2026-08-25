@@ -8,11 +8,14 @@ interface EdgePointRoute { path: number[]; targetT: number; cost: number; }
 export class TrafficSystem {
   private astar: AStar;
   private arrivalT: Float32Array;
+  private readonly activeEdges: number[] = [];
+  private readonly edgeSeen: Uint8Array;
   pedBlockedFn: ((node: number) => boolean) | null = null;
 
   constructor(private net: RoadNetwork, private vs: VehicleStore, private signals: SignalSystem) {
     this.astar = new AStar(net, 'drive');
     this.arrivalT = new Float32Array(vs.capacity); this.arrivalT.fill(1);
+    this.edgeSeen = new Uint8Array(net.edges.length);
   }
 
   dispatch(vehicle: number, sx: number, sz: number, gx: number, gz: number): boolean {
@@ -104,7 +107,7 @@ export class TrafficSystem {
 
   update(dt: number): void {
     const vs = this.vs; this.rebuildOccupants();
-    for (let e = 0; e < this.net.edges.length; e++) {
+    for (const e of this.activeEdges) {
       const occ = this.net.edges[e].occupants; if (occ.length === 0) continue;
       for (let k = 0; k < occ.length; k++) {
         const v = occ[k]; if (vs.state[v] !== VehicleState.Driving) continue;
@@ -186,8 +189,22 @@ export class TrafficSystem {
   }
 
   private rebuildOccupants(): void {
-    const edges = this.net.edges; for (let e = 0; e < edges.length; e++) edges[e].occupants.length = 0;
-    const vs = this.vs; for (let v = 0; v < vs.count; v++) { if (vs.state[v] !== VehicleState.Driving) continue; const e = vs.edge[v]; if (e >= 0) edges[e].occupants.push(v); }
-    for (let e = 0; e < edges.length; e++) { const occ = edges[e].occupants; if (occ.length > 1) occ.sort((a, b) => vs.segT[a] - vs.segT[b]); }
+    const edges = this.net.edges;
+    for (let i = 0; i < this.activeEdges.length; i++) {
+      const e = this.activeEdges[i]; edges[e].occupants.length = 0; this.edgeSeen[e] = 0;
+    }
+    this.activeEdges.length = 0;
+
+    const vs = this.vs;
+    for (let v = 0; v < vs.count; v++) {
+      if (vs.state[v] !== VehicleState.Driving) continue;
+      const e = vs.edge[v]; if (e < 0) continue;
+      if (this.edgeSeen[e] === 0) { this.edgeSeen[e] = 1; this.activeEdges.push(e); }
+      edges[e].occupants.push(v);
+    }
+    for (let i = 0; i < this.activeEdges.length; i++) {
+      const occ = edges[this.activeEdges[i]].occupants;
+      if (occ.length > 1) occ.sort((a, b) => vs.segT[a] - vs.segT[b]);
+    }
   }
 }
