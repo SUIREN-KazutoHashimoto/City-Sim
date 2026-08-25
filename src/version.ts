@@ -2,6 +2,7 @@ import './generation/CityDiversityTuning';
 import './generation/ParkPriorityTuning';
 import './world/ExternalVisitorSystem';
 import './rendering/HighSpeedCapacityTuning';
+import './rendering/RailPassengerPlatformBoundsPatch';
 import './rendering/HighSpeedStationConnection';
 import './generation/RailRuralStationSpacing';
 import './rendering/VisitorAccessoryRendering';
@@ -16,4 +17,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.69';
+export const APP_VERSION = '0.1.70';
