@@ -112,16 +112,26 @@ function defaultTop(config: WindowConfig): number {
 
 function clampWindow(shell: HTMLDivElement): void {
   const rect = shell.getBoundingClientRect();
-  const maxLeft = Math.max(0, window.innerWidth - Math.min(rect.width, window.innerWidth));
+  const width = rect.width > 1 ? rect.width : Math.max(1, Number.parseFloat(shell.style.width) || 1);
+  const maxLeft = Math.max(0, window.innerWidth - Math.min(width, window.innerWidth));
   const maxTop = Math.max(0, window.innerHeight - 30);
-  const left = Math.min(maxLeft, Math.max(0, Number.parseFloat(shell.style.left) || rect.left));
-  const top = Math.min(maxTop, Math.max(0, Number.parseFloat(shell.style.top) || rect.top));
+  const parsedLeft = Number.parseFloat(shell.style.left);
+  const parsedTop = Number.parseFloat(shell.style.top);
+  const left = Math.min(maxLeft, Math.max(0, Number.isFinite(parsedLeft) ? parsedLeft : rect.left));
+  const top = Math.min(maxTop, Math.max(0, Number.isFinite(parsedTop) ? parsedTop : rect.top));
   shell.style.left = `${left}px`;
   shell.style.top = `${top}px`;
 }
 
 function persistWindow(item: ManagedWindow): void {
+  if (item.shell.style.display === 'none') {
+    const existing = saved[item.config.id] ?? {};
+    saved[item.config.id] = { ...existing, visible: item.desiredVisible };
+    saveAll();
+    return;
+  }
   const rect = item.shell.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return;
   saved[item.config.id] = {
     left: Number.parseFloat(item.shell.style.left) || rect.left,
     top: Number.parseFloat(item.shell.style.top) || rect.top,
@@ -138,7 +148,8 @@ function nativeDisplayed(item: ManagedWindow): boolean {
 
 function syncVisibility(item: ManagedWindow): void {
   const nativeOk = item.config.nativeVisibility ? nativeDisplayed(item) : true;
-  item.shell.style.display = item.desiredVisible && nativeOk ? 'flex' : 'none';
+  const display = item.desiredVisible && nativeOk ? 'flex' : 'none';
+  if (item.shell.style.display !== display) item.shell.style.display = display;
   updateDock();
 }
 
@@ -163,6 +174,10 @@ function setDesired(id: WindowId, visible: boolean): void {
   if (item.config.nativeVisibility && item.config.hotkey) ensureNativeVisibility(item);
   else syncVisibility(item);
   persistWindow(item);
+  if (visible) {
+    bringToFront(item.shell);
+    clampWindow(item.shell);
+  }
 }
 
 function toggleWindow(id: WindowId): void {
@@ -173,6 +188,48 @@ function toggleWindow(id: WindowId): void {
 function bringToFront(shell: HTMLDivElement): void {
   zCounter++;
   shell.style.zIndex = String(zCounter);
+}
+
+function activityGraphSection(): HTMLDivElement | null {
+  const dashboard = managed.get('dashboard')?.root;
+  if (!dashboard) return null;
+  return Array.from(dashboard.children).find((el): el is HTMLDivElement =>
+    el instanceof HTMLDivElement && (el.textContent ?? '').includes('時間帯グラフ'),
+  ) ?? null;
+}
+
+function activityGraphVisible(): boolean {
+  const section = activityGraphSection();
+  return !!section && section.style.display !== 'none';
+}
+
+function syncDashboardGraphSize(): void {
+  const item = managed.get('dashboard');
+  const section = activityGraphSection();
+  if (!item || !section) return;
+
+  if (section.style.display !== 'none') {
+    const currentHeight = Number.parseFloat(item.shell.style.height) || item.config.defaultHeight;
+    const available = Math.max(72, window.innerHeight - (Number.parseFloat(item.shell.style.top) || 0) - 8);
+    const required = Math.min(available, Math.max(240, item.root.scrollHeight + 24));
+    if (currentHeight + 1 < required) {
+      if (item.shell.dataset.graphAutoExpanded !== 'true') item.shell.dataset.graphPreviousHeight = item.shell.style.height;
+      item.shell.dataset.graphAutoExpanded = 'true';
+      item.shell.style.height = `${required}px`;
+    }
+  } else if (item.shell.dataset.graphAutoExpanded === 'true') {
+    const previous = Number.parseFloat(item.shell.dataset.graphPreviousHeight ?? '');
+    item.shell.style.height = `${Number.isFinite(previous) && previous >= 72 ? previous : item.config.defaultHeight}px`;
+    delete item.shell.dataset.graphAutoExpanded;
+    delete item.shell.dataset.graphPreviousHeight;
+  }
+  clampWindow(item.shell);
+  updateDock();
+}
+
+function toggleActivityGraph(): void {
+  window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyG', key: 'g' }));
+  window.setTimeout(syncDashboardGraphSize, 0);
 }
 
 function installDrag(header: HTMLDivElement, item: ManagedWindow): void {
@@ -265,6 +322,9 @@ function register(config: WindowConfig, root: HTMLDivElement): void {
   installDrag(header, item);
   shell.addEventListener('pointerdown', () => bringToFront(shell));
   const resizeObserver = new ResizeObserver(() => {
+    if (shell.style.display === 'none') return;
+    const rectNow = shell.getBoundingClientRect();
+    if (rectNow.width < 2 || rectNow.height < 2) return;
     clampWindow(shell);
     window.clearTimeout(Number(shell.dataset.persistTimer ?? '0'));
     const timer = window.setTimeout(() => persistWindow(item), 180);
@@ -283,6 +343,7 @@ function register(config: WindowConfig, root: HTMLDivElement): void {
     if (!graphCollapsedOnce && (root.textContent ?? '').includes('時間帯グラフ')) {
       graphCollapsedOnce = true;
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyG', key: 'g' }));
+      window.setTimeout(syncDashboardGraphSize, 0);
     }
   }
 
@@ -294,13 +355,15 @@ function register(config: WindowConfig, root: HTMLDivElement): void {
 
 function findAndRegister(): void {
   removeExternalHighSpeedStatus();
+  const before = managed.size;
   for (const config of configs) {
     if (managed.has(config.id)) continue;
     const root = candidate(config.id);
     if (root) register(config, root);
   }
+  const hadDock = !!dock;
   ensureDock();
-  updateDock();
+  if (managed.size !== before || !hadDock) updateDock();
 }
 
 function resetLayouts(): void {
@@ -317,6 +380,8 @@ function resetLayouts(): void {
     else syncVisibility(item);
     persistWindow(item);
   }
+  if (activityGraphVisible()) toggleActivityGraph();
+  window.setTimeout(syncDashboardGraphSize, 0);
 }
 
 function dockButton(label: string, onClick: () => void): HTMLButtonElement {
@@ -331,12 +396,12 @@ function ensureDock(): void {
   if (dock || typeof document === 'undefined') return;
   dock = document.createElement('div');
   dock.dataset.citysimWindowDock = 'true';
-  dock.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:220;font:11px ui-monospace,monospace;user-select:none';
+  dock.style.cssText = 'position:fixed;left:8px;bottom:44px;z-index:222;font:11px ui-monospace,monospace;user-select:none';
   const trigger = document.createElement('button');
-  trigger.type = 'button'; trigger.textContent = 'UI'; trigger.title = 'ウィンドウ表示/非表示';
-  trigger.style.cssText = 'float:right;padding:5px 9px;border:1px solid #536980;border-radius:6px;background:rgba(12,20,29,.94);color:#eef5ff;font:700 11px ui-monospace,monospace;cursor:pointer';
+  trigger.type = 'button'; trigger.textContent = 'UIメニュー'; trigger.title = 'ウィンドウ表示/非表示';
+  trigger.style.cssText = 'padding:5px 9px;border:1px solid #536980;border-radius:6px;background:rgba(12,20,29,.94);color:#eef5ff;font:700 11px ui-monospace,monospace;cursor:pointer';
   dockMenu = document.createElement('div');
-  dockMenu.style.cssText = 'display:none;position:absolute;right:0;bottom:32px;width:185px;padding:7px;border:1px solid #43566b;border-radius:7px;background:rgba(8,13,19,.96);box-shadow:0 8px 25px rgba(0,0,0,.4)';
+  dockMenu.style.cssText = 'display:none;position:absolute;left:0;bottom:32px;width:185px;padding:7px;border:1px solid #43566b;border-radius:7px;background:rgba(8,13,19,.96);box-shadow:0 8px 25px rgba(0,0,0,.4)';
   trigger.addEventListener('click', () => { if (dockMenu) dockMenu.style.display = dockMenu.style.display === 'none' ? 'block' : 'none'; });
   dock.append(dockMenu, trigger);
   document.body.appendChild(dock);
@@ -344,7 +409,9 @@ function ensureDock(): void {
 
 function updateDock(): void {
   if (!dockMenu) return;
+  const wasOpen = dockMenu.style.display !== 'none';
   dockMenu.replaceChildren();
+  dockMenu.style.display = wasOpen ? 'block' : 'none';
   const title = document.createElement('div');
   title.textContent = 'ウィンドウ';
   title.style.cssText = 'font-weight:700;color:#eef5ff;margin:1px 2px 6px';
@@ -358,7 +425,8 @@ function updateDock(): void {
     else if (active) button.style.background = '#284a6b';
     dockMenu.appendChild(button);
   }
-  const graph = dockButton('活動グラフ 表示/非表示 [G]', () => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyG', key: 'g' })));
+  const graphActive = activityGraphVisible();
+  const graph = dockButton(`${graphActive ? '✓' : '○'} 活動グラフ [G]`, toggleActivityGraph);
   graph.style.marginTop = '6px';
   dockMenu.appendChild(graph);
   const reset = dockButton('ウィンドウ配置をリセット', resetLayouts);
@@ -369,18 +437,25 @@ function updateDock(): void {
 function scheduleScan(): void {
   if (scheduled) return;
   scheduled = true;
-  window.requestAnimationFrame(() => {
+  window.setTimeout(() => {
     scheduled = false;
     findAndRegister();
-  });
+  }, 0);
 }
 
+// Only watch direct body children. Watching the whole subtree caused updateDock()
+// to observe its own replaceChildren() and continuously rebuild the menu DOM.
 const observer = new MutationObserver(scheduleScan);
-observer.observe(document.body, { childList: true, subtree: true });
+observer.observe(document.body, { childList: true });
 window.addEventListener('resize', () => {
   for (const item of managed.values()) clampWindow(item.shell);
+  syncDashboardGraphSize();
 });
 window.addEventListener('keydown', (event) => {
+  if (event.code === 'KeyG') {
+    window.setTimeout(syncDashboardGraphSize, 0);
+    return;
+  }
   if (internalHotkey) return;
   const id: WindowId | null = event.code === 'KeyP' ? 'performance' : event.code === 'F9' ? 'filter' : null;
   if (!id) return;
@@ -392,4 +467,4 @@ window.addEventListener('keydown', (event) => {
   }, 0);
 });
 window.setInterval(removeExternalHighSpeedStatus, 2000);
-window.requestAnimationFrame(findAndRegister);
+window.setTimeout(findAndRegister, 0);
