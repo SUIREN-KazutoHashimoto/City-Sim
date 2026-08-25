@@ -11,6 +11,7 @@ import './traffic/TaxiIntegration';
 import './rendering/TaxiRendering';
 import './rendering/VisitorInspectorTuning';
 import './rendering/TaxiInspectorTuning';
+import './rendering/TaxiDashboardTuning';
 import './rendering/RenderFilterTuning';
 import './rendering/RenderFilterRailSplit';
 import './rendering/RenderFilterHighSpeedTrainFix';
@@ -20,4 +21,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.71';
+export const APP_VERSION = '0.1.72';

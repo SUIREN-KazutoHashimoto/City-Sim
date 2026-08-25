@@ -55,6 +55,7 @@ function hash01(value: number): number {
 export class TaxiSystem {
   private readonly taxis: TaxiRecord[] = [];
   readonly agentTaxi: Int32Array;
+  private readonly vehicleTaxi: Int32Array;
   private built = false;
 
   constructor(
@@ -66,6 +67,8 @@ export class TaxiSystem {
   ) {
     this.agentTaxi = new Int32Array(store.capacity);
     this.agentTaxi.fill(-1);
+    this.vehicleTaxi = new Int32Array(vehicles.capacity);
+    this.vehicleTaxi.fill(-1);
     taxiByVehicles.set(vehicles, this);
     taxiByStore.set(store, this);
   }
@@ -113,8 +116,10 @@ export class TaxiSystem {
       this.vehicles.aMax[vehicle] = 1.65;
       this.vehicles.bComf[vehicle] = 2.35;
       this.vehicles.t0[vehicle] = 1.25;
+      const taxiId = this.taxis.length;
+      this.vehicleTaxi[vehicle] = taxiId;
       this.taxis.push({
-        id: this.taxis.length,
+        id: taxiId,
         vehicle,
         phase: 'idle',
         passenger: -1,
@@ -211,19 +216,15 @@ export class TaxiSystem {
     }
   }
 
+  forEachVehicle(fn: (info: TaxiVehicleInfo) => void): void {
+    for (const taxi of this.taxis) fn(this.snapshot(taxi));
+  }
+
   vehicleInfo(vehicle: number): TaxiVehicleInfo | null {
-    for (const taxi of this.taxis) {
-      if (taxi.vehicle !== vehicle) continue;
-      return {
-        taxiId: taxi.id,
-        vehicle: taxi.vehicle,
-        phase: taxi.phase,
-        passenger: taxi.passenger,
-        requestedAt: taxi.requestedAt,
-        tripDistance: taxi.tripDistance,
-      };
-    }
-    return null;
+    if (vehicle < 0 || vehicle >= this.vehicleTaxi.length) return null;
+    const taxiId = this.vehicleTaxi[vehicle];
+    if (taxiId < 0 || taxiId >= this.taxis.length) return null;
+    return this.snapshot(this.taxis[taxiId]);
   }
 
   passengerInfo(agent: number): TaxiPassengerInfo | null {
@@ -235,6 +236,17 @@ export class TaxiSystem {
       taxiId,
       vehicle: taxi.vehicle,
       phase: taxi.phase === 'occupied' ? 'onboard' : 'waiting',
+      requestedAt: taxi.requestedAt,
+      tripDistance: taxi.tripDistance,
+    };
+  }
+
+  private snapshot(taxi: TaxiRecord): TaxiVehicleInfo {
+    return {
+      taxiId: taxi.id,
+      vehicle: taxi.vehicle,
+      phase: taxi.phase,
+      passenger: taxi.passenger,
       requestedAt: taxi.requestedAt,
       tripDistance: taxi.tripDistance,
     };
@@ -299,4 +311,8 @@ export function taxiVehicleInfo(vehicles: VehicleStore, vehicle: number): TaxiVe
 
 export function taxiPassengerInfo(store: AgentStore, agent: number): TaxiPassengerInfo | null {
   return taxiByStore.get(store)?.passengerInfo(agent) ?? null;
+}
+
+export function forEachTaxiVehicle(vehicles: VehicleStore, fn: (info: TaxiVehicleInfo) => void): void {
+  taxiByVehicles.get(vehicles)?.forEachVehicle(fn);
 }

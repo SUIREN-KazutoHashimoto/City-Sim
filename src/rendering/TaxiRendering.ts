@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { EnhancedRenderer } from './EnhancedRenderer';
-import { taxiVehicleInfo } from '../traffic/TaxiSystem';
+import { forEachTaxiVehicle } from '../traffic/TaxiSystem';
 import { VehicleState, type VehicleStore } from '../traffic/VehicleStore';
 
 type AnyRenderer = any;
@@ -54,14 +54,14 @@ if (!proto.__citySimTaxiRenderingV071) {
     const maxD2 = EnhancedRenderer.LOD0_DISTANCE * EnhancedRenderer.LOD0_DISTANCE;
     let count = 0;
     const maxSigns = mesh.instanceMatrix.count;
-    for (let v = 0; v < vs.count && count < maxSigns; v++) {
-      const taxi = taxiVehicleInfo(vs, v);
-      if (!taxi) continue;
+    forEachTaxiVehicle(vs, (taxi) => {
+      if (count >= maxSigns) return;
+      const v = taxi.vehicle;
       const state = vs.state[v];
-      if (state !== VehicleState.Driving && state !== VehicleState.Parked) continue;
+      if (state !== VehicleState.Driving && state !== VehicleState.Parked) return;
       if (useDistance) {
         const dx = vs.posX[v] - camX, dz = vs.posZ[v] - camZ;
-        if (dx * dx + dz * dz > maxD2) continue;
+        if (dx * dx + dz * dz > maxD2) return;
       }
       mesh.setMatrixAt(count, matrix(vs.posX[v], 1.58, vs.posZ[v], vs.heading[v]));
       const color = taxi.phase === 'idle'
@@ -71,7 +71,7 @@ if (!proto.__citySimTaxiRenderingV071) {
           : new THREE.Color(0xf2f5ff);
       mesh.setColorAt(count, color);
       count++;
-    }
+    });
     mesh.count = count;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
