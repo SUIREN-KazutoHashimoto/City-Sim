@@ -22,6 +22,7 @@ import './traffic/ShortBusRouteTuning';
 import './traffic/IndustrialLogisticsTuning';
 import './world/WorkplaceProductivityTuning';
 import './traffic/TaxiIntegration';
+import './power/PowerIntegration';
 import './world/PedestrianCrossingSafetyTuning';
 import './world/PedestrianSignalWaitTuning';
 import './rendering/MultiLaneRoadRendering';
@@ -44,4 +45,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '1.0.1';
+export const APP_VERSION = '1.0.2';

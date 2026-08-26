@@ -1,4 +1,5 @@
 import { DEFAULT_CITY_PLANNING, type CityPlanningOptions } from '../generation/CityPlanning';
+import { DEFAULT_POWER_CONFIG, type PowerConfig } from '../power/PowerTypes';
 
 export type CitySeedSetting = number | 'random';
 
@@ -11,6 +12,7 @@ export interface RuntimeCityConfig {
   agentCapacity: number;
   vehicleCapacity: number;
   planning: CityPlanningOptions;
+  power: PowerConfig;
 }
 
 const DEFAULT_CONFIG: RuntimeCityConfig = {
@@ -22,8 +24,10 @@ const DEFAULT_CONFIG: RuntimeCityConfig = {
   agentCapacity: 60_000,
   vehicleCapacity: 30_000,
   planning: { ...DEFAULT_CITY_PLANNING },
+  power: { ...DEFAULT_POWER_CONFIG },
 };
 
+let loadedPowerConfig: PowerConfig = { ...DEFAULT_POWER_CONFIG };
 const BENCHMARK_SEED_PARAM = 'citysim-seed';
 
 interface BenchmarkSeedGlobal {
@@ -43,10 +47,12 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
 
   const raw = await response.json() as Partial<RuntimeCityConfig>;
   const rawPlanning = raw.planning ?? {};
+  const rawPower = raw.power ?? {};
   const cfg: RuntimeCityConfig = {
     ...DEFAULT_CONFIG,
     ...raw,
     planning: { ...DEFAULT_CITY_PLANNING, ...rawPlanning },
+    power: { ...DEFAULT_POWER_CONFIG, ...rawPower },
   };
 
   if (cfg.seed !== 'random' && (!Number.isFinite(cfg.seed) || typeof cfg.seed !== 'number')) {
@@ -71,7 +77,31 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
   cfg.planning.railInfluenceRadius = requireFinite('planning.railInfluenceRadius', cfg.planning.railInfluenceRadius, 300, 1800);
   cfg.planning.railSubCenterSpurs = cfg.planning.railSubCenterSpurs !== false;
 
+  cfg.power.enabled = cfg.power.enabled !== false;
+  cfg.power.updateIntervalSec = requireFinite('power.updateIntervalSec', cfg.power.updateIntervalSec, 0.25, 3600);
+  cfg.power.thermalPlantCount = Math.floor(requireFinite('power.thermalPlantCount', cfg.power.thermalPlantCount, 0, 32));
+  cfg.power.thermalPlantCapacityMw = requireFinite('power.thermalPlantCapacityMw', cfg.power.thermalPlantCapacityMw, 0, 10_000);
+  cfg.power.solarPlantCount = Math.floor(requireFinite('power.solarPlantCount', cfg.power.solarPlantCount, 0, 128));
+  cfg.power.solarPlantCapacityMw = requireFinite('power.solarPlantCapacityMw', cfg.power.solarPlantCapacityMw, 0, 5000);
+  cfg.power.externalConnectionCount = Math.floor(requireFinite('power.externalConnectionCount', cfg.power.externalConnectionCount, 0, 16));
+  cfg.power.externalGridCapacityMw = requireFinite('power.externalGridCapacityMw', cfg.power.externalGridCapacityMw, 0, 50_000);
+  cfg.power.substationSpacingMeters = requireFinite('power.substationSpacingMeters', cfg.power.substationSpacingMeters, 300, 10_000);
+  cfg.power.substationCapacityMw = requireFinite('power.substationCapacityMw', cfg.power.substationCapacityMw, 0.1, 5000);
+  cfg.power.substationServiceRadiusMeters = requireFinite('power.substationServiceRadiusMeters', cfg.power.substationServiceRadiusMeters, 300, 20_000);
+  cfg.power.lineCapacityHighwayMw = requireFinite('power.lineCapacityHighwayMw', cfg.power.lineCapacityHighwayMw, 0.1, 20_000);
+  cfg.power.lineCapacityArterialMw = requireFinite('power.lineCapacityArterialMw', cfg.power.lineCapacityArterialMw, 0.1, 20_000);
+  cfg.power.lineCapacityCollectorMw = requireFinite('power.lineCapacityCollectorMw', cfg.power.lineCapacityCollectorMw, 0.1, 20_000);
+  cfg.power.lineCapacityLocalMw = requireFinite('power.lineCapacityLocalMw', cfg.power.lineCapacityLocalMw, 0.1, 20_000);
+  cfg.power.lineCapacityPathMw = requireFinite('power.lineCapacityPathMw', cfg.power.lineCapacityPathMw, 0.1, 20_000);
+  cfg.power.tightReserveMarginRatio = requireFinite('power.tightReserveMarginRatio', cfg.power.tightReserveMarginRatio, 0, 2);
+  cfg.power.blackoutSupplyRatio = requireFinite('power.blackoutSupplyRatio', cfg.power.blackoutSupplyRatio, 0, 0.5);
+  loadedPowerConfig = { ...cfg.power };
+
   return cfg;
+}
+
+export function getLoadedPowerConfig(): PowerConfig {
+  return { ...loadedPowerConfig };
 }
 
 function benchmarkSeedOverrideEnabled(): boolean {
@@ -91,8 +121,6 @@ function querySeedOverride(): number | null {
   const raw = new URLSearchParams(globalThis.location.search).get(BENCHMARK_SEED_PARAM);
   if (raw === null) return null;
 
-  // citysim-seed is benchmark-only. BenchmarkHarness sets this sentinel before main.ts runs.
-  // A stale seed left in the URL after a benchmark must never affect a normal city launch.
   if (!benchmarkSeedOverrideEnabled()) {
     removeStaleBenchmarkSeedParam();
     return null;

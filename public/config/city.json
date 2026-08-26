@@ -17,5 +17,25 @@
     "railStationSpacing": 525,
     "railInfluenceRadius": 900,
     "railSubCenterSpurs": true
+  },
+  "power": {
+    "enabled": true,
+    "updateIntervalSec": 5,
+    "thermalPlantCount": 2,
+    "thermalPlantCapacityMw": 350,
+    "solarPlantCount": 3,
+    "solarPlantCapacityMw": 90,
+    "externalConnectionCount": 2,
+    "externalGridCapacityMw": 600,
+    "substationSpacingMeters": 1800,
+    "substationCapacityMw": 75,
+    "substationServiceRadiusMeters": 2600,
+    "lineCapacityHighwayMw": 260,
+    "lineCapacityArterialMw": 180,
+    "lineCapacityCollectorMw": 110,
+    "lineCapacityLocalMw": 55,
+    "lineCapacityPathMw": 12,
+    "tightReserveMarginRatio": 0.15,
+    "blackoutSupplyRatio": 0.05
   }
 }
