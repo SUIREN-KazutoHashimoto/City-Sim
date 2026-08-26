@@ -30,6 +30,16 @@ export interface PowerConfig {
   tightReserveMarginRatio: number;
   blackoutSupplyRatio: number;
   criticalEmergencySupplyRatio: number;
+  nominalFrequencyHz: number;
+  nominalGridVoltageKv: number;
+  serviceVoltageV: number;
+  frequencyDroopRatio: number;
+  voltageLoadDropPu: number;
+  reactiveVoltageDropPu: number;
+  phaseImbalanceVoltageDropPu: number;
+  maxZonePhaseShiftDeg: number;
+  lineResistanceOhmPerKm: number;
+  lineReactanceOhmPerKm: number;
 }
 
 export const DEFAULT_POWER_CONFIG: PowerConfig = {
@@ -52,6 +62,16 @@ export const DEFAULT_POWER_CONFIG: PowerConfig = {
   tightReserveMarginRatio: 0.15,
   blackoutSupplyRatio: 0.05,
   criticalEmergencySupplyRatio: 0.35,
+  nominalFrequencyHz: 50,
+  nominalGridVoltageKv: 22,
+  serviceVoltageV: 400,
+  frequencyDroopRatio: 0.04,
+  voltageLoadDropPu: 0.025,
+  reactiveVoltageDropPu: 0.018,
+  phaseImbalanceVoltageDropPu: 0.035,
+  maxZonePhaseShiftDeg: 6,
+  lineResistanceOhmPerKm: 0.18,
+  lineReactanceOhmPerKm: 0.11,
 };
 
 export interface GenerationFacility {

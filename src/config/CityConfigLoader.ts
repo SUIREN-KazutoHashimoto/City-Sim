@@ -30,14 +30,10 @@ const DEFAULT_CONFIG: RuntimeCityConfig = {
 let loadedPowerConfig: PowerConfig = { ...DEFAULT_POWER_CONFIG };
 const BENCHMARK_SEED_PARAM = 'citysim-seed';
 
-interface BenchmarkSeedGlobal {
-  __CITY_SIM_BENCH_HOLD__?: boolean;
-}
+interface BenchmarkSeedGlobal { __CITY_SIM_BENCH_HOLD__?: boolean; }
 
 function requireFinite(name: string, value: number, min: number, max: number): number {
-  if (!Number.isFinite(value) || value < min || value > max) {
-    throw new Error(`${name} must be between ${min} and ${max}. actual=${value}`);
-  }
+  if (!Number.isFinite(value) || value < min || value > max) throw new Error(`${name} must be between ${min} and ${max}. actual=${value}`);
   return value;
 }
 
@@ -46,19 +42,10 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
   if (!response.ok) throw new Error(`Failed to load city config: ${response.status} ${response.statusText}`);
 
   const raw = await response.json() as Partial<RuntimeCityConfig>;
-  const rawPlanning = raw.planning ?? {};
-  const rawPower = raw.power ?? {};
-  const cfg: RuntimeCityConfig = {
-    ...DEFAULT_CONFIG,
-    ...raw,
-    planning: { ...DEFAULT_CITY_PLANNING, ...rawPlanning },
-    power: { ...DEFAULT_POWER_CONFIG, ...rawPower },
-  };
+  const rawPlanning = raw.planning ?? {}, rawPower = raw.power ?? {};
+  const cfg: RuntimeCityConfig = { ...DEFAULT_CONFIG, ...raw, planning: { ...DEFAULT_CITY_PLANNING, ...rawPlanning }, power: { ...DEFAULT_POWER_CONFIG, ...rawPower } };
 
-  if (cfg.seed !== 'random' && (!Number.isFinite(cfg.seed) || typeof cfg.seed !== 'number')) {
-    throw new Error(`seed must be a number or "random". actual=${String(cfg.seed)}`);
-  }
-
+  if (cfg.seed !== 'random' && (!Number.isFinite(cfg.seed) || typeof cfg.seed !== 'number')) throw new Error(`seed must be a number or "random". actual=${String(cfg.seed)}`);
   cfg.areaKm2 = requireFinite('areaKm2', cfg.areaKm2, 0.1, 10_000);
   cfg.urbanRatioTarget = requireFinite('urbanRatioTarget', cfg.urbanRatioTarget, 0.01, 0.95);
   cfg.blockSize = requireFinite('blockSize', cfg.blockSize, 20, 500);
@@ -95,52 +82,39 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
   cfg.power.lineCapacityPathMw = requireFinite('power.lineCapacityPathMw', cfg.power.lineCapacityPathMw, 0.1, 20_000);
   cfg.power.tightReserveMarginRatio = requireFinite('power.tightReserveMarginRatio', cfg.power.tightReserveMarginRatio, 0, 2);
   cfg.power.blackoutSupplyRatio = requireFinite('power.blackoutSupplyRatio', cfg.power.blackoutSupplyRatio, 0, 0.5);
+  cfg.power.criticalEmergencySupplyRatio = requireFinite('power.criticalEmergencySupplyRatio', cfg.power.criticalEmergencySupplyRatio, 0, 1);
+  cfg.power.nominalFrequencyHz = requireFinite('power.nominalFrequencyHz', cfg.power.nominalFrequencyHz, 45, 65);
+  cfg.power.nominalGridVoltageKv = requireFinite('power.nominalGridVoltageKv', cfg.power.nominalGridVoltageKv, 1, 500);
+  cfg.power.serviceVoltageV = requireFinite('power.serviceVoltageV', cfg.power.serviceVoltageV, 100, 1000);
+  cfg.power.frequencyDroopRatio = requireFinite('power.frequencyDroopRatio', cfg.power.frequencyDroopRatio, 0, 0.2);
+  cfg.power.voltageLoadDropPu = requireFinite('power.voltageLoadDropPu', cfg.power.voltageLoadDropPu, 0, 0.25);
+  cfg.power.reactiveVoltageDropPu = requireFinite('power.reactiveVoltageDropPu', cfg.power.reactiveVoltageDropPu, 0, 0.25);
+  cfg.power.phaseImbalanceVoltageDropPu = requireFinite('power.phaseImbalanceVoltageDropPu', cfg.power.phaseImbalanceVoltageDropPu, 0, 0.25);
+  cfg.power.maxZonePhaseShiftDeg = requireFinite('power.maxZonePhaseShiftDeg', cfg.power.maxZonePhaseShiftDeg, 0, 45);
+  cfg.power.lineResistanceOhmPerKm = requireFinite('power.lineResistanceOhmPerKm', cfg.power.lineResistanceOhmPerKm, 0, 10);
+  cfg.power.lineReactanceOhmPerKm = requireFinite('power.lineReactanceOhmPerKm', cfg.power.lineReactanceOhmPerKm, 0, 10);
   loadedPowerConfig = { ...cfg.power };
-
   return cfg;
 }
 
-export function getLoadedPowerConfig(): PowerConfig {
-  return { ...loadedPowerConfig };
-}
+export function getLoadedPowerConfig(): PowerConfig { return { ...loadedPowerConfig }; }
 
-function benchmarkSeedOverrideEnabled(): boolean {
-  return (globalThis as typeof globalThis & BenchmarkSeedGlobal).__CITY_SIM_BENCH_HOLD__ === true;
-}
-
+function benchmarkSeedOverrideEnabled(): boolean { return (globalThis as typeof globalThis & BenchmarkSeedGlobal).__CITY_SIM_BENCH_HOLD__ === true; }
 function removeStaleBenchmarkSeedParam(): void {
   if (typeof globalThis.location === 'undefined' || typeof globalThis.history === 'undefined') return;
-  const url = new URL(globalThis.location.href);
-  if (!url.searchParams.has(BENCHMARK_SEED_PARAM)) return;
-  url.searchParams.delete(BENCHMARK_SEED_PARAM);
-  globalThis.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  const url = new URL(globalThis.location.href); if (!url.searchParams.has(BENCHMARK_SEED_PARAM)) return;
+  url.searchParams.delete(BENCHMARK_SEED_PARAM); globalThis.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
-
 function querySeedOverride(): number | null {
   if (typeof globalThis.location === 'undefined') return null;
-  const raw = new URLSearchParams(globalThis.location.search).get(BENCHMARK_SEED_PARAM);
-  if (raw === null) return null;
-
-  if (!benchmarkSeedOverrideEnabled()) {
-    removeStaleBenchmarkSeedParam();
-    return null;
-  }
-
+  const raw = new URLSearchParams(globalThis.location.search).get(BENCHMARK_SEED_PARAM); if (raw === null) return null;
+  if (!benchmarkSeedOverrideEnabled()) { removeStaleBenchmarkSeedParam(); return null; }
   if (!/^\d+$/.test(raw)) return null;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff ? value >>> 0 : null;
+  const value = Number(raw); return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff ? value >>> 0 : null;
 }
-
 export function resolveCitySeed(setting: CitySeedSetting): number {
-  const override = querySeedOverride();
-  if (override !== null) return override;
+  const override = querySeedOverride(); if (override !== null) return override;
   if (setting !== 'random') return Math.trunc(setting) >>> 0;
-
-  if (globalThis.crypto?.getRandomValues) {
-    const values = new Uint32Array(1);
-    globalThis.crypto.getRandomValues(values);
-    return values[0] >>> 0;
-  }
-
+  if (globalThis.crypto?.getRandomValues) { const values = new Uint32Array(1); globalThis.crypto.getRandomValues(values); return values[0] >>> 0; }
   return (Date.now() ^ Math.floor(performance.now() * 1000)) >>> 0;
 }

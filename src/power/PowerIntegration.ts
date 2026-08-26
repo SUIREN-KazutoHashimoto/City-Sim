@@ -1,6 +1,7 @@
 import { getLoadedPowerConfig } from '../config/CityConfigLoader';
 import { World } from '../world/World';
 import { PowerSystem } from './PowerSystem';
+import { registerPowerSystem } from './PowerRuntimeRegistry';
 import type { PowerSnapshot } from './PowerTypes';
 
 type AnyWorld = World & Record<string, unknown>;
@@ -12,6 +13,7 @@ function ensurePower(world: World): PowerSystem {
   let system = systems.get(world);
   if (system) return system;
   system = new PowerSystem(world.city, getLoadedPowerConfig());
+  registerPowerSystem(world.city, system);
   system.update(0, world.clock.totalSeconds, true);
   systems.set(world, system);
   return system;

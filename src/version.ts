@@ -27,6 +27,8 @@ import './traffic/IndustrialLogisticsTuning';
 import './world/WorkplaceProductivityTuning';
 import './traffic/TaxiIntegration';
 import './power/PowerIntegration';
+import './power/PowerQualityIntegration';
+import './power/PowerOperationalIntegration';
 import './traffic/TaxiCruisingTuning';
 import './world/VisitorTaxiFallbackTuning';
 import './world/PedestrianCrossingSafetyTuning';
@@ -53,4 +55,4 @@ import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
 
-export const APP_VERSION = '1.0.8';
+export const APP_VERSION = '1.0.9';
