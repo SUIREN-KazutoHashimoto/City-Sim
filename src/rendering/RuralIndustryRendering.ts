@@ -14,10 +14,14 @@ function matrix(x: number, y: number, z: number, heading: number, sx: number, sy
   );
 }
 
+function rowCount(depth: number): number {
+  return Math.max(7, Math.min(28, Math.round(depth / 14)));
+}
+
 const proto = EnhancedRenderer.prototype as unknown as Record<string, any>;
-if (!proto.__citySimRuralIndustryRenderingV076) {
+if (!proto.__citySimRuralIndustryRenderingV077) {
   const previousBuildStatic = proto.buildStatic as AnyMethod;
-  proto.buildStatic = function buildStaticWithFarms(this: AnyRenderer, buildings: any[], net: RoadNetwork, sidewalk: any, lots: any[]): void {
+  proto.buildStatic = function buildStaticWithFarmEstates(this: AnyRenderer, buildings: any[], net: RoadNetwork, sidewalk: any, lots: any[]): void {
     previousBuildStatic.call(this, buildings, net, sidewalk, lots);
     const farms = productionSitesForNetwork(net).filter((s) => s.kind === 'farm');
     if (farms.length === 0) return;
@@ -38,19 +42,20 @@ if (!proto.__citySimRuralIndustryRenderingV076) {
     field.receiveShadow = true; field.castShadow = false;
     this.sceneRef.add(field);
 
-    const rowsPerFarm = 7;
+    const totalRows = farms.reduce((sum, farm) => sum + rowCount(farm.depth), 0);
     const rowMesh = new THREE.InstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ color: 0xb29b62, roughness: 1 }),
-      farms.length * rowsPerFarm,
+      Math.max(1, totalRows),
     );
     let k = 0;
     for (const farm of farms) {
+      const rows = rowCount(farm.depth);
       const px = Math.sin(farm.heading), pz = -Math.cos(farm.heading);
-      for (let r = 0; r < rowsPerFarm; r++) {
-        const lateral = (r - (rowsPerFarm - 1) * 0.5) * (farm.depth / (rowsPerFarm + 1));
+      for (let r = 0; r < rows; r++) {
+        const lateral = (r - (rows - 1) * 0.5) * (farm.depth / (rows + 1));
         const x = farm.x + px * lateral, z = farm.z + pz * lateral;
-        rowMesh.setMatrixAt(k++, matrix(x, 0.065, z, farm.heading, farm.width * 0.90, 0.035, 0.45));
+        rowMesh.setMatrixAt(k++, matrix(x, 0.065, z, farm.heading, farm.width * 0.94, 0.035, 0.45));
       }
     }
     rowMesh.count = k; rowMesh.instanceMatrix.needsUpdate = true; rowMesh.castShadow = false; rowMesh.receiveShadow = false;
@@ -58,5 +63,5 @@ if (!proto.__citySimRuralIndustryRenderingV076) {
     this.__ruralFarmFields = field;
     this.__ruralFarmRows = rowMesh;
   };
-  proto.__citySimRuralIndustryRenderingV076 = true;
+  proto.__citySimRuralIndustryRenderingV077 = true;
 }
