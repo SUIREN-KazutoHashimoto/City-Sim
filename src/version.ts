@@ -18,6 +18,7 @@ import './traffic/TurningLaneTransitionFix';
 import './traffic/TurningVisualPathTuning';
 import './traffic/BusHazardTuning';
 import './traffic/FleetDepotOperations';
+import './traffic/ShortBusRouteTuning';
 import './traffic/IndustrialLogisticsTuning';
 import './world/WorkplaceProductivityTuning';
 import './traffic/TaxiIntegration';
@@ -43,4 +44,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.81';
+export const APP_VERSION = '0.1.82';
