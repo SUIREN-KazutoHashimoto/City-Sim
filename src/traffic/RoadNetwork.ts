@@ -1,9 +1,20 @@
 import { dist } from '../core/math';
 import { SpatialHashGrid } from '../core/SpatialHashGrid';
-export enum RoadClass { Highway = 0, Arterial = 1, Local = 2, Path = 3 }
+
+/**
+ * 数値は既存互換を維持し、Collectorだけ末尾へ追加する。
+ * 生成上の階層は Highway > Arterial > Collector > Local > Path。
+ */
+export enum RoadClass { Highway = 0, Arterial = 1, Local = 2, Path = 3, Collector = 4 }
 export interface RoadNode { id: number; x: number; z: number; edges: number[]; hasSignal: boolean; }
 export interface RoadEdge { id: number; from: number; to: number; length: number; lanes: number; speedLimit: number; roadClass: RoadClass; occupants: number[]; }
-const SPEED_BY_CLASS: Record<RoadClass, number> = { [RoadClass.Highway]: 27, [RoadClass.Arterial]: 16, [RoadClass.Local]: 11, [RoadClass.Path]: 1.4 };
+const SPEED_BY_CLASS: Record<RoadClass, number> = {
+  [RoadClass.Highway]: 27,
+  [RoadClass.Arterial]: 16,
+  [RoadClass.Local]: 11,
+  [RoadClass.Path]: 1.4,
+  [RoadClass.Collector]: 13.5,
+};
 export function edgeAxis(dx: number, dz: number): 0 | 1 { return Math.abs(dx) >= Math.abs(dz) ? 0 : 1; }
 export function roadWidth(lanes: number): number { return 3.5 * lanes * 2; }
 export function crosswalkSetback(rw: number): number { return 7 + rw * 0.25; }

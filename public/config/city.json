@@ -1,0 +1,21 @@
+{
+  "seed": "random",
+  "areaKm2": 100,
+  "urbanRatioTarget": 0.4,
+  "blockSize": 90,
+  "population": 50000,
+  "agentCapacity": 60000,
+  "vehicleCapacity": 30000,
+  "planning": {
+    "subCenters": 3,
+    "arterialSpacing": 900,
+    "collectorSpacing": 360,
+    "industrialRatio": 0.08,
+    "parkRatio": 0.055,
+    "railEnabled": true,
+    "railTrunkLines": 3,
+    "railStationSpacing": 525,
+    "railInfluenceRadius": 900,
+    "railSubCenterSpurs": true
+  }
+}

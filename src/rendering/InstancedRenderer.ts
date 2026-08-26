@@ -13,7 +13,7 @@ export class InstancedRenderer {
   private dummy = new THREE.Object3D();
   private agentMap = new Int32Array(0);
   private vehicleMap = new Int32Array(0);
-  private signalRefs: { node: number; axis: 0 | 1 }[] = [];
+  private signalRefs: { node: number; axis: 0 | 1; edge: number }[] = [];
   private lampR!: THREE.InstancedMesh; private lampY!: THREE.InstancedMesh; private lampG!: THREE.InstancedMesh;
   private lampWalk!: THREE.InstancedMesh; private lampDont!: THREE.InstancedMesh;
   private onR = new THREE.Color(0xff4030); private offR = new THREE.Color(0x3a1512);
@@ -26,8 +26,8 @@ export class InstancedRenderer {
     [POICategory.Food]: new THREE.Color(0xc98b5a), [POICategory.Retail]: new THREE.Color(0xb9a06a), [POICategory.Leisure]: new THREE.Color(0x7cba8f),
   };
   private readonly carColors = [0xd94f4f, 0x4f7fd9, 0xe0e0e0, 0x2b2b2b, 0xd9b64f, 0x54b07a, 0x8a6fd9].map((c) => new THREE.Color(c));
-  private readonly busColor = new THREE.Color(0x2f9e44);
-  private readonly truckColor = new THREE.Color(0xc26b2a);
+  private readonly baseBusColor = new THREE.Color(0x2f9e44);
+  private readonly baseTruckColor = new THREE.Color(0xc26b2a);
   constructor(private scene: THREE.Scene) {}
   get buildings(): THREE.InstancedMesh { return this.buildingMesh; }
   get agents(): THREE.InstancedMesh { return this.agentMesh; }
@@ -98,9 +98,10 @@ export class InstancedRenderer {
   }
   buildSignals(net: RoadNetwork, signals: SignalSystem): void {
     this.signalRefs = [];
-    for (const nodeId of signals.nodeIds) { const node = net.nodes[nodeId]; for (const edgeId of node.edges) { this.signalRefs.push({ node: nodeId, axis: net.axisOf(node.id, net.edges[edgeId].to) }); } }
-    const refDirs: { dx: number; dz: number }[] = [];
-    for (const nodeId of signals.nodeIds) { const node = net.nodes[nodeId]; for (const edgeId of node.edges) { const nb = net.nodes[net.edges[edgeId].to]; let dx = nb.x - node.x, dz = nb.z - node.z; const L = Math.hypot(dx, dz) || 1; refDirs.push({ dx: -dx / L, dz: -dz / L }); } }
+    for (const nodeId of signals.nodeIds) {
+      const node = net.nodes[nodeId];
+      for (const edgeId of node.edges) this.signalRefs.push({ node: nodeId, axis: net.axisOf(node.id, net.edges[edgeId].to), edge: edgeId });
+    }
     const count = Math.max(1, this.signalRefs.length);
     const poleMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.11, 0.13, 6, 6), new THREE.MeshStandardMaterial({ color: 0x3c4048, roughness: 0.8, metalness: 0.3 }), count);
     const vehHousing = new THREE.InstancedMesh(new THREE.BoxGeometry(0.55, 1.7, 0.55), new THREE.MeshStandardMaterial({ color: 0x1c1f24, roughness: 0.7 }), count);
@@ -115,9 +116,15 @@ export class InstancedRenderer {
     const q = new THREE.Quaternion();
     const setPR = (mesh: THREE.InstancedMesh, k: number, x: number, y: number, z: number, angle: number) => { this.dummy.position.set(x, y, z); this.dummy.scale.setScalar(1); q.setFromEuler(new THREE.Euler(0, angle, 0)); this.dummy.quaternion.copy(q); this.dummy.updateMatrix(); mesh.setMatrixAt(k, this.dummy.matrix); };
     for (let k = 0; k < this.signalRefs.length; k++) {
-      const r = this.signalRefs[k]; const n = net.nodes[r.node]; const dir = refDirs[k]; const dx = dir.dx, dz = dir.dz; const rx = dz, rz = -dx; const rw = 7;
-      const bx = n.x - dx * 6 + rx * (rw / 2 + 1.5), bz = n.z - dz * 6 + rz * (rw / 2 + 1.5);
-      const hx = bx - rx * 1.2, hz = bz - rz * 1.2; const facing = Math.atan2(-dz, -dx); const ox = -dx * 0.3, oz = -dz * 0.3;
+      const r = this.signalRefs[k], n = net.nodes[r.node], edge = net.edges[r.edge], nb = net.nodes[edge.to];
+      let towardX = nb.x - n.x, towardZ = nb.z - n.z; const L = Math.hypot(towardX, towardZ) || 1; towardX /= L; towardZ /= L;
+      const dx = -towardX, dz = -towardZ, rx = dz, rz = -dx;
+      const rw = roadWidth(edge.lanes);
+      const longitudinal = crosswalkSetback(rw) + CROSSWALK_DEPTH * 0.5 + 0.7;
+      const lateral = rw * 0.5 + 1.2;
+      const bx = n.x - dx * longitudinal + rx * lateral, bz = n.z - dz * longitudinal + rz * lateral;
+      const hx = bx - rx * 1.1, hz = bz - rz * 1.1;
+      const facing = Math.atan2(-dz, -dx); const ox = -dx * 0.3, oz = -dz * 0.3;
       setPR(poleMesh, k, bx, 3, bz, facing);
       setPR(vehHousing, k, hx, 5.6, hz, facing);
       setPR(lampR, k, hx + ox, 6.1, hz + oz, facing); setPR(lampY, k, hx + ox, 5.6, hz + oz, facing); setPR(lampG, k, hx + ox, 5.1, hz + oz, facing);
@@ -153,7 +160,7 @@ export class InstancedRenderer {
       this.dummy.position.set(vs.posX[v], 0, vs.posZ[v]); this.dummy.rotation.set(0, -vs.heading[v], 0);
       if (vs.isBus[v]) this.dummy.scale.set(2.6, 1.6, 1.15); else if (vs.isTruck[v]) this.dummy.scale.set(2.1, 1.9, 1.25); else this.dummy.scale.setScalar(1);
       this.dummy.updateMatrix(); mesh.setMatrixAt(n, this.dummy.matrix);
-      mesh.setColorAt(n, vs.isBus[v] ? this.busColor : vs.isTruck[v] ? this.truckColor : this.carColors[vs.colorIdx[v] % this.carColors.length]);
+      mesh.setColorAt(n, vs.isBus[v] ? this.baseBusColor : vs.isTruck[v] ? this.baseTruckColor : this.carColors[vs.colorIdx[v] % this.carColors.length]);
       this.vehicleMap[n] = v; n++;
     }
     mesh.count = n; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
