@@ -18,9 +18,9 @@ export interface ForestSpace {
   source: 'rural' | 'vacant-lot';
 }
 
-type AnyCity = CityGenerator & Record<string, any>;
-type AnyPlanning = CityPlanning & Record<string, any>;
-type AnyRoadNetwork = RoadNetwork & Record<string, any>;
+type AnyCity = Record<string, any>;
+type AnyPlanning = Record<string, any>;
+type AnyRoadNetwork = Record<string, any>;
 type SitePlan = { site: DevelopmentSite; plan: PlanningSample; disposition: 'building' | 'parking' | 'empty' };
 type TieredSite = { site: DevelopmentSite; plan: PlanningSample; tier: BuildingHeightTier; use: PlannedBuildingUse };
 

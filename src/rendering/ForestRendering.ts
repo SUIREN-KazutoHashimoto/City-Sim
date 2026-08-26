@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { latestCityForestSpaces, type ForestSpace } from '../generation/CityDiversityTuning';
 import { EnhancedRenderer } from './EnhancedRenderer';
 
-type AnyRenderer = EnhancedRenderer & Record<string, any>;
+type AnyRenderer = Record<string, any>;
 type AnyMethod = (...args: any[]) => any;
 
 const MAX_FOREST_TREES = 18_000;

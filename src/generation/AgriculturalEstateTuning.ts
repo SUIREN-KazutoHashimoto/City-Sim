@@ -22,7 +22,7 @@ export interface FarmEstateRecord {
   warehouseBuildingId: number;
 }
 
-type AnyCity = CityGenerator & Record<string, any>;
+type AnyCity = Record<string, any>;
 type AnyRoadNetwork = RoadNetwork & Record<string, any>;
 type AnyMethod = (...args: any[]) => any;
 type AccessSide = 'west' | 'east' | 'north' | 'south';
@@ -275,7 +275,6 @@ function materializeFarmEstates(city: AnyCity, plans: FarmEstatePlan[]): void {
     const office = addFarmOffice(city, ox, oz, plan.heading, i);
     const roadNode = city.net.nearestNode(plan.accessX, plan.accessZ);
 
-    // Logistics loads at the warehouse/access side, while rendering uses the separate field extent.
     site.x = wx; site.z = wz; site.width = 38; site.depth = 24;
     site.fieldX = plan.x; site.fieldZ = plan.z; site.fieldWidth = plan.width; site.fieldDepth = plan.depth;
     site.heading = plan.heading; site.roadNode = roadNode;

@@ -1,5 +1,5 @@
 import { BuildingArchetype } from '../generation/CityGenerator';
-import { FACILITY_LABEL } from '../generation/SpecialFacilityPlanner';
+import { FACILITY_LABEL, type FacilityType } from '../generation/SpecialFacilityPlanner';
 import { productionSitesForNetwork } from '../generation/RuralIndustryAndDepotTuning';
 import { POICategory } from '../world/POI';
 import { aggregateWorkplaceStaffing, workplaceStaffingForPoi, type WorkplaceStaffing } from '../world/WorkplaceProductivityTuning';
@@ -34,7 +34,7 @@ function workplaceLabel(world: any, buildingId: number): { label: string; produc
   if (infrastructure === 'farm-office' || infrastructure === 'farm-warehouse') return { label: '農地（農場）', production: true };
 
   const facility = world.city.facilities.find((item: any) => item.buildingId === buildingId);
-  if (facility) return { label: FACILITY_LABEL[facility.type] ?? '公共施設', production: false };
+  if (facility) return { label: FACILITY_LABEL[facility.type as FacilityType] ?? '公共施設', production: false };
 
   const intended = building.intendedUse as string | undefined;
   if (intended === 'restaurant') return { label: '飲食施設', production: false };

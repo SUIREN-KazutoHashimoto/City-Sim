@@ -2,7 +2,7 @@ import { AStar } from './AStar';
 import { BusSystem, type BusRoute, type BusStop, type RailBusStationTarget } from './BusSystem';
 import type { RoadNetwork } from './RoadNetwork';
 
-type AnyBus = BusSystem & Record<string, any>;
+type AnyBus = Record<string, any>;
 type AnyMethod = (...args: any[]) => any;
 
 const MAX_ROUTE_METERS = 5_000;
