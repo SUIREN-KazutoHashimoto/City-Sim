@@ -6,8 +6,6 @@ import { vehicleLaneInfo } from './MultiLaneTrafficTuning';
 type AnyTraffic = any;
 type AnyMethod = (...args: any[]) => any;
 
-const laneOverridesByTraffic = new WeakMap<object, Map<number, number>>();
-
 function isIntersectionTurn(net: RoadNetwork, vs: VehicleStore, vehicle: number): boolean {
   const path = vs.paths[vehicle];
   const cursor = vs.pathCursor[vehicle];
@@ -23,31 +21,12 @@ function isIntersectionTurn(net: RoadNetwork, vs: VehicleStore, vehicle: number)
 }
 
 const proto = TrafficSystem.prototype as unknown as Record<string, any>;
-if (!proto.__citySimTurningLaneTransitionV077) {
-  const previousEnterEdge = proto.enterEdge as AnyMethod;
-  proto.enterEdge = function enterEdgeWithTurningLaneConvergence(this: AnyTraffic, ...args: any[]): void {
-    const from = Number(args[1]), to = Number(args[2]);
-    const edge = this.net.edgeBetween(from, to);
-    const overrides = laneOverridesByTraffic.get(this as object);
-    const originalLanes = edge ? overrides?.get(edge.id) : undefined;
-    if (!edge || originalLanes == null) {
-      previousEnterEdge.apply(this, args);
-      return;
-    }
-
-    // The intersection may fan several incoming turn lanes into fewer outgoing lanes. Let the
-    // multi-lane enterEdge logic see the real outgoing lane count so it clamps to a valid lane.
-    const inflated = edge.lanes;
-    edge.lanes = originalLanes;
-    try { previousEnterEdge.apply(this, args); }
-    finally { edge.lanes = inflated; }
-  };
-
+if (!proto.__citySimTurningLaneTransitionV079) {
   const previousUpdate = proto.update as AnyMethod;
   proto.update = function updateWithTurningLaneConvergence(this: AnyTraffic, dt: number): void {
     const net = this.net as RoadNetwork;
     const vs = this.vs as VehicleStore;
-    const overrides = new Map<number, number>();
+    const virtualLanes = new Map<number, number>();
 
     for (let v = 0; v < vs.count; v++) {
       if (vs.state[v] !== VehicleState.Driving || !isIntersectionTurn(net, vs, v)) continue;
@@ -57,29 +36,38 @@ if (!proto.__citySimTurningLaneTransitionV077) {
       if (!path || cursor + 1 >= path.length) continue;
       const next = net.edgeBetween(path[cursor], path[cursor + 1]);
       if (!next || info.lane < next.lanes) continue;
-
-      if (!overrides.has(next.id)) overrides.set(next.id, next.lanes);
-      next.lanes = Math.max(next.lanes, info.lane + 1);
+      virtualLanes.set(next.id, Math.max(virtualLanes.get(next.id) ?? next.lanes, info.lane + 1));
     }
 
-    if (overrides.size === 0) {
+    if (virtualLanes.size === 0) {
       previousUpdate.call(this, dt);
       return;
     }
 
-    laneOverridesByTraffic.set(this as object, overrides);
+    // MultiLaneTrafficTuning asks edgeBetween() only to decide whether a vehicle must merge before
+    // the next edge. For a genuine intersection turn, expose a virtual fan-in lane count only to
+    // that lookup. The actual RoadEdge is never mutated, so vehicles already on the outgoing road
+    // keep their real lane geometry and occupancy for the whole frame.
+    const netAny = net as unknown as Record<string, any>;
+    const hadOwnEdgeBetween = Object.prototype.hasOwnProperty.call(netAny, 'edgeBetween');
+    const previousOwnEdgeBetween = netAny.edgeBetween;
+    const realEdgeBetween = net.edgeBetween.bind(net);
+    netAny.edgeBetween = (from: number, to: number): any => {
+      const edge = realEdgeBetween(from, to);
+      if (!edge) return edge;
+      const lanes = virtualLanes.get(edge.id);
+      return lanes != null && lanes > edge.lanes ? { ...edge, lanes } : edge;
+    };
+
     try {
-      // MultiLaneTrafficTuning now treats the outgoing edge as lane-compatible for this update,
-      // so a turning vehicle is not trapped by the straight-road lane-reduction guard forever.
+      // The straight-road 3→1 merge guard still applies everywhere else. At the intersection the
+      // turn can converge into the real outgoing lane, and enterEdge then clamps to that real count.
       previousUpdate.call(this, dt);
     } finally {
-      for (const [edgeId, lanes] of overrides) {
-        const edge = net.edges[edgeId];
-        if (edge) edge.lanes = lanes;
-      }
-      laneOverridesByTraffic.delete(this as object);
+      if (hadOwnEdgeBetween) netAny.edgeBetween = previousOwnEdgeBetween;
+      else delete netAny.edgeBetween;
     }
   };
 
-  proto.__citySimTurningLaneTransitionV077 = true;
+  proto.__citySimTurningLaneTransitionV079 = true;
 }
