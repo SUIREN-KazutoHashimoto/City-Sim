@@ -4,6 +4,7 @@ import './generation/ParkPriorityTuning';
 import './generation/UrbanFootprintGuard';
 import './generation/RuralIndustryAndDepotTuning';
 import './generation/AgriculturalEstateTuning';
+import './generation/AgriculturalEstateIndexGuard';
 import './world/ExternalVisitorSystem';
 import './rendering/HighSpeedCapacityTuning';
 import './rendering/RailPassengerPlatformBoundsPatch';
@@ -37,4 +38,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.79';
+export const APP_VERSION = '0.1.80';
