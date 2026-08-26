@@ -37,4 +37,4 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 
-export const APP_VERSION = '0.1.77';
+export const APP_VERSION = '0.1.78';

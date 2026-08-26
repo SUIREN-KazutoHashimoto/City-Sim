@@ -14,6 +14,13 @@ function matrix(x: number, y: number, z: number, heading: number, sx: number, sy
   );
 }
 
+function farmField(farm: any): { x: number; z: number; width: number; depth: number } {
+  return {
+    x: farm.fieldX ?? farm.x, z: farm.fieldZ ?? farm.z,
+    width: farm.fieldWidth ?? farm.width, depth: farm.fieldDepth ?? farm.depth,
+  };
+}
+
 function rowCount(depth: number): number {
   return Math.max(7, Math.min(28, Math.round(depth / 14)));
 }
@@ -34,7 +41,8 @@ if (!proto.__citySimRuralIndustryRenderingV077) {
     field.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(farms.length * 3), 3);
     const fieldColors = [new THREE.Color(0x667d3f), new THREE.Color(0x8a8740), new THREE.Color(0x5f7841), new THREE.Color(0x8b7540)];
     farms.forEach((farm, i) => {
-      field.setMatrixAt(i, matrix(farm.x, 0.025, farm.z, farm.heading, farm.width, 0.05, farm.depth));
+      const extent = farmField(farm);
+      field.setMatrixAt(i, matrix(extent.x, 0.025, extent.z, farm.heading, extent.width, 0.05, extent.depth));
       field.setColorAt(i, fieldColors[i % fieldColors.length]);
     });
     field.instanceMatrix.needsUpdate = true;
@@ -42,7 +50,7 @@ if (!proto.__citySimRuralIndustryRenderingV077) {
     field.receiveShadow = true; field.castShadow = false;
     this.sceneRef.add(field);
 
-    const totalRows = farms.reduce((sum, farm) => sum + rowCount(farm.depth), 0);
+    const totalRows = farms.reduce((sum, farm) => sum + rowCount(farmField(farm).depth), 0);
     const rowMesh = new THREE.InstancedMesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({ color: 0xb29b62, roughness: 1 }),
@@ -50,12 +58,13 @@ if (!proto.__citySimRuralIndustryRenderingV077) {
     );
     let k = 0;
     for (const farm of farms) {
-      const rows = rowCount(farm.depth);
+      const extent = farmField(farm);
+      const rows = rowCount(extent.depth);
       const px = Math.sin(farm.heading), pz = -Math.cos(farm.heading);
       for (let r = 0; r < rows; r++) {
-        const lateral = (r - (rows - 1) * 0.5) * (farm.depth / (rows + 1));
-        const x = farm.x + px * lateral, z = farm.z + pz * lateral;
-        rowMesh.setMatrixAt(k++, matrix(x, 0.065, z, farm.heading, farm.width * 0.94, 0.035, 0.45));
+        const lateral = (r - (rows - 1) * 0.5) * (extent.depth / (rows + 1));
+        const x = extent.x + px * lateral, z = extent.z + pz * lateral;
+        rowMesh.setMatrixAt(k++, matrix(x, 0.065, z, farm.heading, extent.width * 0.94, 0.035, 0.45));
       }
     }
     rowMesh.count = k; rowMesh.instanceMatrix.needsUpdate = true; rowMesh.castShadow = false; rowMesh.receiveShadow = false;

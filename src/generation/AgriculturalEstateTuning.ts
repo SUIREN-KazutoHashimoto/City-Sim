@@ -275,7 +275,9 @@ function materializeFarmEstates(city: AnyCity, plans: FarmEstatePlan[]): void {
     const office = addFarmOffice(city, ox, oz, plan.heading, i);
     const roadNode = city.net.nearestNode(plan.accessX, plan.accessZ);
 
-    site.x = plan.x; site.z = plan.z; site.width = plan.width; site.depth = plan.depth;
+    // Logistics loads at the warehouse/access side, while rendering uses the separate field extent.
+    site.x = wx; site.z = wz; site.width = 38; site.depth = 24;
+    site.fieldX = plan.x; site.fieldZ = plan.z; site.fieldWidth = plan.width; site.fieldDepth = plan.depth;
     site.heading = plan.heading; site.roadNode = roadNode;
     site.outputCapacity = Math.max(4200, Math.round(plan.width * plan.depth / 8));
     site.outputStock = Math.min(site.outputCapacity, Math.max(site.outputStock, site.outputCapacity * 0.22));

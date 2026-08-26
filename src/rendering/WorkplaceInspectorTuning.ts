@@ -2,7 +2,7 @@ import { BuildingArchetype } from '../generation/CityGenerator';
 import { FACILITY_LABEL } from '../generation/SpecialFacilityPlanner';
 import { productionSitesForNetwork } from '../generation/RuralIndustryAndDepotTuning';
 import { POICategory } from '../world/POI';
-import { aggregateWorkplaceStaffing, workplaceStaffingForPoi } from '../world/WorkplaceProductivityTuning';
+import { aggregateWorkplaceStaffing, workplaceStaffingForPoi, type WorkplaceStaffing } from '../world/WorkplaceProductivityTuning';
 import { UniversalInspector } from './UniversalInspector';
 
 type AnyInspector = any;
@@ -16,11 +16,15 @@ function productionLabel(kind: string): string {
   return '工場';
 }
 
+function productionSite(world: any, buildingId: number): any | null {
+  return productionSitesForNetwork(world.city.net).find((item: any) =>
+    item.buildingId === buildingId || item.officeBuildingId === buildingId || item.warehouseBuildingId === buildingId) ?? null;
+}
+
 function workplaceLabel(world: any, buildingId: number): { label: string; production: boolean } {
   const building = world.city.buildings[buildingId] as Record<string, any> | undefined;
   if (!building) return { label: '職場', production: false };
-  const site = productionSitesForNetwork(world.city.net).find((item: any) =>
-    item.buildingId === buildingId || item.officeBuildingId === buildingId || item.warehouseBuildingId === buildingId);
+  const site = productionSite(world, buildingId);
   if (site) return { label: productionLabel(site.kind), production: true };
 
   const infrastructure = building.infrastructureLabel as string | undefined;
@@ -52,8 +56,16 @@ function workplaceLabel(world: any, buildingId: number): { label: string; produc
   }
 }
 
+function productionStaffing(world: any, buildingId: number, fallbackPoiId?: number): WorkplaceStaffing | null {
+  const site = productionSite(world, buildingId);
+  if (!site) return null;
+  const ids = Array.isArray(site.workPoiIds) ? site.workPoiIds.filter((id: unknown) => Number.isInteger(id)) as number[] : [];
+  if (ids.length > 0) return aggregateWorkplaceStaffing(world.city.poi, ids);
+  return fallbackPoiId != null ? workplaceStaffingForPoi(world.city.poi, fallbackPoiId) : null;
+}
+
 const proto = UniversalInspector.prototype as unknown as Record<string, any>;
-if (!proto.__citySimWorkplaceInspectorV077) {
+if (!proto.__citySimWorkplaceInspectorV078) {
   const previousDescribeAgent = proto.describeAgent as DescribeMethod;
   proto.describeAgent = function describeAgentWithWorkplace(this: AnyInspector, agent: number): string {
     const text = previousDescribeAgent.call(this, agent);
@@ -64,7 +76,8 @@ if (!proto.__citySimWorkplaceInspectorV077) {
     const poi = this.world.city.poi.get(workPoiId);
     if (!poi) return `${text}\n勤務先 不明`;
     const info = workplaceLabel(this.world, poi.buildingId);
-    const staffing = workplaceStaffingForPoi(this.world.city.poi, workPoiId);
+    const staffing = productionStaffing(this.world, poi.buildingId, workPoiId)
+      ?? workplaceStaffingForPoi(this.world.city.poi, workPoiId);
     return `${text}\n勤務先 ${info.label} / 建物 #${poi.buildingId}\n出勤 ${staffing.present}/${staffing.capacity} / ${info.production ? '生産' : '稼働'}効率 ${Math.round(staffing.efficiency * 100)}%`;
   };
 
@@ -75,9 +88,13 @@ if (!proto.__citySimWorkplaceInspectorV077) {
     const workPois = this.world.city.poi.poisInBuilding(buildingId).filter((p: any) => p.category === POICategory.Work && p.capacity > 0);
     if (workPois.length === 0) return text;
     const info = workplaceLabel(this.world, buildingId);
-    const staffing = aggregateWorkplaceStaffing(this.world.city.poi, workPois.map((p: any) => p.id));
-    return `${text}\n職場種別 ${info.label}\n出勤 ${staffing.present}/${staffing.capacity} / ${info.production ? '生産' : '稼働'}効率 ${Math.round(staffing.efficiency * 100)}%`;
+    const staffing = productionStaffing(this.world, buildingId)
+      ?? aggregateWorkplaceStaffing(this.world.city.poi, workPois.map((p: any) => p.id));
+    const site = productionSite(this.world, buildingId);
+    const scale = site?.kind === 'farm' && Number.isFinite(site.blocksWide) && Number.isFinite(site.blocksDeep)
+      ? `\n農場規模 ${site.blocksWide}×${site.blocksDeep}区画` : '';
+    return `${text}\n職場種別 ${info.label}${scale}\n出勤 ${staffing.present}/${staffing.capacity} / ${info.production ? '生産' : '稼働'}効率 ${Math.round(staffing.efficiency * 100)}%`;
   };
 
-  proto.__citySimWorkplaceInspectorV077 = true;
+  proto.__citySimWorkplaceInspectorV078 = true;
 }
