@@ -36,6 +36,7 @@
     "lineCapacityLocalMw": 55,
     "lineCapacityPathMw": 12,
     "tightReserveMarginRatio": 0.15,
-    "blackoutSupplyRatio": 0.05
+    "blackoutSupplyRatio": 0.05,
+    "criticalEmergencySupplyRatio": 0.35
   }
 }

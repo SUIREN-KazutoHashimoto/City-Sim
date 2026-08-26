@@ -8,6 +8,7 @@ export enum PowerAssetState { Online = 'online', Standby = 'standby', Offline = 
 export enum PowerLineState { Active = 'active', Broken = 'broken' }
 export enum BuildingPowerState { Supplied = 'supplied', Limited = 'limited', Blackout = 'blackout', Disconnected = 'disconnected' }
 export enum PowerPriority { Critical = 0, High = 1, Medium = 2, Low = 3 }
+export enum PowerLoadKind { RoadSignal = 'road-signal', StreetLight = 'street-light', RailSignal = 'rail-signal', RailStation = 'rail-station', RailTraction = 'rail-traction' }
 
 export interface PowerConfig {
   enabled: boolean;
@@ -28,6 +29,7 @@ export interface PowerConfig {
   lineCapacityPathMw: number;
   tightReserveMarginRatio: number;
   blackoutSupplyRatio: number;
+  criticalEmergencySupplyRatio: number;
 }
 
 export const DEFAULT_POWER_CONFIG: PowerConfig = {
@@ -49,6 +51,7 @@ export const DEFAULT_POWER_CONFIG: PowerConfig = {
   lineCapacityPathMw: 12,
   tightReserveMarginRatio: 0.15,
   blackoutSupplyRatio: 0.05,
+  criticalEmergencySupplyRatio: 0.35,
 };
 
 export interface GenerationFacility {
@@ -62,6 +65,7 @@ export interface GenerationFacility {
   currentOutputKw: number;
   utilization: number;
   state: PowerAssetState;
+  zoneId: number;
 }
 
 export interface ExternalGridConnection {
@@ -73,6 +77,7 @@ export interface ExternalGridConnection {
   currentImportKw: number;
   utilization: number;
   state: PowerAssetState;
+  zoneId: number;
 }
 
 export interface PowerLineSegment {
@@ -84,6 +89,8 @@ export interface PowerLineSegment {
   capacityKw: number;
   currentLoadKw: number;
   state: PowerLineState;
+  overload: boolean;
+  zoneId: number;
 }
 
 export interface Substation {
@@ -102,6 +109,7 @@ export interface Substation {
   sourcePathSegmentIds: number[];
   sourcePathCapacityKw: number;
   assignedBuildingCount: number;
+  zoneId: number;
 }
 
 export interface BuildingPowerConnection {
@@ -109,12 +117,46 @@ export interface BuildingPowerConnection {
   roadNodeId: number;
   substationId: string | null;
   distributionDistanceMeters: number;
+  distributionPathSegmentIds: number[];
   outsideServiceRadius: boolean;
   demandKw: number;
   suppliedKw: number;
+  gridSuppliedKw: number;
+  emergencySuppliedKw: number;
   supplyRatio: number;
   priority: PowerPriority;
   state: BuildingPowerState;
+  zoneId: number;
+}
+
+export interface InfrastructurePowerLoad {
+  id: string;
+  kind: PowerLoadKind;
+  roadNodeId: number;
+  substationId: string | null;
+  distributionPathSegmentIds: number[];
+  demandKw: number;
+  suppliedKw: number;
+  gridSuppliedKw: number;
+  emergencySuppliedKw: number;
+  supplyRatio: number;
+  priority: PowerPriority;
+  state: BuildingPowerState;
+  zoneId: number;
+}
+
+export interface PowerZoneSnapshot {
+  id: number;
+  demandMw: number;
+  suppliedMw: number;
+  availableCapacityMw: number;
+  reserveMw: number;
+  reserveMarginRatio: number;
+  sourceCount: number;
+  substationCount: number;
+  buildingCount: number;
+  blackoutBuildingCount: number;
+  overloadedLineCount: number;
 }
 
 export interface PowerSnapshot {
@@ -137,6 +179,9 @@ export interface PowerSnapshot {
   blackoutBuildingCount: number;
   limitedBuildingCount: number;
   disconnectedBuildingCount: number;
+  infrastructureLoadCount: number;
+  blackoutInfrastructureLoadCount: number;
+  zoneCount: number;
   lastUpdateSimSeconds: number;
 }
 
@@ -151,6 +196,7 @@ export interface GenerationFacilitySnapshot {
   availableOutputMw: number;
   currentOutputMw: number;
   utilization: number;
+  zoneId: number;
 }
 
 export interface ExternalGridConnectionSnapshot {
@@ -162,6 +208,7 @@ export interface ExternalGridConnectionSnapshot {
   maxImportMw: number;
   currentImportMw: number;
   utilization: number;
+  zoneId: number;
 }
 
 export interface SubstationSnapshot {
@@ -179,6 +226,7 @@ export interface SubstationSnapshot {
   sourcePathLength: number;
   sourcePathCapacityMw: number;
   assignedBuildingCount: number;
+  zoneId: number;
 }
 
 export interface PowerLineSegmentSnapshot {
@@ -190,6 +238,8 @@ export interface PowerLineSegmentSnapshot {
   currentLoadMw: number;
   loadRatio: number;
   state: PowerLineState;
+  overload: boolean;
+  zoneId: number;
 }
 
 export interface BuildingPowerSnapshot {
@@ -200,7 +250,25 @@ export interface BuildingPowerSnapshot {
   outsideServiceRadius: boolean;
   demandKw: number;
   suppliedKw: number;
+  gridSuppliedKw: number;
+  emergencySuppliedKw: number;
   supplyRatio: number;
   priority: PowerPriority;
   state: BuildingPowerState;
+  zoneId: number;
+}
+
+export interface InfrastructurePowerLoadSnapshot {
+  id: string;
+  kind: PowerLoadKind;
+  roadNodeId: number;
+  substationId: string | null;
+  demandKw: number;
+  suppliedKw: number;
+  gridSuppliedKw: number;
+  emergencySuppliedKw: number;
+  supplyRatio: number;
+  priority: PowerPriority;
+  state: BuildingPowerState;
+  zoneId: number;
 }
