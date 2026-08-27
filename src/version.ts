@@ -62,5 +62,6 @@ import './rendering/FullScreenMenuTuning';
 import './rendering/PowerUiTuning';
 import './rendering/FullScreenMenuAnalyticsTuning';
 import './rendering/FullScreenMenuInteractionTuning';
+import './rendering/PowerFacilityRendering';
 
-export const APP_VERSION = '1.0.23';
+export const APP_VERSION = '1.0.24';
