@@ -60,4 +60,4 @@ import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
 import './rendering/PowerUiTuning';
 
-export const APP_VERSION = '1.0.17';
+export const APP_VERSION = '1.0.18';
