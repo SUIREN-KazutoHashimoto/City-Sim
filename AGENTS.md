@@ -1,6 +1,6 @@
-# City-Sim AI Development Instructions
+# Machi-Sim AI Development Instructions
 
-このファイルは、City-Sim リポジトリでコード変更を行う AI / coding agent 向けのカスタム指示である。
+このファイルは、Machi-Sim リポジトリでコード変更を行う AI / coding agent 向けのカスタム指示である。
 
 これは仕様書ではない。機能仕様・設計の詳細は `doc/` 配下を参照すること。人間向けの標準開発手順は `doc/開発・不具合修正手順.md` にある。本ファイルは、それらを前提として AI が実際に作業するときの判断・実装・検証・報告ルールを定める。
 
@@ -48,7 +48,7 @@
 4. 呼び出し元 / update loop / renderer / Inspector / Dashboard
 5. 必要なら `doc/現行仕様書.md`, `doc/詳細設計書.md`, `doc/開発・不具合修正手順.md`
 
-City-Sim は runtime patch が多いため、基礎 class の実装だけを見て「現在の挙動」と判断してはいけない。
+Machi-Sim は runtime patch が多いため、基礎 class の実装だけを見て「現在の挙動」と判断してはいけない。
 
 ## 3. 新機能実装手順
 
@@ -116,13 +116,13 @@ Runtime patch が向くケース:
 
 ```ts
 const proto = Target.prototype as unknown as Record<string, any>;
-if (!proto.__citySimExamplePatchVNNN) {
+if (!proto.__machiSimExamplePatchVNNN) {
   const previous = proto.method as (...args: any[]) => any;
   proto.method = function patched(this: Record<string, any>, ...args: any[]): any {
     const result = previous.apply(this, args);
     return result;
   };
-  proto.__citySimExamplePatchVNNN = true;
+  proto.__machiSimExamplePatchVNNN = true;
 }
 ```
 
@@ -215,7 +215,7 @@ Recovery / guard は最後の安全網として使えるが、根本原因が別
 - headlight → 直線 / カーブ / 逆方向 / 停車
 - workforce → capacity / 住宅 / visitor headroom / performance
 
-## 5. City-Sim 固有の不変条件
+## 5. Machi-Sim 固有の不変条件
 
 実装時は特に以下を壊さない。
 

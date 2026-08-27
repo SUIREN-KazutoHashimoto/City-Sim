@@ -1,7 +1,7 @@
 Third-Party Software Notices
 ============================
 
-This file contains notices for third-party software included in the distributed City Sim browser application.
+This file contains notices for third-party software included in the distributed Machi-Sim browser application.
 Development-only dependencies that are not redistributed as part of the browser build are not listed here.
 
 three.js
