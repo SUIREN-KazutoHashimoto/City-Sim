@@ -6,6 +6,7 @@ import './generation/RuralIndustryAndDepotTuning';
 import './generation/AgriculturalEstateTuning';
 import './generation/AgriculturalEstateIndexGuard';
 import './generation/CityGenerationRefinement';
+import './generation/PowerFacilityGeneration';
 import './world/WorkforceCoverageTuning';
 import './world/ExternalVisitorSystem';
 import './rendering/HighSpeedCapacityTuning';
@@ -63,4 +64,4 @@ import './rendering/PowerUiTuning';
 import './rendering/FullScreenMenuAnalyticsTuning';
 import './rendering/FullScreenMenuInteractionTuning';
 
-export const APP_VERSION = '1.0.25';
+export const APP_VERSION = '1.0.26';
