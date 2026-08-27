@@ -1,0 +1,50 @@
+name: Feature request
+description: 新機能や改善案を提案します
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提案ありがとうございます。実装案だけでなく、解決したい問題や期待する効果も記載してください。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 解決したい問題
+      description: 現在どのような不便や制約があるかを記載してください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案内容
+      description: 期待する挙動やUI、シミュレーション上の変更を記載してください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 想定する影響範囲
+      description: 都市生成、交通、鉄道、描画、UI、性能など、関係しそうな領域があれば記載してください。
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 代替案
+      description: 検討した別案や既存機能での回避方法があれば記載してください。
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 補足
+      description: 参考画像、資料、ユースケースなどがあれば記載してください。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 確認
+      options:
+        - label: 同様の提案がないか既存Issueを確認しました
+          required: true
