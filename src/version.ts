@@ -61,5 +61,6 @@ import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
 import './rendering/PowerUiTuning';
 import './rendering/FullScreenMenuAnalyticsTuning';
+import './rendering/FullScreenMenuInteractionTuning';
 
-export const APP_VERSION = '1.0.22';
+export const APP_VERSION = '1.0.23';
