@@ -29,6 +29,16 @@ interface GraphicsState {
   viewDistance: number;
 }
 
+export interface FullScreenMenuRuntime {
+  world: World;
+  rail: RailRenderer;
+  controller: FirstPersonController;
+  inspector: UniversalInspector;
+  renderer: THREE.WebGLRenderer;
+  scene: THREE.Scene;
+  camera: THREE.PerspectiveCamera;
+}
+
 const PAGE_SIZE = 120;
 const GRAPHICS_STORAGE = 'city-sim-graphics-v1';
 let latestWorld: World | null = null;
@@ -54,6 +64,17 @@ const taxiPhaseLabel: Record<TaxiPhase, string> = {
 function tryCreateMenu(): void {
   if (menu || !latestWorld || !latestRail || !latestController || !latestInspector || !latestRenderer || !latestScene || !latestCamera) return;
   menu = new FullScreenMenu(latestWorld, latestRail, latestController, latestInspector, latestRenderer, latestScene, latestCamera);
+}
+
+export function registerFullScreenMenuRuntime(runtime: FullScreenMenuRuntime): void {
+  latestWorld = runtime.world;
+  latestRail = runtime.rail;
+  latestController = runtime.controller;
+  latestInspector = runtime.inspector;
+  latestRenderer = runtime.renderer;
+  latestScene = runtime.scene;
+  latestCamera = runtime.camera;
+  tryCreateMenu();
 }
 
 class FullScreenMenu {
@@ -512,16 +533,4 @@ if (!inspectorProto.__citySimFullscreenMenuCaptureV102) {
     latestInspector = this; tryCreateMenu(); return previousUpdate.apply(this, args);
   };
   inspectorProto.__citySimFullscreenMenuCaptureV102 = true;
-}
-
-const rendererProto = THREE.WebGLRenderer.prototype as unknown as AnyHost;
-if (!rendererProto.__citySimFullscreenMenuCaptureV102) {
-  const previousRender = rendererProto.render as AnyMethod;
-  rendererProto.render = function renderAndCapture(this: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera, ...args: any[]): any {
-    if (scene instanceof THREE.Scene && camera instanceof THREE.PerspectiveCamera) {
-      latestRenderer = this; latestScene = scene; latestCamera = camera; tryCreateMenu();
-    }
-    return previousRender.call(this, scene, camera, ...args);
-  };
-  rendererProto.__citySimFullscreenMenuCaptureV102 = true;
 }
