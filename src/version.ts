@@ -57,4 +57,4 @@ import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
 import './rendering/PowerUiTuning';
 
-export const APP_VERSION = '1.0.12';
+export const APP_VERSION = '1.0.13';
