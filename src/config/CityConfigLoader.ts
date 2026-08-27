@@ -1,4 +1,5 @@
 import { DEFAULT_CITY_PLANNING, type CityPlanningOptions } from '../generation/CityPlanning';
+import { DEFAULT_POWER_CONFIG, type PowerConfig } from '../power/PowerTypes';
 
 export type CitySeedSetting = number | 'random';
 
@@ -11,6 +12,7 @@ export interface RuntimeCityConfig {
   agentCapacity: number;
   vehicleCapacity: number;
   planning: CityPlanningOptions;
+  power: PowerConfig;
 }
 
 const DEFAULT_CONFIG: RuntimeCityConfig = {
@@ -22,18 +24,16 @@ const DEFAULT_CONFIG: RuntimeCityConfig = {
   agentCapacity: 60_000,
   vehicleCapacity: 30_000,
   planning: { ...DEFAULT_CITY_PLANNING },
+  power: { ...DEFAULT_POWER_CONFIG },
 };
 
+let loadedPowerConfig: PowerConfig = { ...DEFAULT_POWER_CONFIG };
 const BENCHMARK_SEED_PARAM = 'citysim-seed';
 
-interface BenchmarkSeedGlobal {
-  __CITY_SIM_BENCH_HOLD__?: boolean;
-}
+interface BenchmarkSeedGlobal { __CITY_SIM_BENCH_HOLD__?: boolean; }
 
 function requireFinite(name: string, value: number, min: number, max: number): number {
-  if (!Number.isFinite(value) || value < min || value > max) {
-    throw new Error(`${name} must be between ${min} and ${max}. actual=${value}`);
-  }
+  if (!Number.isFinite(value) || value < min || value > max) throw new Error(`${name} must be between ${min} and ${max}. actual=${value}`);
   return value;
 }
 
@@ -42,17 +42,10 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
   if (!response.ok) throw new Error(`Failed to load city config: ${response.status} ${response.statusText}`);
 
   const raw = await response.json() as Partial<RuntimeCityConfig>;
-  const rawPlanning = raw.planning ?? {};
-  const cfg: RuntimeCityConfig = {
-    ...DEFAULT_CONFIG,
-    ...raw,
-    planning: { ...DEFAULT_CITY_PLANNING, ...rawPlanning },
-  };
+  const rawPlanning = raw.planning ?? {}, rawPower = raw.power ?? {};
+  const cfg: RuntimeCityConfig = { ...DEFAULT_CONFIG, ...raw, planning: { ...DEFAULT_CITY_PLANNING, ...rawPlanning }, power: { ...DEFAULT_POWER_CONFIG, ...rawPower } };
 
-  if (cfg.seed !== 'random' && (!Number.isFinite(cfg.seed) || typeof cfg.seed !== 'number')) {
-    throw new Error(`seed must be a number or "random". actual=${String(cfg.seed)}`);
-  }
-
+  if (cfg.seed !== 'random' && (!Number.isFinite(cfg.seed) || typeof cfg.seed !== 'number')) throw new Error(`seed must be a number or "random". actual=${String(cfg.seed)}`);
   cfg.areaKm2 = requireFinite('areaKm2', cfg.areaKm2, 0.1, 10_000);
   cfg.urbanRatioTarget = requireFinite('urbanRatioTarget', cfg.urbanRatioTarget, 0.01, 0.95);
   cfg.blockSize = requireFinite('blockSize', cfg.blockSize, 20, 500);
@@ -71,48 +64,69 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
   cfg.planning.railInfluenceRadius = requireFinite('planning.railInfluenceRadius', cfg.planning.railInfluenceRadius, 300, 1800);
   cfg.planning.railSubCenterSpurs = cfg.planning.railSubCenterSpurs !== false;
 
+  cfg.power.enabled = cfg.power.enabled !== false;
+  cfg.power.updateIntervalSec = requireFinite('power.updateIntervalSec', cfg.power.updateIntervalSec, 0.25, 3600);
+  cfg.power.demandUpdateIntervalSec = requireFinite('power.demandUpdateIntervalSec', cfg.power.demandUpdateIntervalSec, cfg.power.updateIntervalSec, 3600);
+  cfg.power.thermalPlantCount = Math.floor(requireFinite('power.thermalPlantCount', cfg.power.thermalPlantCount, 0, 32));
+  cfg.power.thermalPlantCapacityMw = requireFinite('power.thermalPlantCapacityMw', cfg.power.thermalPlantCapacityMw, 0, 10_000);
+  cfg.power.solarPlantCount = Math.floor(requireFinite('power.solarPlantCount', cfg.power.solarPlantCount, 0, 128));
+  cfg.power.solarPlantCapacityMw = requireFinite('power.solarPlantCapacityMw', cfg.power.solarPlantCapacityMw, 0, 5000);
+  cfg.power.externalConnectionCount = Math.floor(requireFinite('power.externalConnectionCount', cfg.power.externalConnectionCount, 0, 16));
+  cfg.power.externalGridCapacityMw = requireFinite('power.externalGridCapacityMw', cfg.power.externalGridCapacityMw, 0, 50_000);
+  cfg.power.substationSpacingMeters = requireFinite('power.substationSpacingMeters', cfg.power.substationSpacingMeters, 300, 10_000);
+  cfg.power.substationCapacityMw = requireFinite('power.substationCapacityMw', cfg.power.substationCapacityMw, 0.1, 5000);
+  cfg.power.substationServiceRadiusMeters = requireFinite('power.substationServiceRadiusMeters', cfg.power.substationServiceRadiusMeters, 300, 20_000);
+  cfg.power.lineCapacityHighwayMw = requireFinite('power.lineCapacityHighwayMw', cfg.power.lineCapacityHighwayMw, 0.1, 20_000);
+  cfg.power.lineCapacityArterialMw = requireFinite('power.lineCapacityArterialMw', cfg.power.lineCapacityArterialMw, 0.1, 20_000);
+  cfg.power.lineCapacityCollectorMw = requireFinite('power.lineCapacityCollectorMw', cfg.power.lineCapacityCollectorMw, 0.1, 20_000);
+  cfg.power.lineCapacityLocalMw = requireFinite('power.lineCapacityLocalMw', cfg.power.lineCapacityLocalMw, 0.1, 20_000);
+  cfg.power.lineCapacityPathMw = requireFinite('power.lineCapacityPathMw', cfg.power.lineCapacityPathMw, 0.1, 20_000);
+  cfg.power.sourceFeederCapacityMw = requireFinite('power.sourceFeederCapacityMw', cfg.power.sourceFeederCapacityMw, 0.1, 20_000);
+  cfg.power.tightReserveMarginRatio = requireFinite('power.tightReserveMarginRatio', cfg.power.tightReserveMarginRatio, 0, 2);
+  cfg.power.blackoutSupplyRatio = requireFinite('power.blackoutSupplyRatio', cfg.power.blackoutSupplyRatio, 0, 0.5);
+  cfg.power.criticalEmergencySupplyRatio = requireFinite('power.criticalEmergencySupplyRatio', cfg.power.criticalEmergencySupplyRatio, 0, 1);
+  cfg.power.nominalFrequencyHz = requireFinite('power.nominalFrequencyHz', cfg.power.nominalFrequencyHz, 45, 65);
+  cfg.power.nominalGridVoltageKv = requireFinite('power.nominalGridVoltageKv', cfg.power.nominalGridVoltageKv, 1, 500);
+  cfg.power.serviceVoltageV = requireFinite('power.serviceVoltageV', cfg.power.serviceVoltageV, 100, 1000);
+  cfg.power.frequencyDroopRatio = requireFinite('power.frequencyDroopRatio', cfg.power.frequencyDroopRatio, 0, 0.2);
+  cfg.power.voltageLoadDropPu = requireFinite('power.voltageLoadDropPu', cfg.power.voltageLoadDropPu, 0, 0.25);
+  cfg.power.reactiveVoltageDropPu = requireFinite('power.reactiveVoltageDropPu', cfg.power.reactiveVoltageDropPu, 0, 0.25);
+  cfg.power.phaseImbalanceVoltageDropPu = requireFinite('power.phaseImbalanceVoltageDropPu', cfg.power.phaseImbalanceVoltageDropPu, 0, 0.25);
+  cfg.power.maxZonePhaseShiftDeg = requireFinite('power.maxZonePhaseShiftDeg', cfg.power.maxZonePhaseShiftDeg, 0, 45);
+  cfg.power.lineResistanceOhmPerKm = requireFinite('power.lineResistanceOhmPerKm', cfg.power.lineResistanceOhmPerKm, 0, 10);
+  cfg.power.lineReactanceOhmPerKm = requireFinite('power.lineReactanceOhmPerKm', cfg.power.lineReactanceOhmPerKm, 0, 10);
+  cfg.power.lifelineOnDutyRatio = requireFinite('power.lifelineOnDutyRatio', cfg.power.lifelineOnDutyRatio, 0.05, 1);
+  cfg.power.thermalPlantStaffPer100Mw = requireFinite('power.thermalPlantStaffPer100Mw', cfg.power.thermalPlantStaffPer100Mw, 0.1, 100);
+  cfg.power.solarPlantStaffPer100Mw = requireFinite('power.solarPlantStaffPer100Mw', cfg.power.solarPlantStaffPer100Mw, 0.1, 100);
+  cfg.power.thermalFuelUnitsPerMwh = requireFinite('power.thermalFuelUnitsPerMwh', cfg.power.thermalFuelUnitsPerMwh, 0.001, 10);
+  cfg.power.thermalFuelStorageHours = requireFinite('power.thermalFuelStorageHours', cfg.power.thermalFuelStorageHours, 1, 720);
+  cfg.power.thermalFuelReorderHours = requireFinite('power.thermalFuelReorderHours', cfg.power.thermalFuelReorderHours, 0, cfg.power.thermalFuelStorageHours);
+  cfg.power.thermalFuelEmergencyHours = requireFinite('power.thermalFuelEmergencyHours', cfg.power.thermalFuelEmergencyHours, 0, cfg.power.thermalFuelReorderHours);
+  cfg.power.thermalFuelTruckCapacityUnits = requireFinite('power.thermalFuelTruckCapacityUnits', cfg.power.thermalFuelTruckCapacityUnits, 1, 5000);
+  cfg.power.thermalFuelFleetSize = Math.floor(requireFinite('power.thermalFuelFleetSize', cfg.power.thermalFuelFleetSize, 0, 128));
+  cfg.power.thermalFuelInternalReserveRatio = requireFinite('power.thermalFuelInternalReserveRatio', cfg.power.thermalFuelInternalReserveRatio, 0, 0.95);
+  loadedPowerConfig = { ...cfg.power };
   return cfg;
 }
 
-function benchmarkSeedOverrideEnabled(): boolean {
-  return (globalThis as typeof globalThis & BenchmarkSeedGlobal).__CITY_SIM_BENCH_HOLD__ === true;
-}
+export function getLoadedPowerConfig(): PowerConfig { return { ...loadedPowerConfig }; }
 
+function benchmarkSeedOverrideEnabled(): boolean { return (globalThis as typeof globalThis & BenchmarkSeedGlobal).__CITY_SIM_BENCH_HOLD__ === true; }
 function removeStaleBenchmarkSeedParam(): void {
   if (typeof globalThis.location === 'undefined' || typeof globalThis.history === 'undefined') return;
-  const url = new URL(globalThis.location.href);
-  if (!url.searchParams.has(BENCHMARK_SEED_PARAM)) return;
-  url.searchParams.delete(BENCHMARK_SEED_PARAM);
-  globalThis.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  const url = new URL(globalThis.location.href); if (!url.searchParams.has(BENCHMARK_SEED_PARAM)) return;
+  url.searchParams.delete(BENCHMARK_SEED_PARAM); globalThis.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
-
 function querySeedOverride(): number | null {
   if (typeof globalThis.location === 'undefined') return null;
-  const raw = new URLSearchParams(globalThis.location.search).get(BENCHMARK_SEED_PARAM);
-  if (raw === null) return null;
-
-  // citysim-seed is benchmark-only. BenchmarkHarness sets this sentinel before main.ts runs.
-  // A stale seed left in the URL after a benchmark must never affect a normal city launch.
-  if (!benchmarkSeedOverrideEnabled()) {
-    removeStaleBenchmarkSeedParam();
-    return null;
-  }
-
+  const raw = new URLSearchParams(globalThis.location.search).get(BENCHMARK_SEED_PARAM); if (raw === null) return null;
+  if (!benchmarkSeedOverrideEnabled()) { removeStaleBenchmarkSeedParam(); return null; }
   if (!/^\d+$/.test(raw)) return null;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff ? value >>> 0 : null;
+  const value = Number(raw); return Number.isSafeInteger(value) && value >= 0 && value <= 0xffff_ffff ? value >>> 0 : null;
 }
-
 export function resolveCitySeed(setting: CitySeedSetting): number {
-  const override = querySeedOverride();
-  if (override !== null) return override;
+  const override = querySeedOverride(); if (override !== null) return override;
   if (setting !== 'random') return Math.trunc(setting) >>> 0;
-
-  if (globalThis.crypto?.getRandomValues) {
-    const values = new Uint32Array(1);
-    globalThis.crypto.getRandomValues(values);
-    return values[0] >>> 0;
-  }
-
+  if (globalThis.crypto?.getRandomValues) { const values = new Uint32Array(1); globalThis.crypto.getRandomValues(values); return values[0] >>> 0; }
   return (Date.now() ^ Math.floor(performance.now() * 1000)) >>> 0;
 }

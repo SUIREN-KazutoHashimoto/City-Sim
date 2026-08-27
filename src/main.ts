@@ -11,6 +11,7 @@ import { RailRenderer } from './rendering/RailRenderer';
 import { RailFrameScheduler } from './rendering/RailFrameScheduler';
 import { TrainLiveryOverlay } from './rendering/TrainLiveryOverlay';
 import { VehicleVisualSmoother } from './rendering/VehicleVisualSmoother';
+import { registerFullScreenMenuRuntime } from './rendering/FullScreenMenuTuning';
 import { reserveRailStationClearance } from './generation/RailStationClearance';
 import { loadCityConfig, resolveCitySeed } from './config/CityConfigLoader';
 import { BootScreen } from './boot/BootScreen';
@@ -156,6 +157,7 @@ async function bootstrap(): Promise<void> {
   window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
 
   const inspector = new Inspector(world, gfx, railRenderer, camera, renderer.domElement);
+  registerFullScreenMenuRuntime({ world, rail: railRenderer, controller, inspector, renderer, scene, camera });
   let timeJumping = false;
   const dashboard = new Dashboard(world, world.clock, (seconds) => jumpTime(seconds));
   const performanceMonitor = new PerformanceMonitor(world, renderer);

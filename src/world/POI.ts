@@ -1,5 +1,6 @@
 import { dist2 } from '../core/math';
 import { SpatialHashGrid } from '../core/SpatialHashGrid';
+import { powerCommercialCapacityFactor } from '../power/PowerRuntimeRegistry';
 export enum POICategory { Home = 0, Work = 1, Food = 2, Retail = 3, Leisure = 4, Health = 5, Education = 6, Parking = 7 }
 export interface POI {
   id: number; category: POICategory; x: number; z: number;
@@ -50,19 +51,23 @@ export class POIRegistry {
 
   reserve(id: number): boolean {
     if (id < 0 || id >= this.list.length) return false;
-    const p = this.list[id]; if (p.capacity <= 0 || p.occupancy >= p.capacity) return false;
+    const p = this.list[id], effective = this.effectiveCapacity(p); if (effective <= 0 || p.occupancy >= effective) return false;
     p.occupancy++; this.syncOccupancy(id, p.occupancy); return true;
   }
   release(id: number): void {
     if (id < 0 || id >= this.list.length) return;
     const p = this.list[id]; p.occupancy = Math.max(0, p.occupancy - 1); this.syncOccupancy(id, p.occupancy);
   }
-  hasRoom(id: number): boolean { return id >= 0 && id < this.list.length && this.list[id].capacity > 0 && this.list[id].occupancy < this.list[id].capacity; }
+  hasRoom(id: number): boolean {
+    if (id < 0 || id >= this.list.length) return false;
+    const p = this.list[id], effective = this.effectiveCapacity(p);
+    return effective > 0 && p.occupancy < effective;
+  }
   findBest(category: POICategory, x: number, z: number, wealth: number): number {
     const grid = this.grids.get(category); if (!grid) return -1;
     let bestId = -1, bestCost = Infinity;
     const evaluate = (id: number) => {
-      const p = this.list[id]; if (p.capacity <= 0 || p.occupancy >= p.capacity) return;
+      const p = this.list[id]; if (this.effectiveCapacity(p) <= p.occupancy) return;
       const d2 = dist2(x, z, p.x, p.z), pm = Math.abs(p.priceTier - wealth), cost = d2 + pm * pm * 400 * 400;
       if (cost < bestCost) { bestCost = cost; bestId = id; }
     };
@@ -73,7 +78,7 @@ export class POIRegistry {
     const grid = this.grids.get(category); if (!grid) return -1;
     let bestId = -1, bestD = Infinity;
     const evaluate = (id: number) => {
-      const p = this.list[id]; if (p.capacity <= 0 || p.occupancy >= p.capacity) return;
+      const p = this.list[id]; if (this.effectiveCapacity(p) <= p.occupancy) return;
       const d2 = dist2(x, z, p.x, p.z); if (d2 < bestD) { bestD = d2; bestId = id; }
     };
     grid.queryExpanding(x, z, [300, 800, 2000, 5000, 12000], evaluate, () => bestId >= 0);
@@ -93,6 +98,12 @@ export class POIRegistry {
     }
     this.occupancyMirror = occupancy; this.capacityMirror = capacity;
     return { cellSize: this.cellSize, x, z, priceTier, capacity, category, occupancy };
+  }
+
+  private effectiveCapacity(p: POI): number {
+    if (p.capacity <= 0) return 0;
+    if (p.category !== POICategory.Food && p.category !== POICategory.Retail && p.category !== POICategory.Leisure) return p.capacity;
+    return Math.max(0, Math.floor(p.capacity * powerCommercialCapacityFactor(this, p.buildingId)));
   }
 
   private syncOccupancy(id: number, value: number): void {
