@@ -54,5 +54,6 @@ import './rendering/SunOrientationTuning';
 import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
+import './rendering/PowerUiTuning';
 
-export const APP_VERSION = '1.0.9';
+export const APP_VERSION = '1.0.10';
