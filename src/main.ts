@@ -499,6 +499,9 @@ bootstrap().catch((err: unknown) => {
   boot.fail(message);
   const app = document.getElementById('app');
   if (app) {
-    app.innerHTML = `<pre style="padding:24px;color:#ffb4b4;background:#1a1111;white-space:pre-wrap">City-Sim startup failed\n${message}</pre>`;
+    const errorView = document.createElement('pre');
+    errorView.style.cssText = 'padding:24px;color:#ffb4b4;background:#1a1111;white-space:pre-wrap';
+    errorView.textContent = `City-Sim startup failed\n${message}`;
+    app.replaceChildren(errorView);
   }
 });
