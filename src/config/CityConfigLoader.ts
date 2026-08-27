@@ -66,6 +66,7 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
 
   cfg.power.enabled = cfg.power.enabled !== false;
   cfg.power.updateIntervalSec = requireFinite('power.updateIntervalSec', cfg.power.updateIntervalSec, 0.25, 3600);
+  cfg.power.demandUpdateIntervalSec = requireFinite('power.demandUpdateIntervalSec', cfg.power.demandUpdateIntervalSec, cfg.power.updateIntervalSec, 3600);
   cfg.power.thermalPlantCount = Math.floor(requireFinite('power.thermalPlantCount', cfg.power.thermalPlantCount, 0, 32));
   cfg.power.thermalPlantCapacityMw = requireFinite('power.thermalPlantCapacityMw', cfg.power.thermalPlantCapacityMw, 0, 10_000);
   cfg.power.solarPlantCount = Math.floor(requireFinite('power.solarPlantCount', cfg.power.solarPlantCount, 0, 128));
@@ -93,6 +94,16 @@ export async function loadCityConfig(url = './config/city.json'): Promise<Runtim
   cfg.power.maxZonePhaseShiftDeg = requireFinite('power.maxZonePhaseShiftDeg', cfg.power.maxZonePhaseShiftDeg, 0, 45);
   cfg.power.lineResistanceOhmPerKm = requireFinite('power.lineResistanceOhmPerKm', cfg.power.lineResistanceOhmPerKm, 0, 10);
   cfg.power.lineReactanceOhmPerKm = requireFinite('power.lineReactanceOhmPerKm', cfg.power.lineReactanceOhmPerKm, 0, 10);
+  cfg.power.lifelineRosterReliefRatio = requireFinite('power.lifelineRosterReliefRatio', cfg.power.lifelineRosterReliefRatio, 1, 2.5);
+  cfg.power.thermalPlantStaffPer100Mw = requireFinite('power.thermalPlantStaffPer100Mw', cfg.power.thermalPlantStaffPer100Mw, 0.1, 100);
+  cfg.power.solarPlantStaffPer100Mw = requireFinite('power.solarPlantStaffPer100Mw', cfg.power.solarPlantStaffPer100Mw, 0.1, 100);
+  cfg.power.thermalFuelUnitsPerMwh = requireFinite('power.thermalFuelUnitsPerMwh', cfg.power.thermalFuelUnitsPerMwh, 0.001, 10);
+  cfg.power.thermalFuelStorageHours = requireFinite('power.thermalFuelStorageHours', cfg.power.thermalFuelStorageHours, 1, 720);
+  cfg.power.thermalFuelReorderHours = requireFinite('power.thermalFuelReorderHours', cfg.power.thermalFuelReorderHours, 0, cfg.power.thermalFuelStorageHours);
+  cfg.power.thermalFuelEmergencyHours = requireFinite('power.thermalFuelEmergencyHours', cfg.power.thermalFuelEmergencyHours, 0, cfg.power.thermalFuelReorderHours);
+  cfg.power.thermalFuelTruckCapacityUnits = requireFinite('power.thermalFuelTruckCapacityUnits', cfg.power.thermalFuelTruckCapacityUnits, 1, 5000);
+  cfg.power.thermalFuelFleetSize = Math.floor(requireFinite('power.thermalFuelFleetSize', cfg.power.thermalFuelFleetSize, 0, 128));
+  cfg.power.thermalFuelInternalReserveRatio = requireFinite('power.thermalFuelInternalReserveRatio', cfg.power.thermalFuelInternalReserveRatio, 0, 0.95);
   loadedPowerConfig = { ...cfg.power };
   return cfg;
 }
