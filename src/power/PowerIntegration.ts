@@ -1,5 +1,6 @@
 import { getLoadedPowerConfig } from '../config/CityConfigLoader';
 import { World } from '../world/World';
+import { bindPowerFacilitiesToBuildings } from './PowerFacilityBuildingBinding';
 import { PowerSystem } from './PowerSystem';
 import { registerPowerLifelineFacilities } from './PowerLifelineRuntime';
 import { registerPowerSystem } from './PowerRuntimeRegistry';
@@ -14,6 +15,9 @@ function ensurePower(world: World): PowerSystem {
   let system = systems.get(world);
   if (system) return system;
   system = new PowerSystem(world.city, getLoadedPowerConfig());
+  // Bind logical power assets to real, road-fronting generated Building records before population
+  // assignment and before the renderer builds its normal Building LOD meshes.
+  bindPowerFacilitiesToBuildings(system);
   registerPowerSystem(world.city, system);
   registerPowerLifelineFacilities(system);
   system.update(0, world.clock.totalSeconds, true);
@@ -53,7 +57,7 @@ if (!proto.__citySimPowerSystemP1P5) {
     ensurePower(this).update(dtSec, this.clock.totalSeconds);
   };
 
-  proto.powerSnapshot = function powerSnapshot(this: AnyWorld): PowerSnapshot {
+  proto.powerSnapshot = function powerSnapshot(this: World): PowerSnapshot {
     return ensurePower(this).snapshot();
   };
 
