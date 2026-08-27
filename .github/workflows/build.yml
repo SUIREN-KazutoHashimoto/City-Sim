@@ -3,11 +3,14 @@ name: build
 on:
   push:
     branches:
+      - main
       - develop
-      - 'perf/**'
+      - 'release/*'
   pull_request:
     branches:
+      - main
       - develop
+      - 'release/*'
 
 jobs:
   build:
