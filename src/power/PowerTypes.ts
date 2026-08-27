@@ -28,6 +28,7 @@ export interface PowerConfig {
   lineCapacityCollectorMw: number;
   lineCapacityLocalMw: number;
   lineCapacityPathMw: number;
+  sourceFeederCapacityMw: number;
   tightReserveMarginRatio: number;
   blackoutSupplyRatio: number;
   criticalEmergencySupplyRatio: number;
@@ -41,7 +42,7 @@ export interface PowerConfig {
   maxZonePhaseShiftDeg: number;
   lineResistanceOhmPerKm: number;
   lineReactanceOhmPerKm: number;
-  lifelineRosterReliefRatio: number;
+  lifelineOnDutyRatio: number;
   thermalPlantStaffPer100Mw: number;
   solarPlantStaffPer100Mw: number;
   thermalFuelUnitsPerMwh: number;
@@ -71,6 +72,7 @@ export const DEFAULT_POWER_CONFIG: PowerConfig = {
   lineCapacityCollectorMw: 110,
   lineCapacityLocalMw: 55,
   lineCapacityPathMw: 12,
+  sourceFeederCapacityMw: 600,
   tightReserveMarginRatio: 0.15,
   blackoutSupplyRatio: 0.05,
   criticalEmergencySupplyRatio: 0.35,
@@ -84,7 +86,7 @@ export const DEFAULT_POWER_CONFIG: PowerConfig = {
   maxZonePhaseShiftDeg: 6,
   lineResistanceOhmPerKm: 0.18,
   lineReactanceOhmPerKm: 0.11,
-  lifelineRosterReliefRatio: 1.15,
+  lifelineOnDutyRatio: 0.30,
   thermalPlantStaffPer100Mw: 4.5,
   solarPlantStaffPer100Mw: 1.5,
   thermalFuelUnitsPerMwh: 0.18,

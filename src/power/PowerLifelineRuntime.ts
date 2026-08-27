@@ -6,7 +6,7 @@ import { registerThermalFuelInventory } from './GenerationFuelModel';
 
 const registered = new WeakSet<PowerSystem>();
 
-function concurrentStaffFor(system: PowerSystem, type: GenerationType, maxOutputKw: number): number {
+function rosterStaffFor(system: PowerSystem, type: GenerationType, maxOutputKw: number): number {
   const maxOutputMw = Math.max(0, maxOutputKw / 1000);
   const per100 = type === GenerationType.Thermal
     ? system.config.thermalPlantStaffPer100Mw
@@ -20,19 +20,17 @@ export function registerPowerLifelineFacilities(system: PowerSystem): void {
   registered.add(system);
   const poi = system.city.poi;
   for (const facility of system.generationFacilities) {
-    const concurrentStaff = concurrentStaffFor(system, facility.type, facility.maxOutputKw);
+    const rosterTarget = rosterStaffFor(system, facility.type, facility.maxOutputKw);
+    const concurrentStaff = Math.max(1, Math.ceil(rosterTarget * system.config.lifelineOnDutyRatio));
     const shiftsPerDay = 3;
-    const rosterTarget = Math.max(
-      concurrentStaff * shiftsPerDay,
-      Math.ceil(concurrentStaff * shiftsPerDay * system.config.lifelineRosterReliefRatio),
-    );
     const poiId = poi.add({
       category: POICategory.Work,
       x: facility.x,
       z: facility.z,
       priceTier: 0.48,
-      // POI capacity means simultaneous on-site capacity. The 3-shift roster is tracked separately.
-      capacity: concurrentStaff,
+      // Workplace capacity is the total roster. Only lifelineOnDutyRatio needs to be on duty
+      // for full operational efficiency; the three shifts divide this roster over the day.
+      capacity: rosterTarget,
       buildingId: -1,
     });
     registerLifelineWorkplace(poi, poiId, {
