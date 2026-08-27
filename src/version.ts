@@ -27,6 +27,7 @@ import './traffic/IndustrialLogisticsTuning';
 import './world/WorkplaceProductivityTuning';
 import './traffic/TaxiIntegration';
 import './power/PowerGridCapacityTuning';
+import './power/PowerDeliveryTuning';
 import './power/PowerIntegration';
 import './power/PowerLifelineOperations';
 import './power/LifelineSupplyIntegration';
@@ -60,4 +61,4 @@ import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
 import './rendering/PowerUiTuning';
 
-export const APP_VERSION = '1.0.18';
+export const APP_VERSION = '1.0.19';
