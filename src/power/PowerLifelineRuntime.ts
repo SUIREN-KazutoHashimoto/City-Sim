@@ -21,16 +21,18 @@ export function registerPowerLifelineFacilities(system: PowerSystem): void {
   const poi = system.city.poi;
   for (const facility of system.generationFacilities) {
     const concurrentStaff = concurrentStaffFor(system, facility.type, facility.maxOutputKw);
+    const shiftsPerDay = 3;
     const rosterTarget = Math.max(
-      concurrentStaff * 3,
-      Math.ceil(concurrentStaff * 3 * system.config.lifelineRosterReliefRatio),
+      concurrentStaff * shiftsPerDay,
+      Math.ceil(concurrentStaff * shiftsPerDay * system.config.lifelineRosterReliefRatio),
     );
     const poiId = poi.add({
       category: POICategory.Work,
       x: facility.x,
       z: facility.z,
       priceTier: 0.48,
-      capacity: rosterTarget,
+      // POI capacity means simultaneous on-site capacity. The 3-shift roster is tracked separately.
+      capacity: concurrentStaff,
       buildingId: -1,
     });
     registerLifelineWorkplace(poi, poiId, {
@@ -39,7 +41,7 @@ export function registerPowerLifelineFacilities(system: PowerSystem): void {
       kind: 'power-generation',
       concurrentStaff,
       rosterTarget,
-      shiftsPerDay: 3,
+      shiftsPerDay,
       priority: 0,
     });
     if (facility.type === GenerationType.Thermal) registerThermalFuelInventory(system, facility);

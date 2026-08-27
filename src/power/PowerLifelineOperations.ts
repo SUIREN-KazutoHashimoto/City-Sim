@@ -13,6 +13,8 @@ export interface LifelineGenerationSnapshot {
   workplacePoiId: number | null;
   concurrentStaffTarget: number;
   rosterTarget: number;
+  assignedStaff: number;
+  scheduledStaff: number;
   presentStaff: number;
   staffingFactor: number;
   fuelFactor: number;
@@ -30,12 +32,35 @@ function stateOf(system: PowerSystem): RuntimeState {
   return state;
 }
 
-function staffingFactor(system: PowerSystem, facilityId: string): { poiId: number | null; concurrent: number; roster: number; present: number; factor: number } {
+function staffingFactor(system: PowerSystem, facilityId: string): {
+  poiId: number | null;
+  concurrent: number;
+  roster: number;
+  assigned: number;
+  scheduled: number;
+  present: number;
+  factor: number;
+} {
   const spec = lifelineWorkplaceForKey(system.city.poi, `power-generation:${facilityId}`);
-  if (!spec) return { poiId: null, concurrent: 0, roster: 0, present: 0, factor: 1 };
+  if (!spec) return { poiId: null, concurrent: 0, roster: 0, assigned: 0, scheduled: 0, present: 0, factor: 1 };
   const staffing = workplaceStaffingForPoi(system.city.poi, spec.poiId);
-  const factor = spec.concurrentStaff > 0 ? clamp01(staffing.present / spec.concurrentStaff) : 1;
-  return { poiId: spec.poiId, concurrent: spec.concurrentStaff, roster: spec.rosterTarget, present: staffing.present, factor };
+
+  // Critical infrastructure must not collapse during initial population/commute setup.
+  // Once staffing has been initialized, scheduled roster coverage is the operational measure;
+  // physical presence remains diagnostic until the simulation has a dedicated absence model.
+  const factor = !staffing.initialized || spec.concurrentStaff <= 0
+    ? 1
+    : clamp01(staffing.scheduled / spec.concurrentStaff);
+
+  return {
+    poiId: spec.poiId,
+    concurrent: spec.concurrentStaff,
+    roster: spec.rosterTarget,
+    assigned: staffing.assigned,
+    scheduled: staffing.scheduled,
+    present: staffing.present,
+    factor,
+  };
 }
 
 declare module './PowerSystem' {
@@ -46,7 +71,7 @@ declare module './PowerSystem' {
 }
 
 const proto = PowerSystem.prototype as unknown as Record<string, any>;
-if (!proto.__citySimPowerLifelineOperationsV1015) {
+if (!proto.__citySimPowerLifelineOperationsV1016) {
   const previousAvailable = proto.updateAvailableGeneration as AnyMethod;
   proto.updateAvailableGeneration = function updateAvailableGenerationWithLifelineStaffing(this: PowerSystem, totalSimSeconds: number): void {
     previousAvailable.call(this, totalSimSeconds);
@@ -85,6 +110,8 @@ if (!proto.__citySimPowerLifelineOperationsV1015) {
         workplacePoiId: staff.poiId,
         concurrentStaffTarget: staff.concurrent,
         rosterTarget: staff.roster,
+        assignedStaff: staff.assigned,
+        scheduledStaff: staff.scheduled,
         presentStaff: staff.present,
         staffingFactor: staff.factor,
         fuelFactor: fuel,
@@ -93,5 +120,5 @@ if (!proto.__citySimPowerLifelineOperationsV1015) {
     });
   };
 
-  proto.__citySimPowerLifelineOperationsV1015 = true;
+  proto.__citySimPowerLifelineOperationsV1016 = true;
 }
