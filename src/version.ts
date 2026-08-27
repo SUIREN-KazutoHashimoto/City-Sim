@@ -66,5 +66,6 @@ import './rendering/FullScreenMenuInteractionTuning';
 import './rendering/PowerFacilityBuildingVisualTuning';
 import './rendering/PowerFacilityJumpTuning';
 import './rendering/CityDiagnosticOverlay';
+import './rendering/CityDiagnosticOverlayColorFix';
 
-export const APP_VERSION = '1.1.2';
+export const APP_VERSION = '1.1.3';
