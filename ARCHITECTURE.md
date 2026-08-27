@@ -1,8 +1,8 @@
 # City-Sim Architecture
 
-This document summarizes the current implementation at `v0.1.83`. **Source code is authoritative.** Historical phase documents are kept under `doc/archive/` and are not current architecture specifications.
+> Target: `develop` / synchronized at v1.0.30 / 2026-08-27. **Source code is authoritative.** Historical phase documents under `doc/archive/` are not current architecture specifications.
 
-## Runtime overview
+## 1. Runtime overview
 
 ```text
 main.ts
@@ -14,6 +14,7 @@ main.ts
   │   ├─ RoadNetwork / SidewalkNetwork
   │   ├─ VehicleStore / TrafficSystem / SignalSystem
   │   ├─ BusSystem / TaxiSystem / LogisticsSystem
+  │   ├─ PowerSystem
   │   ├─ Agent / Pedestrian / POI worker pools
   │   └─ rail-passenger integration
   ├─ RailNetworkPlan
@@ -21,220 +22,223 @@ main.ts
   ├─ EnhancedRenderer -> InstancedRenderer
   ├─ External high-speed rail subsystem
   ├─ UniversalInspector / Dashboard / PerformanceMonitor
+  ├─ FullScreenMenu + analytics / interaction / power extensions
   ├─ render filters / UI window management
   └─ FirstPersonController
 
 version.ts
-  └─ current runtime tuning import chain
+  └─ current runtime tuning import chain + APP_VERSION
 ```
 
-`src/version.ts` is not only a version constant. It is also the explicit import entry for many runtime tuning modules. Import order can therefore change behavior.
+`src/version.ts` is both version metadata and an explicit import entry for runtime tuning modules. Prototype wrappers are order-sensitive, so import order is part of the effective runtime specification.
 
-## Startup and time model
+## 2. Startup and ownership
 
-1. `CityConfigLoader` reads `/config/city.json`, validates ranges, and resolves the seed.
-2. `World` constructs the city and runs procedural generation.
-3. Runtime tuning layers refine generation, traffic, logistics, workplace status, rendering, and UI.
-4. The loading screen keeps the normal simulation running during pre-roll so visible startup begins from a stabilized morning state.
-5. Simulation time and `requestAnimationFrame` are decoupled. High time scales may batch simulation work and reduce render cadence while backlog exists.
-6. Conventional rail uses its own frame budget/backlog handling.
+1. `CityConfigLoader` reads `/config/city.json`, merges defaults and validates ranges.
+2. `CityGenerator` builds planning, roads, blocks/parcels, buildings and POIs.
+3. Generation tunings refine urban footprint, rural industry, agriculture, station clearance, parks and power-facility building reservations.
+4. `World` initializes citizens, transport systems, logistics and power integration.
+5. Pre-roll advances the normal simulation before the visible start.
+6. Static rendering, rail, dynamic meshes, Inspector and UI are created.
+7. Simulation time is decoupled from `requestAnimationFrame`; high speeds use batching/backlog control.
 
-## Data ownership
+Large citizen and road-vehicle state uses SoA TypedArrays. SharedArrayBuffer is used when cross-origin isolation is available.
 
-Large citizen and road-vehicle state uses SoA TypedArrays. SharedArrayBuffer is used when the environment supports cross-origin isolation, allowing worker pools to avoid cloning the full population.
+`World` coordinates high-level behavior, POI reservations, transport transitions and system integration. Specialized runtimes keep side data when forcing all state into AgentStore or VehicleStore would make the base stores too wide.
 
-`World` coordinates citizen decisions, POI reservations, walking/driving/bus/taxi transitions, activities and logistics hooks. Rail passenger integration is attached through bridge/sidecar state rather than placing all rail-specific fields in the base AgentStore.
+## 3. City generation
 
-`RailRenderer` still mixes rail operational and rendering responsibilities. This is current technical debt.
+The base pipeline is:
 
-## City generation
+```text
+CityPlanning
+→ hierarchical RoadNetwork
+→ Block / Parcel
+→ Building / POI
+→ facility / park planning
+→ generation refinement layers
+```
 
-The base generator creates city planning, hierarchical roads, blocks/parcels, buildings, POIs and facilities. Runtime generation tuning then adds or refines:
+Important refinement layers include:
 
-- urban-footprint guards;
-- height/use diversity;
-- density-aware local-road variation;
-- rural industry and fleet depots;
-- multi-block agricultural estates;
-- final station-area building clearance;
-- final park quotas by surrounding height tier.
+- `UrbanFootprintBaseline`
+- `CityDiversityTuning`
+- `ParkPriorityTuning`
+- `UrbanFootprintGuard`
+- `RuralIndustryAndDepotTuning`
+- `AgriculturalEstateTuning`
+- `AgriculturalEstateIndexGuard`
+- `CityGenerationRefinement`
+- `PowerFacilityGeneration`
 
-Road hierarchy is:
+Road hierarchy:
 
 ```text
 Highway > Arterial > Collector > Local > Path
 ```
 
-Arterials are multi-lane by default: CBD/Commercial can use three lanes per direction and other areas two. High-density Collectors may use two lanes per direction; lower-density Collectors and Locals are normally one lane per direction.
+Arterials and high-density Collectors can be multi-lane. Lower-density areas reduce Local-road density.
 
-### Parks
+### 3.1 Parks and station clearance
 
-`planning.parkRatio` is an early planning input, not the final park count. The current final pass limits retained parks approximately to:
+`planning.parkRatio` is an early planning input. A final pass removes excess parks by surrounding height tier; it does not create missing parks to reach a quota.
 
-- high/super-high-rise surroundings: 2% of classified blocks;
-- mid-rise surroundings: 1%;
-- low-rise surroundings: 5%.
+Rail/station clearance has two responsibilities:
 
-The final pass only removes excess generated parks; it does not manufacture parks to fill a quota.
+- physical rail-envelope clearance;
+- final station-centered no-building clearance.
 
-### Station-area clearance
+Production/facility registries are synchronized if a building is retired by the final pass.
 
-Two concepts coexist:
+### 3.2 Rural industry and agriculture
 
-1. rail-envelope clearance removes objects that physically interfere with the running railway/station geometry;
-2. the final generation refinement enforces a no-building radius around every station.
+Rural generation provides taxi/bus/freight depots and physical production sites. Farms are multi-block estates with separate cultivated-field extent and road-access/logistics coordinates.
 
-Current final radius before adding the building half-diagonal:
-
-- Central / SubCenter: 78 m
-- Local / Terminal: 56 m
-
-Production sites and facility records whose buildings are retired by this final clearance are removed from their corresponding runtime registries.
-
-### Rural industry and agriculture
-
-The rural industry layer creates:
-
-- taxi depot;
-- bus depot;
-- freight depot;
-- farm / raw-factory / processor / assembler production sites.
-
-Agricultural estates convert legacy small farm sites into larger multi-block land-use areas. A farm contains a field, office and warehouse, and public roads are suppressed through the farm interior. The final refinement may expand the field further where road/building/farm collision checks allow it.
-
-For farms, field coordinates are separate from logistics coordinates: trucks load at the warehouse/access side, while production capacity and rendering use the cultivated field extent.
-
-## Workplace and production model
-
-Workplace attendance distinguishes three numbers:
-
-- **present**: assigned workers currently `Engaged` at their work POI;
-- **assigned**: residents whose `workPOI` points to that workplace;
-- **capacity**: Work POI capacity.
-
-Production-site efficiency is:
-
-```text
-efficiency = present / capacity
-actual process rate = base process rate × efficiency
-```
-
-Farm base process rate is derived from cultivated area, so two equally staffed farms can still have different absolute output if their field sizes differ.
-
-The physical supply chain is:
+The physical production chain is:
 
 ```text
 farm / raw-factory
-        ↓ stage 0
+        ↓
 processor
-        ↓ stage 1
+        ↓
 assembler
-        ↓ stage 2
+        ↓
 Retail / Food or city-gate export
 ```
 
-No general money/price/profit economy is currently modeled for these workplaces.
+This is a physical inventory/logistics model, not a full money/price/profit economy.
 
-## Road mobility
+### 3.3 Power facilities as normal buildings
 
-Cars, trucks, buses and taxis use RoadNetwork and TrafficSystem. Signals, pedestrian conflicts and IDM-style following remain part of the base traffic logic.
+`PowerFacilityGeneration` runs during city generation, before World population bootstrap. It selects already generated, road-fronting Buildings while excluding reserved special facilities, production sites and fleet depots.
 
-### Multi-lane traffic
+Selected Buildings are converted to one of:
 
-`MultiLaneTrafficTuning` adds lane assignment/lane changes and turn-lane behavior. `TurningLaneTransitionFix` separates intersection turn-lane convergence from ordinary downstream lane-count reduction, so a vehicle is not forced to satisfy contradictory lane requirements before a turn.
+- thermal generation;
+- solar generation;
+- substation;
+- external grid connection.
 
-### Turning visualization
+The Building keeps its normal `id`, parcel/frontage, raycast/Inspector/LOD path and receives a dedicated Work POI. Power integration binds logical power assets to these Building records and uses the frontage-side road node for electrical/logistics access.
 
-`TurningVisualPathTuning` changes the displayed pose near an intersection without replacing the logical edge/path model. It connects the actual incoming turn lane to the outgoing lane with a quadratic curve during the first portion of the outgoing edge. This prevents multi-lane turns from visibly side-slipping when the outgoing lane offset changes.
+The renderer does not create a second independent facility at another coordinate. Facility-specific visual details are attached to the same Building: thermal stacks, solar panels, transformer/switchgear details and facility-specific color treatment.
 
-### Pedestrian crossings
+## 4. Workplace and lifeline staffing
 
-`PedestrianCrossingSafetyTuning` keeps vehicle/pedestrian conflict occupancy valid across the whole crossing.
+General workplaces distinguish:
 
-`PedestrianSignalWaitTuning` preserves the pedestrian route on a red signal, lets the pedestrian approach to about 1.15 m from the crossing entry, then holds position until the pedestrian signal and vehicle conflict state permit entry.
+- `present`: scheduled workers physically `Engaged` at the assigned Work POI;
+- `assigned`: residents whose `workPOI` points to the workplace;
+- `capacity`: Work POI capacity.
 
-## Bus network
+Physical production uses workplace efficiency, further multiplied by power operational effects where applicable.
 
-The base `BusSystem` still supplies stop creation and bus runtime state. `ShortBusRouteTuning` replaces normal network construction with short local routes.
+Lifeline workplaces add different semantics:
 
-- old grid lines are split into at least four sections;
-- actual Road A* distance is measured;
-- total cyclic route length is limited to 5,000 m;
-- target length is about 4,600 m;
-- each route runs 3 or 4 buses;
-- routes at least ~3.2 km or with many stops run 4 buses;
-- Central/SubCenter rail feeders are also shortened to the same 5 km limit.
+- `scheduled`: workers whose current shift is active;
+- `onDuty`: scheduled workers who checked in at the workplace during the current shift, plus temporary startup/handover grace;
+- `concurrentStaff`: target simultaneous staffing.
 
-`FleetDepotOperations` keeps bus spawning compatible with the bus depot.
+A worker who actually checked in remains `onDuty` for the same shift during a short meal/break even when not physically inside the POI. A check-in does not carry to another workplace or another shift.
 
-## Taxi service
+Current grace periods:
 
-`TaxiSystem` manages idle, pickup, boarding, occupied and alighting phases. The target fleet is approximately population / 800, clamped to 18–120 and vehicle-store availability.
+- shift handover: 45 simulation minutes;
+- attendance-runtime startup: 60 simulation minutes.
 
-`TaxiIntegration` makes trips of at least 350 m eligible for taxi selection. Choice probability varies by resident wealth, night time, trip distance, fallback state, and visitor purpose. Taxi passengers reuse existing high-level agent states for compatibility, while taxi-specific state is kept in TaxiSystem side data.
+For generation facilities, roster size is the facility workforce capacity. Three shifts schedule that roster; `lifelineOnDutyRatio=0.30` means 30% of the roster on duty is treated as 100% staffing for operational capability. The old “roster = concurrent target × three shifts × relief ratio” model is no longer current.
 
-## Freight logistics
+## 5. Road mobility
 
-`IndustrialLogisticsTuning` replaces simple gate-to-store replenishment when the physical supply-chain runtime is available.
+Cars, trucks, buses and taxis share RoadNetwork and TrafficSystem. Signals, pedestrian conflict handling and IDM-style following remain logical constraints.
 
-Truck fleet size is based on production-site count, clamped to 18–72. Trucks have 240-unit cargo capacity and perform explicit source travel, loading, destination travel, unloading and depot return phases. Final products can replenish Retail/Food POIs or leave through city gates as exports.
+`MultiLaneTrafficTuning` adds lane runtime and turn-lane behavior. `TurningLaneTransitionFix` separates turn-lane requirements from downstream lane-count reduction. `TurningVisualPathTuning` changes displayed pose through intersections without rewriting logical RoadEdge/path state.
 
-## Conventional railway
+Pedestrians preserve their sidewalk route while waiting at a red crossing and resume the same route once signal/conflict conditions allow entry.
 
-Rail planning starts before final city development so station influence can affect land-use planning. After roads exist, railway paths are aligned to the road network.
+## 6. Bus, taxi and freight
 
-`RailRuralStationSpacing` keeps the configured `railStationSpacing` as a base spacing and gradually expands actual planning spacing toward the outskirts. The locality multiplier ranges from roughly 1.0 near the core to 2.0 at the outer radius.
+`ShortBusRouteTuning` rebuilds normal bus topology as short local routes. Actual Road A* cyclic route length is limited to 5 km; routes normally use 3–4 buses.
 
-The railway runtime includes three-trunk-line planning in the standard config, optional sub-center spurs, local/rapid/limited services, right-hand operation, blocks/signals, passing loops, terminal/depot handling, a 15-second timetable quantum and physical passengers.
+`TaxiSystem` owns taxi phases and passenger mappings in side data while remaining compatible with base vehicle/agent state.
 
-The consist-position invariant remains one scalar running distance per train; individual cars are sampled from the same smoothed line around that value.
+`IndustrialLogisticsTuning` operates real trucks between supply-chain sites. Fire-generation fuel delivery is a second truck workflow integrated through `LifelineSupplyIntegration`: internal raw-factory surplus is preferred, otherwise a city gate is used as the import source.
 
-## Station geometry and passengers
+## 7. Power architecture
 
-Visible station architecture follows the final smoothed rail. Platforms, roofs, passenger waiting positions and access routes should not be maintained on independent conflicting trajectories.
+`PowerSystem` owns logical generation, external import, substations, underground line segments, consumers, zones, dispatch and snapshots.
 
-Station equipment includes benches, vending machines, emissive fluorescent fixtures, platform lighting and ceiling-hung departure indicators.
+Road edges are reused as the topology for underground power paths. Cables/poles are not rendered in normal view.
 
-Rail passengers physically walk into the station, use station access geometry, wait on a platform, board an actually stopped train, ride, alight and return to street level. One transfer is currently supported.
+Hard delivery constraints are currently:
 
-## Rendering
+- electrical connectivity / broken line state;
+- online source/substation state;
+- connected Power Zone supply capacity.
 
-`EnhancedRenderer` uses GPU instancing and distance LOD for large urban scenes. Additional rendering tunings cover rural fields, forests, road markings, taxi appearance, signals and render filters.
+Healthy line and substation nameplate ratings are **soft overload diagnostics**, not instantaneous load-shedding caps. Actual flow can exceed rating and set overload flags. A future protection/thermal-trip model can use those flags. This avoids artificial blackouts while a connected zone still has adequate source capacity.
 
-`TreeRoadClearanceTuning` performs a final spatial test against real road segments and suppresses street/forest trees that fall inside road clearance.
+Generation dispatch order is effectively internal generation before external import. Therefore external import is a useful diagnostic signal that available internal generation is below demand in the connected zone.
 
-## Inspector and UI
-
-`UniversalInspector` is extended by runtime tuning modules.
-
-Workplace inspection can show:
+Generation capability is constrained by:
 
 ```text
-workplace type
-present / assigned / capacity
-production or operating efficiency
+base available output
+× staffing factor
+× fuel factor (thermal only)
 ```
 
-Production-site labels distinguish farm, raw factory, processor, assembler and logistics/fleet facilities.
+Fuel stock is consumed from actual thermal generation and replenished only after a fuel truck completes unloading.
 
-Debug/validation UI includes the statistics HUD, time/speed dashboard, render filter, Performance Monitor and pinned tracking information. Window position/size/visibility persistence is handled by the UI tuning layer.
+## 8. Railway
 
-## Performance principles
+Rail planning starts early enough for station influence to affect city development. Running lines are aligned to the road network after roads exist.
+
+`RailRuralStationSpacing` treats configured spacing as a base and expands it gradually toward the outskirts.
+
+Rail runtime includes local/rapid/limited services, right-hand operation, blocks/signals, passing/terminal/depot behavior, deadhead operation, a 15-second timetable quantum and physical passengers.
+
+`RailRenderer` still mixes some operational and rendering responsibility and remains architectural debt.
+
+## 9. Rendering and UI
+
+`EnhancedRenderer` uses GPU instancing and distance LOD. Normal Building rendering is authoritative for all ordinary and power-facility Buildings.
+
+The F10 menu is layered:
+
+- `FullScreenMenuTuning`: base lists/settings shell;
+- `PowerUiTuning`: power tab and building power annotations;
+- `FullScreenMenuAnalyticsTuning`: metric cards and lightweight SVG/CSS charts;
+- `FullScreenMenuInteractionTuning`: truck tab, normalized train analytics and jump fixes;
+- `PowerFacilityJumpTuning`: power-row jump resolution through Building binding;
+- `PowerFacilityBuildingVisualTuning`: power-specific detail geometry and Inspector labeling.
+
+Current menu surfaces include buildings, cars, buses, taxis, trucks, trains, power and graphics settings. Jump actions resolve the actual simulation entity/Building before moving the camera.
+
+Power analytics records one sample per simulation minute, keeps up to 120 samples and draws the recent demand/supply/internal-generation/external-import series without an external chart library.
+
+## 10. Performance principles
 
 - SoA TypedArrays
-- SharedArrayBuffer and worker pools where available
+- SharedArrayBuffer / worker pools where available
 - GPU instancing
 - distance LOD
 - spatial indexes
 - A* route cache
 - active/dirty-set clearing
 - separate simulation/render/rail budgets and instrumentation
+- topology/consumer/path caches in the power system
 
-## Known architectural debt
+## 11. Known architectural debt
 
 - `RailRenderer` still mixes operations and rendering.
 - Prototype-patch behavior is import-order dependent.
-- `src/version.ts` is both version metadata and a runtime patch entrypoint.
-- Taxi passenger compatibility currently reuses bus-like base AgentState values.
-- Some final-generation tuning removes/reclassifies data after earlier generation phases rather than using one unified reservation model.
-- Physical production exists, but a full monetary economy is not yet modeled.
+- `src/version.ts` is both version metadata and runtime patch entrypoint.
+- Several UI extensions discover/augment the F10 DOM instead of sharing one typed menu registry.
+- Some final-generation tuning reclassifies existing generated Buildings rather than using a single unified reservation planner.
+- Power overload is currently diagnostic; time-dependent thermal protection/trip behavior is not yet modeled.
+- Physical production exists, but a full monetary economy is not implemented.
+
+## 12. Planned architecture
+
+The next major diagnostic layer is a common city overlay system. `ROADMAP.md` defines the planned OverlayManager and traffic/power-first rollout. It is intentionally not documented here as current behavior until implementation lands.
