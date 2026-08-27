@@ -21,6 +21,7 @@
   "power": {
     "enabled": true,
     "updateIntervalSec": 5,
+    "demandUpdateIntervalSec": 15,
     "thermalPlantCount": 2,
     "thermalPlantCapacityMw": 350,
     "solarPlantCount": 3,

@@ -29,6 +29,7 @@ import './traffic/TaxiIntegration';
 import './power/PowerIntegration';
 import './power/PowerQualityIntegration';
 import './power/PowerOperationalIntegration';
+import './power/PowerPerformanceTuning';
 import './traffic/TaxiCruisingTuning';
 import './world/VisitorTaxiFallbackTuning';
 import './world/PedestrianCrossingSafetyTuning';
@@ -56,4 +57,4 @@ import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
 import './rendering/PowerUiTuning';
 
-export const APP_VERSION = '1.0.10';
+export const APP_VERSION = '1.0.11';

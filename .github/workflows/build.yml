@@ -26,6 +26,8 @@ jobs:
         run: npm ci
       - name: TypeScript and Vite build
         run: npm run build
+      - name: Power phase 12 stress benchmark
+        run: npm run bench:power
       - name: Verify legal files in distribution
         run: |
           test -s dist/LICENSE
