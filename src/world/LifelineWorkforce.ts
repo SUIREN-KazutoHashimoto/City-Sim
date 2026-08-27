@@ -53,7 +53,9 @@ export function registerLifelineWorkplace(
 ): LifelineWorkplaceSpec {
   const shifts = Math.max(1, Math.floor(registration.shiftsPerDay ?? 3));
   const concurrentStaff = Math.max(1, Math.floor(registration.concurrentStaff));
-  const rosterTarget = Math.max(concurrentStaff * shifts, Math.floor(registration.rosterTarget));
+  // rosterTarget is the total employee roster. It is intentionally independent of shift count;
+  // e.g. a 3-shift facility can operate at 100% when roughly 30% of its roster is on duty.
+  const rosterTarget = Math.max(concurrentStaff, Math.floor(registration.rosterTarget));
   const spec: LifelineWorkplaceSpec = {
     poiId,
     key: registration.key,

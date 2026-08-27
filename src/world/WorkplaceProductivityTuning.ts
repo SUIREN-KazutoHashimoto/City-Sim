@@ -3,6 +3,7 @@ import { isWorkTime } from '../agents/UtilityBrain';
 import { supplyChainForPoi, type ProductionSiteRecord } from '../generation/RuralIndustryAndDepotTuning';
 import { powerOperationalFactorForBuilding } from '../power/PowerRuntimeRegistry';
 import { LogisticsSystem } from '../traffic/LogisticsSystem';
+import { lifelineWorkplaceForPoi } from './LifelineWorkforce';
 import { POICategory, type POIRegistry } from './POI';
 import { World } from './World';
 
@@ -68,7 +69,9 @@ function refreshAttendance(world: AnyWorld): void {
   for (let id = 0; id < runtime.present.length; id++) {
     const cap = runtime.capacity[id];
     if (cap <= 0) { runtime.efficiency[id] = 0; continue; }
-    const attendance = Math.max(0, Math.min(1, runtime.present[id] / cap));
+    const lifeline = lifelineWorkplaceForPoi(poi, id);
+    const attendanceTarget = lifeline?.concurrentStaff ?? cap;
+    const attendance = Math.max(0, Math.min(1, runtime.present[id] / Math.max(1, attendanceTarget)));
     const p = poi.get(id);
     const power = p?.buildingId >= 0 ? powerOperationalFactorForBuilding(poi, p.buildingId) : 1;
     runtime.efficiency[id] = attendance * power;

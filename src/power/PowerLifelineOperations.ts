@@ -44,14 +44,11 @@ function staffingFactor(system: PowerSystem, facilityId: string): {
   const spec = lifelineWorkplaceForKey(system.city.poi, `power-generation:${facilityId}`);
   if (!spec) return { poiId: null, concurrent: 0, roster: 0, assigned: 0, scheduled: 0, present: 0, factor: 1 };
   const staffing = workplaceStaffingForPoi(system.city.poi, spec.poiId);
-
-  // Critical infrastructure must not collapse during initial population/commute setup.
-  // Once staffing has been initialized, scheduled roster coverage is the operational measure;
-  // physical presence remains diagnostic until the simulation has a dedicated absence model.
+  // The user's requested operating rule: full efficiency at the on-duty attendance target.
+  // Before attendance tracking has initialized, keep startup generation available.
   const factor = !staffing.initialized || spec.concurrentStaff <= 0
     ? 1
-    : clamp01(staffing.scheduled / spec.concurrentStaff);
-
+    : clamp01(staffing.present / spec.concurrentStaff);
   return {
     poiId: spec.poiId,
     concurrent: spec.concurrentStaff,
@@ -71,7 +68,7 @@ declare module './PowerSystem' {
 }
 
 const proto = PowerSystem.prototype as unknown as Record<string, any>;
-if (!proto.__citySimPowerLifelineOperationsV1016) {
+if (!proto.__citySimPowerLifelineOperationsV1017) {
   const previousAvailable = proto.updateAvailableGeneration as AnyMethod;
   proto.updateAvailableGeneration = function updateAvailableGenerationWithLifelineStaffing(this: PowerSystem, totalSimSeconds: number): void {
     previousAvailable.call(this, totalSimSeconds);
@@ -120,5 +117,5 @@ if (!proto.__citySimPowerLifelineOperationsV1016) {
     });
   };
 
-  proto.__citySimPowerLifelineOperationsV1016 = true;
+  proto.__citySimPowerLifelineOperationsV1017 = true;
 }
