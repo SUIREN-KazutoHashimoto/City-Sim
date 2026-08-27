@@ -48,6 +48,16 @@
     "phaseImbalanceVoltageDropPu": 0.035,
     "maxZonePhaseShiftDeg": 6,
     "lineResistanceOhmPerKm": 0.18,
-    "lineReactanceOhmPerKm": 0.11
+    "lineReactanceOhmPerKm": 0.11,
+    "lifelineRosterReliefRatio": 1.15,
+    "thermalPlantStaffPer100Mw": 4.5,
+    "solarPlantStaffPer100Mw": 1.5,
+    "thermalFuelUnitsPerMwh": 0.18,
+    "thermalFuelStorageHours": 96,
+    "thermalFuelReorderHours": 60,
+    "thermalFuelEmergencyHours": 18,
+    "thermalFuelTruckCapacityUnits": 180,
+    "thermalFuelFleetSize": 10,
+    "thermalFuelInternalReserveRatio": 0.25
   }
 }

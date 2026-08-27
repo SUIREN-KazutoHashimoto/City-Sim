@@ -1,6 +1,7 @@
 import { getLoadedPowerConfig } from '../config/CityConfigLoader';
 import { World } from '../world/World';
 import { PowerSystem } from './PowerSystem';
+import { registerPowerLifelineFacilities } from './PowerLifelineRuntime';
 import { registerPowerSystem } from './PowerRuntimeRegistry';
 import type { PowerSnapshot } from './PowerTypes';
 
@@ -14,6 +15,7 @@ function ensurePower(world: World): PowerSystem {
   if (system) return system;
   system = new PowerSystem(world.city, getLoadedPowerConfig());
   registerPowerSystem(world.city, system);
+  registerPowerLifelineFacilities(system);
   system.update(0, world.clock.totalSeconds, true);
   systems.set(world, system);
   return system;

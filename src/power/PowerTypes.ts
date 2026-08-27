@@ -13,6 +13,7 @@ export enum PowerLoadKind { RoadSignal = 'road-signal', StreetLight = 'street-li
 export interface PowerConfig {
   enabled: boolean;
   updateIntervalSec: number;
+  demandUpdateIntervalSec: number;
   thermalPlantCount: number;
   thermalPlantCapacityMw: number;
   solarPlantCount: number;
@@ -40,11 +41,22 @@ export interface PowerConfig {
   maxZonePhaseShiftDeg: number;
   lineResistanceOhmPerKm: number;
   lineReactanceOhmPerKm: number;
+  lifelineRosterReliefRatio: number;
+  thermalPlantStaffPer100Mw: number;
+  solarPlantStaffPer100Mw: number;
+  thermalFuelUnitsPerMwh: number;
+  thermalFuelStorageHours: number;
+  thermalFuelReorderHours: number;
+  thermalFuelEmergencyHours: number;
+  thermalFuelTruckCapacityUnits: number;
+  thermalFuelFleetSize: number;
+  thermalFuelInternalReserveRatio: number;
 }
 
 export const DEFAULT_POWER_CONFIG: PowerConfig = {
   enabled: true,
   updateIntervalSec: 5,
+  demandUpdateIntervalSec: 15,
   thermalPlantCount: 2,
   thermalPlantCapacityMw: 350,
   solarPlantCount: 3,
@@ -72,6 +84,16 @@ export const DEFAULT_POWER_CONFIG: PowerConfig = {
   maxZonePhaseShiftDeg: 6,
   lineResistanceOhmPerKm: 0.18,
   lineReactanceOhmPerKm: 0.11,
+  lifelineRosterReliefRatio: 1.15,
+  thermalPlantStaffPer100Mw: 4.5,
+  solarPlantStaffPer100Mw: 1.5,
+  thermalFuelUnitsPerMwh: 0.18,
+  thermalFuelStorageHours: 96,
+  thermalFuelReorderHours: 60,
+  thermalFuelEmergencyHours: 18,
+  thermalFuelTruckCapacityUnits: 180,
+  thermalFuelFleetSize: 10,
+  thermalFuelInternalReserveRatio: 0.25,
 };
 
 export interface GenerationFacility {
