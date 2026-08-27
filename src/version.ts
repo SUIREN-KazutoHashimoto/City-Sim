@@ -60,5 +60,6 @@ import './rendering/UiNoiseReduction';
 import './rendering/UiChromeTuning';
 import './rendering/FullScreenMenuTuning';
 import './rendering/PowerUiTuning';
+import './rendering/FullScreenMenuAnalyticsTuning';
 
-export const APP_VERSION = '1.0.20';
+export const APP_VERSION = '1.0.21';
