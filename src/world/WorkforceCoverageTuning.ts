@@ -48,8 +48,10 @@ function staffingTargets(world: AnyWorld): { targets: Int32Array; required: numb
   for (const p of poi.all()) {
     if (p.category !== POICategory.Work || p.capacity <= 0) continue;
     const lifeline = lifelineWorkplaceForPoi(poi, p.id);
+    // For lifelines, POI capacity is the simultaneous on-site headcount, while rosterTarget
+    // intentionally spans all shifts and may be several times larger than POI capacity.
     const target = lifeline
-      ? Math.max(1, Math.min(p.capacity, lifeline.rosterTarget))
+      ? Math.max(1, lifeline.rosterTarget)
       : Math.max(1, Math.ceil(p.capacity * MIN_STAFFING_RATIO));
     targets[p.id] = target;
     required += target;
@@ -207,7 +209,7 @@ function rebalanceAssignments(world: AnyWorld, targets: Int32Array): { assigned:
 }
 
 const proto = World.prototype as unknown as AnyWorld;
-if (!proto.__citySimWorkforceCoverageV1015) {
+if (!proto.__citySimWorkforceCoverageV1016) {
   const previousPopulate = proto.populate as AnyMethod;
   proto.populate = function populateWithWorkforceCoverage(this: AnyWorld, requestedPopulation: number): void {
     const plan = staffingTargets(this);
@@ -241,5 +243,5 @@ if (!proto.__citySimWorkforceCoverageV1015) {
       console.warn('[City-Sim] workforce half-capacity guarantee reached an agent/home capacity limit', result);
     }
   };
-  proto.__citySimWorkforceCoverageV1015 = true;
+  proto.__citySimWorkforceCoverageV1016 = true;
 }

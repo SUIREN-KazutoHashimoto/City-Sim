@@ -1,4 +1,5 @@
 import { AgentState } from '../agents/AgentStore';
+import { isWorkTime } from '../agents/UtilityBrain';
 import { supplyChainForPoi, type ProductionSiteRecord } from '../generation/RuralIndustryAndDepotTuning';
 import { powerOperationalFactorForBuilding } from '../power/PowerRuntimeRegistry';
 import { LogisticsSystem } from '../traffic/LogisticsSystem';
@@ -11,14 +12,20 @@ type AnyMethod = (...args: any[]) => any;
 
 export interface WorkplaceStaffing {
   present: number;
+  scheduled: number;
+  assigned: number;
   capacity: number;
   efficiency: number;
+  initialized: boolean;
 }
 
 interface StaffingRuntime {
   present: Int32Array;
+  scheduled: Int32Array;
+  assigned: Int32Array;
   capacity: Int32Array;
   efficiency: Float32Array;
+  initialized: boolean;
 }
 
 const staffingByPoi = new WeakMap<POIRegistry, StaffingRuntime>();
@@ -28,7 +35,14 @@ const workPoisBySite = new WeakMap<object, number[]>();
 function ensureRuntime(poi: POIRegistry): StaffingRuntime {
   let runtime = staffingByPoi.get(poi);
   if (runtime && runtime.present.length === poi.size) return runtime;
-  runtime = { present: new Int32Array(poi.size), capacity: new Int32Array(poi.size), efficiency: new Float32Array(poi.size) };
+  runtime = {
+    present: new Int32Array(poi.size),
+    scheduled: new Int32Array(poi.size),
+    assigned: new Int32Array(poi.size),
+    capacity: new Int32Array(poi.size),
+    efficiency: new Float32Array(poi.size),
+    initialized: false,
+  };
   for (const p of poi.all()) if (p.category === POICategory.Work && p.capacity > 0) runtime.capacity[p.id] = p.capacity;
   staffingByPoi.set(poi, runtime);
   return runtime;
@@ -38,11 +52,17 @@ function refreshAttendance(world: AnyWorld): void {
   const poi = world.city.poi as POIRegistry;
   const runtime = ensureRuntime(poi);
   runtime.present.fill(0);
+  runtime.scheduled.fill(0);
+  runtime.assigned.fill(0);
   const store = world.store;
+  const hour = world.clock.hourF;
   for (let agent = 0; agent < store.count; agent++) {
     const work = store.workPOI[agent];
     if (work < 0 || work >= runtime.present.length) continue;
-    if (store.state[agent] !== AgentState.Engaged || store.goalPOI[agent] !== work) continue;
+    runtime.assigned[work]++;
+    const scheduled = isWorkTime(store.occupation[agent], store.workStart[agent], store.workEnd[agent], hour);
+    if (scheduled) runtime.scheduled[work]++;
+    if (!scheduled || store.state[agent] !== AgentState.Engaged || store.goalPOI[agent] !== work) continue;
     runtime.present[work]++;
   }
   for (let id = 0; id < runtime.present.length; id++) {
@@ -53,21 +73,44 @@ function refreshAttendance(world: AnyWorld): void {
     const power = p?.buildingId >= 0 ? powerOperationalFactorForBuilding(poi, p.buildingId) : 1;
     runtime.efficiency[id] = attendance * power;
   }
+  runtime.initialized = true;
 }
 
 export function workplaceStaffingForPoi(poi: POIRegistry, poiId: number): WorkplaceStaffing {
   const runtime = ensureRuntime(poi);
-  if (poiId < 0 || poiId >= runtime.present.length) return { present: 0, capacity: 0, efficiency: 0 };
-  return { present: runtime.present[poiId], capacity: runtime.capacity[poiId], efficiency: runtime.efficiency[poiId] };
+  if (poiId < 0 || poiId >= runtime.present.length) {
+    return { present: 0, scheduled: 0, assigned: 0, capacity: 0, efficiency: 0, initialized: runtime.initialized };
+  }
+  return {
+    present: runtime.present[poiId],
+    scheduled: runtime.scheduled[poiId],
+    assigned: runtime.assigned[poiId],
+    capacity: runtime.capacity[poiId],
+    efficiency: runtime.efficiency[poiId],
+    initialized: runtime.initialized,
+  };
 }
 
 export function aggregateWorkplaceStaffing(poi: POIRegistry, poiIds: readonly number[]): WorkplaceStaffing {
-  let present = 0, capacity = 0, effectiveCapacity = 0;
+  let present = 0, scheduled = 0, assigned = 0, capacity = 0, effectiveCapacity = 0;
+  let initialized = poiIds.length > 0;
   for (const id of poiIds) {
     const staffing = workplaceStaffingForPoi(poi, id);
-    present += staffing.present; capacity += staffing.capacity; effectiveCapacity += staffing.capacity * staffing.efficiency;
+    present += staffing.present;
+    scheduled += staffing.scheduled;
+    assigned += staffing.assigned;
+    capacity += staffing.capacity;
+    effectiveCapacity += staffing.capacity * staffing.efficiency;
+    initialized = initialized && staffing.initialized;
   }
-  return { present, capacity, efficiency: capacity > 0 ? Math.max(0, Math.min(1, effectiveCapacity / capacity)) : 0 };
+  return {
+    present,
+    scheduled,
+    assigned,
+    capacity,
+    efficiency: capacity > 0 ? Math.max(0, Math.min(1, effectiveCapacity / capacity)) : 0,
+    initialized,
+  };
 }
 
 function workPoiIdsForSite(poi: POIRegistry, site: ProductionSiteRecord & Record<string, any>): number[] {
