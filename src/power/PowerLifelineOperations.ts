@@ -16,6 +16,7 @@ export interface LifelineGenerationSnapshot {
   assignedStaff: number;
   scheduledStaff: number;
   presentStaff: number;
+  onDutyStaff: number;
   staffingFactor: number;
   fuelFactor: number;
   operationalFactor: number;
@@ -39,16 +40,17 @@ function staffingFactor(system: PowerSystem, facilityId: string): {
   assigned: number;
   scheduled: number;
   present: number;
+  onDuty: number;
   factor: number;
 } {
   const spec = lifelineWorkplaceForKey(system.city.poi, `power-generation:${facilityId}`);
-  if (!spec) return { poiId: null, concurrent: 0, roster: 0, assigned: 0, scheduled: 0, present: 0, factor: 1 };
+  if (!spec) return { poiId: null, concurrent: 0, roster: 0, assigned: 0, scheduled: 0, present: 0, onDuty: 0, factor: 1 };
   const staffing = workplaceStaffingForPoi(system.city.poi, spec.poiId);
-  // The user's requested operating rule: full efficiency at the on-duty attendance target.
-  // Before attendance tracking has initialized, keep startup generation available.
+  // A lifeline employee becomes on-duty after actually checking in at the workplace. Short breaks
+  // during the same shift do not make a plant instantly lose output; missing/no-show staff still do.
   const factor = !staffing.initialized || spec.concurrentStaff <= 0
     ? 1
-    : clamp01(staffing.present / spec.concurrentStaff);
+    : clamp01(staffing.onDuty / spec.concurrentStaff);
   return {
     poiId: spec.poiId,
     concurrent: spec.concurrentStaff,
@@ -56,6 +58,7 @@ function staffingFactor(system: PowerSystem, facilityId: string): {
     assigned: staffing.assigned,
     scheduled: staffing.scheduled,
     present: staffing.present,
+    onDuty: staffing.onDuty,
     factor,
   };
 }
@@ -68,7 +71,7 @@ declare module './PowerSystem' {
 }
 
 const proto = PowerSystem.prototype as unknown as Record<string, any>;
-if (!proto.__citySimPowerLifelineOperationsV1017) {
+if (!proto.__citySimPowerLifelineOperationsV1020) {
   const previousAvailable = proto.updateAvailableGeneration as AnyMethod;
   proto.updateAvailableGeneration = function updateAvailableGenerationWithLifelineStaffing(this: PowerSystem, totalSimSeconds: number): void {
     previousAvailable.call(this, totalSimSeconds);
@@ -110,6 +113,7 @@ if (!proto.__citySimPowerLifelineOperationsV1017) {
         assignedStaff: staff.assigned,
         scheduledStaff: staff.scheduled,
         presentStaff: staff.present,
+        onDutyStaff: staff.onDuty,
         staffingFactor: staff.factor,
         fuelFactor: fuel,
         operationalFactor: staff.factor * fuel,
@@ -117,5 +121,5 @@ if (!proto.__citySimPowerLifelineOperationsV1017) {
     });
   };
 
-  proto.__citySimPowerLifelineOperationsV1017 = true;
+  proto.__citySimPowerLifelineOperationsV1020 = true;
 }
