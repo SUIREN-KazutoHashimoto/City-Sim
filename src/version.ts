@@ -69,4 +69,4 @@ import './rendering/CityDiagnosticOverlay';
 import './rendering/CityDiagnosticOverlayColorFix';
 import './rendering/CityDiagnosticOverlayExpansion';
 
-export const APP_VERSION = '1.1.4';
+export const APP_VERSION = '1.1.5';
