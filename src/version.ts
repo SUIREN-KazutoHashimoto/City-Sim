@@ -69,5 +69,6 @@ import './rendering/CityDiagnosticOverlay';
 import './rendering/CityDiagnosticOverlayColorFix';
 import './rendering/CityDiagnosticOverlayExpansion';
 import './rendering/PerformancePhase1Tuning';
+import './world/PerformanceActiveSetExperiment';
 
-export const APP_VERSION = '1.1.6';
+export const APP_VERSION = '1.1.7';
