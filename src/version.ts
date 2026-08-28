@@ -68,5 +68,6 @@ import './rendering/PowerFacilityJumpTuning';
 import './rendering/CityDiagnosticOverlay';
 import './rendering/CityDiagnosticOverlayColorFix';
 import './rendering/CityDiagnosticOverlayExpansion';
+import './rendering/PerformancePhase1Tuning';
 
-export const APP_VERSION = '1.1.5';
+export const APP_VERSION = '1.1.6';
