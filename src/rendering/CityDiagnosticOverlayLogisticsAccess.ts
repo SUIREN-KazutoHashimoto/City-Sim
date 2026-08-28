@@ -7,7 +7,7 @@ import { VehicleState } from '../traffic/VehicleStore';
 import { POICategory } from '../world/POI';
 import type { World } from '../world/World';
 import {
-  bad, clamp01, cool, muted, setMarker, severityColor, updateMesh, warn,
+  bad, clamp01, muted, setMarker, severityColor, updateMesh, warn,
   type AccessKind, type ExpansionState, type OverlayInternals,
 } from './CityDiagnosticOverlayExpansionCommon';
 
