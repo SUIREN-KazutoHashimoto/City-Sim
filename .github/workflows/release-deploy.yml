@@ -12,7 +12,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: city-sim-release-pages
+  group: machi-sim-release-pages
   cancel-in-progress: false
 
 jobs:
@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          zip -qr "../city-sim-v${{ steps.version.outputs.version }}.zip" .
+          zip -qr "../machi-sim-v${{ steps.version.outputs.version }}.zip" .
 
       - name: Create GitHub Release
         env:
@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           TAG="v${VERSION}"
-          ASSET="city-sim-${TAG}.zip"
+          ASSET="machi-sim-${TAG}.zip"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             TAG_SHA="$(git rev-list -n 1 "$TAG" 2>/dev/null || true)"
@@ -73,9 +73,9 @@ jobs:
             fi
             echo "${TAG} already exists for this commit; reusing it."
           else
-            gh release create "$TAG" "$ASSET#City Sim web build" \
+            gh release create "$TAG" "$ASSET#Machi-Sim web build" \
               --target "$GITHUB_SHA" \
-              --title "City Sim ${TAG}" \
+              --title "Machi-Sim ${TAG}" \
               --generate-notes
           fi
 
