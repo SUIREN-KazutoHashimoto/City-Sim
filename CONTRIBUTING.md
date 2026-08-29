@@ -1,6 +1,6 @@
-# Contributing to City-Sim
+# Contributing to Machi-Sim
 
-City-Simへの貢献に関心を持っていただきありがとうございます。
+Machi-Simへの貢献に関心を持っていただきありがとうございます。
 
 ## 開発の基本方針
 

@@ -1,10 +1,10 @@
-# City-Sim ドキュメント索引
+# Machi-Sim ドキュメント索引
 
 > Target: `develop` / synchronized at v1.0.30 / 2026-08-27
 
 ## 1. 仕様の優先順位
 
-City-Simでは**現行ソースコードを最終的な正**とする。
+Machi-Simでは**現行ソースコードを最終的な正**とする。
 
 ```text
 現行ソースコード

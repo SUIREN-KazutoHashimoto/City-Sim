@@ -1,4 +1,4 @@
-# City-Sim
+# Machi-Sim
 
 TypeScript / three.js / Vite で動作するブラウザ向けリアルタイム都市シミュレーションです。標準構成では100 km²・人口50,000人規模の都市で、市民生活、道路交通、公共交通、産業物流、鉄道、電力を同一のシミュレーション時間上で扱います。
 
@@ -113,4 +113,4 @@ CI相当の確認では `npm ci`、`npm run build`、`npm run bench:power` を�
 
 ## ライセンス
 
-City-Sim は Apache License 2.0 の下で提供します。完全な条件は `LICENSE`、帰属表示は `NOTICE`、第三者ソフトウェアの表示は [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt) を参照してください。
+Machi-Sim は Apache License 2.0 の下で提供します。完全な条件は `LICENSE`、帰属表示は `NOTICE`、第三者ソフトウェアの表示は [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt) を参照してください。
