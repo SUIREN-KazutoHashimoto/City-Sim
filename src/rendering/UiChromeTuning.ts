@@ -1,6 +1,6 @@
 export {};
 
-const COPYRIGHT = '© 2026 City Sim contributors';
+const COPYRIGHT = '© 2026 Machi-Sim contributors';
 const IDENTITY_PATTERN = /v\s*(\d+\.\d+\.\d+)/i;
 
 function enforceIdentity(): void {
@@ -8,7 +8,7 @@ function enforceIdentity(): void {
   if (!(el instanceof HTMLElement)) return;
   const match = (el.textContent ?? '').match(IDENTITY_PATTERN);
   if (!match) return;
-  const desired = `City-Sim v${match[1]} · ${COPYRIGHT}`;
+  const desired = `Machi-Sim v${match[1]} · ${COPYRIGHT}`;
   if (el.textContent !== desired) el.textContent = desired;
 }
 

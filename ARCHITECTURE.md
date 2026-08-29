@@ -1,4 +1,4 @@
-# City-Sim Architecture
+# Machi-Sim Architecture
 
 > Target: `develop` / synchronized at v1.0.30 / 2026-08-27. **Source code is authoritative.** Historical phase documents under `doc/archive/` are not current architecture specifications.
 

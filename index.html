@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Realistic City Simulation</title>
+    <title>Machi-Sim — Realistic City Simulation</title>
     <style>
       html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e13; }
       #app { position: fixed; inset: 0; }
@@ -30,10 +30,10 @@
     <div id="app"></div>
     <div id="clock">booting…</div>
     <div id="hud">booting…</div>
-    <div id="app-version">City-Sim</div>
+    <div id="app-version">Machi-Sim</div>
     <div id="boot-screen" role="status" aria-live="polite">
       <div class="boot-card">
-        <div class="boot-title">CITY SIM</div>
+        <div class="boot-title">MACHI-SIM</div>
         <div id="boot-stage">起動しています</div>
         <div id="boot-detail">都市設定を読み込んでいます</div>
         <div class="boot-progress-row">
@@ -51,7 +51,7 @@
 
       const updateAppIdentity = () => {
         const appVersion = document.getElementById('app-version');
-        if (appVersion) appVersion.textContent = `City-Sim v${APP_VERSION} · © 2026 City Sim contributors`;
+        if (appVersion) appVersion.textContent = `Machi-Sim v${APP_VERSION} · © 2026 Machi-Sim contributors`;
       };
 
       updateAppIdentity();

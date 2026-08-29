@@ -1,6 +1,6 @@
 # Code of Conduct
 
-City-Simでは、Issue、Pull Request、Discussion、レビューその他のプロジェクト上の交流において、建設的で安全なコミュニケーションを求めます。
+Machi-Simでは、Issue、Pull Request、Discussion、レビューその他のプロジェクト上の交流において、建設的で安全なコミュニケーションを求めます。
 
 ## 期待する行動
 
@@ -21,7 +21,7 @@ City-Simでは、Issue、Pull Request、Discussion、レビューその他のプ
 
 ## 適用範囲
 
-この行動規範は、City-Simのリポジトリ内およびプロジェクトを代表して行動する場面に適用されます。
+この行動規範は、Machi-Simのリポジトリ内およびプロジェクトを代表して行動する場面に適用されます。
 
 ## 対応
 

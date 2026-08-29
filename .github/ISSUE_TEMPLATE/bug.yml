@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: 画面に表示されるCity-Simのバージョン、または確認したコミットを記載してください。
+      description: 画面に表示されるMachi-Simのバージョン、または確認したコミットを記載してください。
       placeholder: "例: 1.0.12"
     validations:
       required: true
